@@ -1,8 +1,8 @@
 #pragma once
 #include "actor_context.h"
 #include "actor_result.h"
-#include <functional>
 #include <cassert>
+#include <functional>
 
 namespace coroactors {
 

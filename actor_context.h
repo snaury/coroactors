@@ -1,8 +1,8 @@
 #pragma once
 #include "actor_scheduler.h"
 #include "detail/mailbox.h"
-#include <coroutine>
 #include <cassert>
+#include <coroutine>
 
 namespace coroactors {
 

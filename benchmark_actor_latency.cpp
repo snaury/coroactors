@@ -1,10 +1,10 @@
 #include "actor.h"
 #include "actor_detach.h"
 #include "detail/blocking_queue.h"
-#include <iostream>
-#include <vector>
 #include <deque>
+#include <iostream>
 #include <string>
+#include <vector>
 
 using namespace coroactors;
 

@@ -1,8 +1,8 @@
 #pragma once
 #include <atomic>
+#include <cassert>
 #include <memory>
 #include <utility>
-#include <cassert>
 
 namespace coroactors::detail {
 

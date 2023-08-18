@@ -1,9 +1,10 @@
 #pragma once
 #include <atomic>
-#include <memory>
-#include <thread>
-#include <chrono>
 #include <cassert>
+#include <chrono>
+#include <memory>
+#include <optional>
+#include <thread>
 
 namespace coroactors::detail {
 

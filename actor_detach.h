@@ -1,7 +1,7 @@
 #pragma once
+#include <concepts>
 #include <coroutine>
 #include <exception>
-#include <concepts>
 
 namespace coroactors::detail {
 
@@ -25,7 +25,7 @@ namespace coroactors::detail {
         detach_awaitable_ignore_result_handler() = default;
 
         template<class TArg>
-        void return_value(TArg&& arg) noexcept {
+        void return_value(TArg&&) noexcept {
             // ignore
         }
     };

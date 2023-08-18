@@ -1,7 +1,7 @@
 #pragma once
-#include <variant>
 #include <exception>
 #include <stdexcept>
+#include <variant>
 
 namespace coroactors::detail {
 
