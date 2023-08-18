@@ -72,9 +72,14 @@ namespace coroactors {
             return k;
         }
 
-        void* ptr() const {
-            return impl_.get();
-        }
+        struct reschedule_t {};
+        struct reschedule_locked_t {};
+
+        // When awaited will reschedule current coroutine allowing other code in the same context to run
+        static constexpr reschedule_t reschedule;
+
+        // When awaited will reschedule current coroutine without allowing other code in the same context to run
+        static constexpr reschedule_locked_t reschedule_locked;
 
     private:
         std::shared_ptr<impl> impl_;

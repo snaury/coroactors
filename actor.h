@@ -9,12 +9,6 @@ namespace coroactors {
     template<class T>
     class actor;
 
-    struct reschedule_release_t {};
-    static constexpr reschedule_release_t reschedule_release;
-
-    struct reschedule_no_release_t {};
-    static constexpr reschedule_no_release_t reschedule_no_release;
-
 } // namespace coroactors
 
 namespace coroactors::detail {
@@ -222,7 +216,7 @@ namespace coroactors::detail {
             return TSwitchContextAwaiter{ to, false };
         }
 
-        struct TRescheduleReleaseAwaiter {
+        struct TRescheduleAwaiter {
             bool await_ready() { return false; }
 
             __attribute__((__noinline__))
@@ -232,7 +226,7 @@ namespace coroactors::detail {
                 auto& scheduler = self.context.scheduler();
                 // note: current context is locked
                 auto next = self.context.push(c);
-                assert(!next);
+                assert(!next && "Unexpected continuation from a locked context");
                 next = self.context.pop();
                 if (next) {
                     scheduler.schedule(next);
@@ -244,11 +238,11 @@ namespace coroactors::detail {
             }
         };
 
-        TRescheduleReleaseAwaiter await_transform(reschedule_release_t) noexcept {
-            return TRescheduleReleaseAwaiter{};
+        auto await_transform(actor_context::reschedule_t) noexcept {
+            return TRescheduleAwaiter{};
         }
 
-        struct TRescheduleNoReleaseAwaiter {
+        struct TRescheduleLockedAwaiter {
             bool await_ready() { return false; }
 
             __attribute__((__noinline__))
@@ -264,8 +258,8 @@ namespace coroactors::detail {
             }
         };
 
-        TRescheduleNoReleaseAwaiter await_transform(reschedule_no_release_t) noexcept {
-            return TRescheduleNoReleaseAwaiter{};
+        auto await_transform(actor_context::reschedule_locked_t) noexcept {
+            return TRescheduleLockedAwaiter{};
         }
 
     public:
