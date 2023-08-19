@@ -1,5 +1,5 @@
 #include "actor.h"
-#include "actor_detach.h"
+#include "detach_awaitable.h"
 #include "detail/blocking_queue.h"
 #include <absl/synchronization/mutex.h>
 #include <deque>
