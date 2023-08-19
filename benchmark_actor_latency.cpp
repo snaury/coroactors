@@ -251,7 +251,8 @@ public:
         if (thread_deadline) {
             return TClock::now() >= *thread_deadline;
         }
-        return false;
+        // Don't allow monopolization of non-worker threads
+        return true;
     }
 
 private:

@@ -1,9 +1,14 @@
 #include "with_continuation.h"
-#include "detail/get_awaiter.h"
+#include "actor.h"
+#include "detach_awaitable.h"
+#include "detail/awaiters.h"
 #include <exception>
 #include <functional>
 #include <gtest/gtest.h>
 #include <type_traits>
+#include <deque>
+
+using namespace coroactors;
 
 static thread_local int await_ready_count{ 0 };
 static thread_local int await_suspend_count{ 0 };
@@ -41,7 +46,7 @@ struct with_suspend_hook {
     }
 };
 
-template<class TAwaiter>
+template<detail::awaiter TAwaiter>
 struct autostart_inspect {
     TAwaiter awaiter;
 
@@ -78,8 +83,8 @@ struct autostart_promise {
 
     template<class TAwaitable>
     auto await_transform(TAwaitable&& awaitable) {
-        using TAwaiter = std::remove_reference_t<decltype(coroactors::detail::get_awaiter((TAwaitable&&)awaitable))>;
-        return autostart_inspect<TAwaiter>{ coroactors::detail::get_awaiter((TAwaitable&&)awaitable) };
+        using TAwaiter = std::remove_reference_t<decltype(detail::get_awaiter((TAwaitable&&)awaitable))>;
+        return autostart_inspect<TAwaiter>{ detail::get_awaiter((TAwaitable&&)awaitable) };
     }
 };
 
@@ -89,9 +94,10 @@ struct autostart {
     autostart(std::coroutine_handle<autostart_promise>) {}
 };
 
-autostart run_with_continuation(int* stage, std::function<void(std::coroutine_handle<>)> callback) {
+template<class TCallback>
+autostart run_with_continuation(int* stage, TCallback callback) {
     *stage = 1;
-    co_await coroactors::with_continuation(callback);
+    co_await with_continuation(callback);
     *stage = 2;
 }
 
@@ -140,7 +146,7 @@ TEST(WithContinuationTest, CompleteAsync) {
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(await_suspend_count, 1);
     EXPECT_EQ(await_resume_count, 0);
-    EXPECT_TRUE(continuation);
+    ASSERT_TRUE(continuation);
 
     // Resume
     if (continuation) {
@@ -185,4 +191,115 @@ TEST(WithContinuationTest, CompleteRace) {
     EXPECT_EQ(await_ready_count, 1);
     EXPECT_EQ(await_suspend_count, 1);
     EXPECT_EQ(await_resume_count, 1);
+}
+
+struct test_scheduler : public actor_scheduler {
+    std::deque<std::coroutine_handle<>> queue;
+
+    void schedule(std::coroutine_handle<> h) {
+        queue.push_back(h);
+    }
+
+    void run_next() {
+        auto h = std::move(queue.front());
+        queue.pop_front();
+        h.resume();
+    }
+};
+
+template<class TCallback>
+actor<void> actor_with_continuation(int* stage, TCallback callback) {
+    *stage = 1;
+    co_await with_continuation(callback);
+    *stage = 2;
+}
+
+actor<int> actor_with_result(int result) {
+    co_return result;
+}
+
+TEST(WithContinuationTest, ActorCompleteSync) {
+    int stage = 0;
+    int result = 0;
+
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+
+    // Start the first actor function
+    actor_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+        EXPECT_EQ(stage, 1);
+        c.resume();
+        EXPECT_EQ(stage, 1);
+    }).with(context).detach();
+
+    // It should initially block on context activation
+    EXPECT_EQ(stage, 0);
+    EXPECT_EQ(scheduler.queue.size(), 1);
+
+    // Start another actor function
+    detach_awaitable(
+        actor_with_result(42).with(context),
+        [&](int value) {
+            result = value;
+        });
+
+    // It will be enqueued after the first one
+    EXPECT_EQ(result, 0);
+    ASSERT_EQ(scheduler.queue.size(), 1);
+
+    // Activate the context
+    scheduler.run_next();
+
+    // The first function should complete and transfer to the second one
+    EXPECT_EQ(stage, 2);
+    EXPECT_EQ(result, 42);
+    EXPECT_EQ(scheduler.queue.size(), 0);
+}
+
+TEST(WithContinuationTest, ActorCompleteAsync) {
+    int stage = 0;
+    int result = 0;
+
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+
+    std::coroutine_handle<> continuation;
+
+    // Start the first actor function
+    actor_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+        EXPECT_EQ(stage, 1);
+        continuation = c;
+    }).with(context).detach();
+
+    // It should initially block on context activation
+    EXPECT_EQ(stage, 0);
+    EXPECT_EQ(scheduler.queue.size(), 1);
+
+    // Start another actor function
+    detach_awaitable(
+        actor_with_result(42).with(context),
+        [&](int value) {
+            result = value;
+        });
+
+    // It will be enqueued after the first one
+    EXPECT_EQ(result, 0);
+    ASSERT_EQ(scheduler.queue.size(), 1);
+
+    // Activate the context
+    scheduler.run_next();
+
+    // The first function should be suspended now
+    EXPECT_EQ(stage, 1);
+    ASSERT_TRUE(continuation);
+
+    // However the second function should have started running and completed
+    EXPECT_EQ(result, 42);
+    EXPECT_EQ(scheduler.queue.size(), 0);
+
+    // Resume the continuation, actor should resume and complete
+    continuation.resume();
+
+    EXPECT_EQ(stage, 2);
+    EXPECT_EQ(scheduler.queue.size(), 0);
 }

@@ -1,5 +1,5 @@
 #pragma once
-#include "detail/get_awaiter.h"
+#include "detail/awaiters.h"
 #include <coroutine>
 #include <exception>
 

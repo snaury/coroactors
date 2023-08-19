@@ -6,6 +6,11 @@
 namespace coroactors::detail {
 
     template<class TCallback>
+    concept is_with_continuation_callback = requires(TCallback&& callback, std::coroutine_handle<> c) {
+        { ((TCallback&&) callback)(std::move(c)) } -> std::same_as<void>;
+    };
+
+    template<class TCallback>
     class with_continuation_coroutine;
 
     template<class TCallback>
@@ -17,7 +22,7 @@ namespace coroactors::detail {
     template<class TCallback>
     class with_continuation_promise {
     public:
-        with_continuation_promise(TCallback&& callback)
+        with_continuation_promise(TCallback& callback)
             : callback(callback)
         {}
 
@@ -48,7 +53,7 @@ namespace coroactors::detail {
         auto final_suspend() noexcept { return TFinalSuspend{}; }
 
         bool run_callback(std::coroutine_handle<> c) {
-            callback(std::move(c));
+            std::forward<TCallback>(callback)(std::move(c));
             return continuation.load(std::memory_order_acquire) == reinterpret_cast<void*>(MarkerFinished);
         }
 
@@ -70,7 +75,7 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerFinished = 1;
 
     private:
-        TCallback&& callback;
+        TCallback& callback;
         std::atomic<void*> continuation{ nullptr };
     };
 
@@ -140,7 +145,9 @@ namespace coroactors {
      */
     template<class TCallback>
     detail::with_continuation_coroutine<TCallback>
-    with_continuation(TCallback&& callback) {
+    with_continuation(TCallback&& callback)
+        requires (detail::is_with_continuation_callback<TCallback>)
+    {
         // Note: coroutine binds to the argument and calls callback when awaited
         (void)callback;
         co_return;

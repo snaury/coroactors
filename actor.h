@@ -1,6 +1,8 @@
 #pragma once
 #include "actor_context.h"
 #include "actor_result.h"
+#include "detail/awaiters.h"
+#include "with_resume_callback.h"
 #include <cassert>
 #include <functional>
 #include <utility>
@@ -32,9 +34,16 @@ namespace coroactors::detail {
 
         if (!from) {
             // special case: entering context from outside
+            // We must be careful to never switch directly, because a very
+            // common case might be starting an actor coroutine in some task
+            // group (initial context is empty) which then makes a call and
+            // awaits some other context. This might all happen recursively
+            // from another actor coroutine which will be blocked until all
+            // synchronous parts complete, which might take a very long time.
+            // We cannot detect this recursion right now, so it's safer to
+            // always reschedule continuations.
             c = to.push(c);
             if (c) {
-                // avoid monopolizing unexpected thread or function
                 to.scheduler().schedule(c);
             }
             return std::noop_coroutine();
@@ -161,21 +170,37 @@ namespace coroactors::detail {
             }
         }
 
+        std::coroutine_handle<> start(std::coroutine_handle<> c) noexcept {
+            // Context is normally inherited (and matches continuation_context),
+            // or we are starting a detached coroutine (and both are empty), but
+            // when using with on the actor object context may be different.
+            if (continuation_context == context) {
+                // Transfer directly without context changes
+                return c;
+            }
+
+            // We are switching from continuation context to our context
+            auto saved = continuation_context;
+            return switch_context(std::move(saved), context, c);
+        }
+
+        void detach(std::coroutine_handle<> c) noexcept {
+            if (context) {
+                // Detached with explicit context
+                c = context.push(c);
+                if (c) {
+                    context.scheduler().schedule(c);
+                }
+            } else {
+                c.resume();
+            }
+        }
+
         // Actors can use symmetric transfer of context between coroutines
         template<class U>
         actor<U>&& await_transform(actor<U>&& other) noexcept {
             return (actor<U>&&)other;
         }
-
-#if 0
-        // TODO: need a release/reacquire wrapper here
-        template<class TAwaitable>
-        TAwaitable&& await_transform(TAwaitable&& awaitable) noexcept
-            requires (!std::convertible_to<TAwaitable&&, const actor_context&>)
-        {
-            return (TAwaitable&&)awaitable;
-        }
-#endif
 
         struct TSwitchContextAwaiter {
             const actor_context& to;
@@ -263,6 +288,111 @@ namespace coroactors::detail {
             return TRescheduleLockedAwaiter{};
         }
 
+        std::coroutine_handle<> wrap_restore_context(std::coroutine_handle<> c) {
+            if (!context) {
+                // There is nothing to restore
+                return c;
+            }
+
+            // Generate a wrapped continuation that will restore context on resume
+            return with_resume_callback([this, c]() noexcept -> std::coroutine_handle<> {
+                if (auto next = context.push(c)) {
+                    if (!context.scheduler().preempt()) {
+                        // Run directly unless preempted by scheduler
+                        return next;
+                    }
+                    context.scheduler().schedule(next);
+                }
+                return std::noop_coroutine();
+            });
+        }
+
+        void release_context() {
+            if (context) {
+                if (auto next = context.pop()) {
+                    context.scheduler().schedule(next);
+                }
+            }
+        }
+
+        std::coroutine_handle<> next_from_context() {
+            if (context) {
+                if (auto next = context.pop()) {
+                    return next;
+                }
+            }
+            return std::noop_coroutine();
+        }
+
+        template<detail::awaiter TAwaiter>
+        struct TContextReleaseRestoreAwaiter {
+            TAwaiter awaiter;
+
+            bool await_ready()
+                noexcept(has_noexcept_await_ready<TAwaiter>)
+            {
+                return awaiter.await_ready();
+            }
+
+            __attribute__((__noinline__))
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
+                noexcept(detail::has_noexcept_await_suspend<TAwaiter>)
+                requires (detail::has_await_suspend_void<TAwaiter>)
+            {
+                auto& self = c.promise();
+                auto k = self.wrap_restore_context(c);
+                awaiter.await_suspend(std::move(k));
+                // We still have context locked, move to the next task
+                return self.next_from_context();
+            }
+
+            __attribute__((__noinline__))
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
+                noexcept(detail::has_noexcept_await_suspend<TAwaiter>)
+                requires (detail::has_await_suspend_bool<TAwaiter>)
+            {
+                auto& self = c.promise();
+                auto k = self.wrap_restore_context(c);
+                if (!awaiter.await_suspend(std::move(k))) {
+                    // Awaiter did not suspend, transfer back directly
+                    self.release_context();
+                    return k;
+                }
+                // We still have context locked, move to the next task
+                return self.next_from_context();
+            }
+
+            __attribute__((__noinline__))
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
+                noexcept(detail::has_noexcept_await_suspend<TAwaiter>)
+                requires (detail::has_await_suspend_handle<TAwaiter>)
+            {
+                auto& self = c.promise();
+                auto k = awaiter.await_suspend(self.wrap_restore_context(c));
+                if (k != std::noop_coroutine()) {
+                    // Transfer directly to the task from awaiter
+                    self.release_context();
+                    return k;
+                }
+                // We still have context locked, move to the next task
+                return self.next_from_context();
+            }
+
+            decltype(auto) await_resume()
+                noexcept(detail::has_noexcept_await_resume<TAwaiter>)
+            {
+                return awaiter.await_resume();
+            }
+        };
+
+        template<detail::awaitable TAwaitable>
+        auto await_transform(TAwaitable&& awaitable) noexcept {
+            using TAwaiter = std::remove_reference_t<decltype(detail::get_awaiter((TAwaitable&&) awaitable))>;
+            return TContextReleaseRestoreAwaiter<TAwaiter>{
+                detail::get_awaiter((TAwaitable&&) awaitable)
+            };
+        }
+
     public:
         actor_context context;
 
@@ -298,14 +428,14 @@ namespace coroactors::detail {
         std::coroutine_handle<> await_suspend(actor_continuation<U> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c, c.promise().context);
-            return handle;
+            return p.start(handle);
         }
 
         __attribute__((__noinline__))
         std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c);
-            return handle;
+            return p.start(handle);
         }
 
         detail::rvalue<T> await_resume() {
@@ -375,7 +505,8 @@ namespace coroactors {
         }
 
         void detach() && noexcept {
-            std::exchange(handle, {}).resume();
+            auto& p = handle.promise();
+            return p.detach(std::exchange(handle, {}));
         }
 
     private:
