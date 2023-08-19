@@ -9,13 +9,10 @@
 namespace coroactors::detail {
 
     struct TBlockingQueueWaiter {
-        // This is __cxx_contention_t approximation for clang
-    #ifdef __linux__
-        using TValue = int32_t;
-    #else
-        using TValue = int64_t;
-    #endif
-        std::atomic<TValue> Semaphore{ 0 };
+        using TAtomic = std::atomic_signed_lock_free;
+        using TValue = TAtomic::value_type;
+
+        TAtomic Semaphore{ 0 };
         TBlockingQueueWaiter* Next = nullptr;
 
         void Wait() noexcept {
@@ -111,7 +108,6 @@ namespace coroactors::detail {
             }
         };
 
-
     public:
         TBlockingQueue()
             : TBlockingQueue(new TNode)
@@ -164,10 +160,57 @@ namespace coroactors::detail {
             TBlockingQueueWaiter* pending = nullptr;
             TBlockingQueueWaiter* pendingLast = nullptr;
 
+            int spinCount = 0;
+            std::chrono::high_resolution_clock::time_point spinStart;
+
+            auto shouldSpin = [&]() -> bool {
+                if (spinCount < 64) {
+                    return true;
+                }
+
+                auto now = std::chrono::high_resolution_clock::now();
+                if (spinCount == 64) {
+                    spinStart = now;
+                }
+                auto elapsed = now - spinStart;
+
+                if (elapsed < std::chrono::microseconds(4)) {
+                    return true;
+                }
+
+                if (elapsed < std::chrono::microseconds(64)) {
+                    std::this_thread::yield();
+                    return true;
+                }
+
+                return false;
+            };
+
+            // Prefer relaxed loads to avoid stealing cache line unnecessarily
+            void* headValue = Head.load(std::memory_order_relaxed);
+
             for (;;) {
+                // We want spin for some time and wait for head to unlock
+                if ((!headValue || IsWaiter(headValue)) && shouldSpin()) {
+                    void* updated = Head.load(std::memory_order_relaxed);
+                    if (headValue != updated) {
+                        headValue = updated;
+                        spinCount = 0;
+                    } else {
+                        ++spinCount;
+                    }
+                    continue;
+                }
+
+                // We don't consider outer loop as spinning since it tries to
+                // install this thread as a waiter on lock failure.
+                spinCount = 0;
+
                 // We either lock the queue or remove some existing waiters, and
                 // maybe help an unlocking thread in the process.
-                void* headValue = Head.exchange(nullptr, std::memory_order_acquire);
+                if (headValue) {
+                    headValue = Head.exchange(nullptr, std::memory_order_acquire);
+                }
 
                 // We successfully lock when previous head is not a waiter
                 if (headValue && !IsWaiter(headValue)) {
@@ -231,6 +274,7 @@ namespace coroactors::detail {
                             }
 
                             // Restart by trying to lock the head
+                            headValue = Head.load(std::memory_order_relaxed);
                             break;
                         }
 
@@ -283,6 +327,8 @@ namespace coroactors::detail {
                         pending = local->Next;
                         local->Next = nullptr;
                     }
+
+                    headValue = Head.load(std::memory_order_relaxed);
                 }
             }
         }

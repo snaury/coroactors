@@ -58,15 +58,9 @@ static void BM_PushPop_NoThreads(benchmark::State& state) {
 BENCHMARK(BM_PushPop_NoThreads);
 
 struct BM_PushPop : public benchmark::Fixture {
-    // Same as clang __cxx_contention_t for faster wait/notify
-#ifdef __linux__
-    using TSemaphoreValue = int32_t;
-#else
-    using TSemaphoreValue = int64_t;
-#endif
     struct TState {
         detail::TMailbox<int> Mailbox;
-        std::atomic<TSemaphoreValue> Semaphore{ 0 }; // initially locked
+        std::atomic_signed_lock_free Semaphore{ 0 }; // initially locked
         std::optional<std::thread> Consumer;
         std::atomic<size_t> WakeUps{ 0 };
     };
