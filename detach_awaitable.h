@@ -63,7 +63,7 @@ namespace coroactors::detail {
         {}
 
         template<class TArg>
-        void return_value(TArg&& arg) noexcept {
+        void return_value(TArg&& arg) {
             callback_(std::forward<TArg>(arg));
         }
 

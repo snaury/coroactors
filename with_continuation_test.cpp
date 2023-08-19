@@ -234,7 +234,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
         EXPECT_EQ(stage, 1);
         c.resume();
         EXPECT_EQ(stage, 1);
-    }).with(context).detach();
+    }).with_context(context).detach();
 
     // It should initially block on context activation
     EXPECT_EQ(stage, 0);
@@ -242,7 +242,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(42).with(context),
+        actor_with_result(42).with_context(context),
         [&](int value) {
             result = value;
         });
@@ -273,7 +273,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     actor_with_continuation(&stage, [&](std::coroutine_handle<> c) {
         EXPECT_EQ(stage, 1);
         continuation = c;
-    }).with(context).detach();
+    }).with_context(context).detach();
 
     // It should initially block on context activation
     EXPECT_EQ(stage, 0);
@@ -281,7 +281,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(42).with(context),
+        actor_with_result(42).with_context(context),
         [&](int value) {
             result = value;
         });
