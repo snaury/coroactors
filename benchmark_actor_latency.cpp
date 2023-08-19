@@ -1,6 +1,7 @@
 #include "actor.h"
 #include "actor_detach.h"
 #include "detail/blocking_queue.h"
+#include <absl/synchronization/mutex.h>
 #include <deque>
 #include <iostream>
 #include <string>
@@ -66,9 +67,161 @@ private:
     TPingable& pingable;
 };
 
+template<class T>
+class TBlockingQueueWithAbslMutex {
+public:
+    template<class... TArgs>
+    void Push(TArgs&&... args) {
+        absl::MutexLock l(&Lock);
+        Items.emplace_back(std::forward<TArgs>(args)...);
+    }
+
+    T Pop() {
+        absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::HasItems));
+        T item(std::move(Items.front()));
+        Items.pop_front();
+        return item;
+    }
+
+    std::optional<T> TryPop() {
+        absl::MutexLock l(&Lock);
+        if (!Items.empty()) {
+            std::optional<T> item(std::move(Items.front()));
+            Items.pop_front();
+            return item;
+        }
+        return std::nullopt;
+    }
+
+private:
+    bool HasItems() const {
+        return !Items.empty();
+    }
+
+private:
+    absl::Mutex Lock;
+    std::deque<T> Items;
+};
+
+template<class T>
+class TBlockingQueueWithStdMutex {
+public:
+    template<class... TArgs>
+    void Push(TArgs&&... args) {
+        std::unique_lock l(Lock);
+        Items.emplace_back(std::forward<TArgs>(args)...);
+        // if (Waiters > 0) {
+            NotEmpty.notify_one();
+        // }
+    }
+
+    T Pop() {
+        std::unique_lock l(Lock);
+        if (Items.empty()) {
+            ++Waiters;
+            do {
+                NotEmpty.wait(l);
+            } while (Items.empty());
+            --Waiters;
+        }
+        T item(std::move(Items.front()));
+        Items.pop_front();
+        return item;
+    }
+
+    std::optional<T> TryPop() {
+        std::unique_lock l(Lock);
+        if (!Items.empty()) {
+            std::optional<T> item(std::move(Items.front()));
+            Items.pop_front();
+            return item;
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::mutex Lock;
+    std::condition_variable NotEmpty;
+    std::deque<T> Items;
+    size_t Waiters = 0;
+};
+
+template<class T>
+class TBlockingQueue {
+    struct IBlockingQueue {
+        virtual ~IBlockingQueue() = default;
+        virtual void Push(T) = 0;
+        virtual T Pop() = 0;
+        virtual std::optional<T> TryPop() = 0;
+    };
+
+public:
+    template<class TQueue>
+    void Reset() {
+        struct TProxy
+            : private TQueue
+            , public IBlockingQueue
+        {
+            void Push(T item) override {
+                TQueue::Push(std::move(item));
+            }
+
+            T Pop() override {
+                return TQueue::Pop();
+            }
+
+            std::optional<T> TryPop() override {
+                return TQueue::TryPop();
+            }
+        };
+
+        Impl = std::make_unique<TProxy>();
+    }
+
+    void Push(T item) {
+        Impl->Push(std::move(item));
+    }
+
+    T Pop() {
+        return Impl->Pop();
+    }
+
+    std::optional<T> TryPop() {
+        return Impl->TryPop();
+    }
+
+private:
+    std::unique_ptr<IBlockingQueue> Impl;
+};
+
+enum class ESchedulerQueue {
+    LockFree,
+    AbslMutex,
+    StdMutex,
+};
+
 class TScheduler : public actor_scheduler {
 public:
-    TScheduler(size_t threads) {
+    TScheduler(size_t threads,
+            std::chrono::microseconds preemptUs = std::chrono::microseconds(10),
+            ESchedulerQueue queueType = ESchedulerQueue::LockFree)
+        : PreemptUs(preemptUs)
+    {
+        switch (queueType) {
+            case ESchedulerQueue::LockFree: {
+                Queue.Reset<detail::TBlockingQueue<std::coroutine_handle<>>>();
+                break;
+            }
+            case ESchedulerQueue::AbslMutex: {
+                Queue.Reset<TBlockingQueueWithAbslMutex<std::coroutine_handle<>>>();
+                break;
+            }
+            case ESchedulerQueue::StdMutex: {
+                Queue.Reset<TBlockingQueueWithStdMutex<std::coroutine_handle<>>>();
+                break;
+            }
+        }
+
         for (size_t i = 0; i < threads; ++i) {
             Threads.emplace_back([this]{
                 RunWorker();
@@ -107,14 +260,15 @@ private:
         TTime deadline{};
         thread_deadline = &deadline;
         while (auto c = Queue.Pop()) {
-            deadline = TClock::now() + std::chrono::microseconds(10);
+            deadline = TClock::now() + PreemptUs;
             c.resume();
         }
         thread_deadline = nullptr;
     }
 
 private:
-    detail::TBlockingQueue<std::coroutine_handle<>> Queue;
+    std::chrono::microseconds PreemptUs;
+    TBlockingQueue<std::coroutine_handle<>> Queue;
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };
@@ -188,6 +342,8 @@ int main(int argc, char** argv) {
     int numPingers = 1;
     int numPingables = 1;
     long long count = 10'000'000;
+    std::chrono::microseconds preemptUs(10);
+    ESchedulerQueue queueType = ESchedulerQueue::LockFree;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -212,11 +368,27 @@ int main(int argc, char** argv) {
             count = std::stoi(argv[++i]);
             continue;
         }
+        if ((arg == "--preempt-us") && i + 1 < argc) {
+            preemptUs = std::chrono::microseconds(std::stoi(argv[++i]));
+            continue;
+        }
+        if (arg == "--use-lockfree-queue") {
+            queueType = ESchedulerQueue::LockFree;
+            continue;
+        }
+        if (arg == "--use-absl-mutex") {
+            queueType = ESchedulerQueue::AbslMutex;
+            continue;
+        }
+        if (arg == "--use-std-mutex") {
+            queueType = ESchedulerQueue::StdMutex;
+            continue;
+        }
         std::cerr << "ERROR: unexpected argument: " << argv[i] << std::endl;
         return 1;
     }
 
-    TScheduler scheduler(numThreads);
+    TScheduler scheduler(numThreads, preemptUs, queueType);
     actor_scheduler::set(&scheduler);
 
     std::deque<TPingable> pingables;
