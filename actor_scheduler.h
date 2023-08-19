@@ -20,7 +20,8 @@ namespace coroactors {
          * Returns true when task switch should preempt
          */
         virtual bool preempt() const {
-            return false;
+            // By default we preempt on every context switch
+            return true;
         }
 
     public:

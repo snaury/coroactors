@@ -1,66 +1,38 @@
 #pragma once
 #include <exception>
 #include <stdexcept>
+#include <type_traits>
 #include <variant>
 
 namespace coroactors::detail {
 
-    struct void_t {};
-
-    template<class T>
-    struct maybe_void_impl { using type = T; };
-
-    template<class T>
-    struct lvalue_impl { using type = T&; };
-
-    template<class T>
-    struct rvalue_impl { using type = T&&; };
-
-    template<>
-    struct maybe_void_impl<void> { using type = void_t; };
-
-    template<>
-    struct lvalue_impl<void> { using type = void; };
-
-    template<>
-    struct rvalue_impl<void> { using type = void; };
-
-    template<class T>
-    using maybe_void = typename maybe_void_impl<T>::type;
-
-    template<class T>
-    using lvalue = typename lvalue_impl<T>::type;
-
-    template<class T>
-    using rvalue = typename rvalue_impl<T>::type;
-
-} // namespace coroactors::detail
-
-namespace coroactors {
-
     /**
-     * Encapsulates an actor call result
+     * Encapsulates a result of computation which may fail with an exception
      */
     template<class T>
-    class actor_result {
+    class result {
     public:
         using value_type = T;
 
         void set_value()
-            requires (std::same_as<T, void>)
+            requires (std::is_void_v<T>)
         {
             result_.template emplace<1>();
         }
 
         template<class TArg>
         void set_value(TArg&& arg)
-            requires (!std::same_as<T, void>)
+            requires (!std::is_void_v<T>)
         {
             result_.template emplace<1>(std::forward<TArg>(arg));
         }
 
         void set_exception(std::exception_ptr&& e) noexcept {
             result_.template emplace<2>(std::move(e));
+        }
+
+        explicit operator bool() const {
+            return result_.index() != 0;
         }
 
         bool has_value() const noexcept {
@@ -71,10 +43,10 @@ namespace coroactors {
             return result_.index() == 2;
         }
 
-        detail::lvalue<T> get() {
+        std::add_lvalue_reference_t<T> get() {
             switch (result_.index()) {
                 case 1: {
-                    if constexpr (std::same_as<T, void>) {
+                    if constexpr (std::is_void_v<T>) {
                         return;
                     } else {
                         return std::get<1>(result_);
@@ -87,10 +59,10 @@ namespace coroactors {
             throw std::logic_error("result has no value");
         }
 
-        detail::rvalue<T> take() && {
+        std::add_rvalue_reference_t<T> take() && {
             switch (result_.index()) {
                 case 1: {
-                    if constexpr (std::same_as<T, void>) {
+                    if constexpr (std::is_void_v<T>) {
                         return;
                     } else {
                         return std::get<1>(std::move(result_));
@@ -112,7 +84,9 @@ namespace coroactors {
         }
 
     private:
-        std::variant<std::monostate, detail::maybe_void<T>, std::exception_ptr> result_;
+        struct TVoid {};
+        using TValue = std::conditional_t<std::is_void_v<T>, TVoid, T>;
+        std::variant<std::monostate, TValue, std::exception_ptr> result_;
     };
 
-} // namespace coroactors
+} // namespace coroactors::detail

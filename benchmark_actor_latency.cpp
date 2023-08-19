@@ -276,7 +276,7 @@ private:
 };
 
 template<class T>
-    requires (!std::same_as<T, void>)
+    requires (!std::is_void_v<T>)
 std::vector<T> run_sync(std::vector<actor<T>> actors) {
     std::atomic_signed_lock_free waiting(actors.size());
     std::vector<T> results(actors.size());
@@ -324,7 +324,7 @@ void run_sync(std::vector<actor<void>> actors) {
 }
 
 template<class T>
-    requires (!std::same_as<T, void>)
+    requires (!std::is_void_v<T>)
 T run_sync(actor<T> a) {
     std::vector<actor<T>> actors;
     actors.push_back(std::move(a));

@@ -1,10 +1,11 @@
 #pragma once
 #include "actor_context.h"
-#include "actor_result.h"
 #include "detail/awaiters.h"
+#include "detail/result.h"
 #include "with_resume_callback.h"
 #include <cassert>
 #include <functional>
+#include <type_traits>
 #include <utility>
 
 namespace coroactors {
@@ -91,7 +92,7 @@ namespace coroactors::detail {
     template<class T>
     class actor_result_handler_base {
     public:
-        actor_result<T> result;
+        result<T> result_;
     };
 
     template<class T>
@@ -99,7 +100,7 @@ namespace coroactors::detail {
     public:
         template<class TArg>
         void return_value(TArg&& arg) {
-            this->result.set_value(std::forward<TArg>(arg));
+            this->result_.set_value(std::forward<TArg>(arg));
         }
     };
 
@@ -107,7 +108,7 @@ namespace coroactors::detail {
     class actor_result_handler<void> : public actor_result_handler_base<void> {
     public:
         void return_void() noexcept {
-            this->result.set_value();
+            this->result_.set_value();
         }
     };
 
@@ -122,7 +123,7 @@ namespace coroactors::detail {
             if (!continuation) {
                 std::terminate();
             }
-            this->result.set_exception(std::current_exception());
+            this->result_.set_exception(std::current_exception());
         }
 
         static auto initial_suspend() noexcept { return std::suspend_always{}; }
@@ -438,8 +439,8 @@ namespace coroactors::detail {
             return p.start(handle);
         }
 
-        detail::rvalue<T> await_resume() {
-            return std::move(handle.promise().result).take();
+        std::add_rvalue_reference_t<T> await_resume() {
+            return std::move(handle.promise().result_).take();
         }
 
     private:

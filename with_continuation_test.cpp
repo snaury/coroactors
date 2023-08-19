@@ -196,8 +196,12 @@ TEST(WithContinuationTest, CompleteRace) {
 struct test_scheduler : public actor_scheduler {
     std::deque<std::coroutine_handle<>> queue;
 
-    void schedule(std::coroutine_handle<> h) {
+    void schedule(std::coroutine_handle<> h) override {
         queue.push_back(h);
+    }
+
+    bool preempt() const override {
+        return false;
     }
 
     void run_next() {
