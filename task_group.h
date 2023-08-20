@@ -9,20 +9,44 @@
 namespace coroactors::detail {
 
     /**
-     * A linked list of results
+     * Encapsulates a single result in a task group
      */
     template<class T>
-    struct task_group_result : public result<T> {
-        task_group_result<T>* next = nullptr;
+    class task_group_result : public result<T> {
+    public:
+        task_group_result() noexcept = default;
 
-        ~task_group_result() noexcept {
+    public:
+        size_t index{ size_t(-1) };
+    };
+
+    template<class T>
+    class task_group_sink;
+
+    /**
+     * A node in a linked list of result nodes
+     */
+    template<class T>
+    class task_group_result_node : public task_group_result<T> {
+        friend class task_group_sink<T>;
+
+    public:
+        task_group_result_node() noexcept = default;
+
+        task_group_result_node(const task_group_result_node&) = delete;
+        task_group_result_node& operator=(const task_group_result_node&) = delete;
+
+        ~task_group_result_node() noexcept {
             // Destroy all linked elements while avoiding recursion
             auto* head = std::exchange(next, nullptr);
             while (head) {
-                std::unique_ptr<task_group_result<T>> current(head);
+                std::unique_ptr<task_group_result_node<T>> current(head);
                 head = std::exchange(head->next, nullptr);
             }
         }
+
+    private:
+        task_group_result_node<T>* next{ nullptr };
     };
 
     /**
@@ -31,20 +55,14 @@ namespace coroactors::detail {
      * This class is shared with a shared_ptr
      */
     template<class T>
-    struct task_group_sink {
-        // A linked list of ready results (last result first) or a marker
-        std::atomic<void*> last_ready{ nullptr };
-        // A linked list of ready results removed from the atomic head
-        std::unique_ptr<task_group_result<T>> ready_queue;
-        // Continuation waiting for the next result
-        std::coroutine_handle<> continuation;
+    class task_group_sink {
+    public:
+        task_group_sink() noexcept = default;
 
-        // Signals there is a continuation waiting for the first result
-        static constexpr uintptr_t MarkerAwaiting = 1;
-        // Signals task group is detached and new results will not be consumed
-        static constexpr uintptr_t MarkerDetached = 2;
+        task_group_sink(const task_group_sink&) = delete;
+        task_group_sink& operator=(const task_group_sink&) = delete;
 
-        ~task_group_sink() {
+        ~task_group_sink() noexcept {
             detach();
         }
 
@@ -54,7 +72,7 @@ namespace coroactors::detail {
          * awaited and may be discarded. However we also call detach from
          * destructor to make sure pending results are deallocated.
         */
-        void detach() {
+        void detach() noexcept {
             // Note: detach is usually called from the task group, and it holds
             // a strong reference to the sink. However we also call detach from
             // destructor and usually it's already detached.
@@ -73,7 +91,7 @@ namespace coroactors::detail {
                     continuation = {};
                 } else {
                     // Destroy current linked list of results
-                    std::unique_ptr<task_group_result<T>> head(reinterpret_cast<task_group_result<T>*>(headValue));
+                    std::unique_ptr<task_group_result_node<T>> head(reinterpret_cast<task_group_result_node<T>*>(headValue));
                 }
             }
             // Eagerly destroy ready queue to free unnecessary memory
@@ -84,7 +102,7 @@ namespace coroactors::detail {
          * Pushes a new result to the sink, returns an optional continuation to
          * run next (e.g. an awaiter continuation installed before)
          */
-        std::coroutine_handle<> push(std::unique_ptr<task_group_result<T>>&& result) noexcept {
+        std::coroutine_handle<> push(std::unique_ptr<task_group_result_node<T>>&& result) noexcept {
             void* headValue = last_ready.load(std::memory_order_relaxed);
             for (;;) {
                 if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) {
@@ -106,7 +124,7 @@ namespace coroactors::detail {
                     // Task group is detached, discard all results
                     break;
                 }
-                task_group_result<T>* head = reinterpret_cast<task_group_result<T>*>(headValue);
+                task_group_result_node<T>* head = reinterpret_cast<task_group_result_node<T>*>(headValue);
                 result->next = head;
                 void* nextValue = result.get();
                 // Note: release here synchronizes with acquire in await_resume
@@ -158,14 +176,14 @@ namespace coroactors::detail {
         /**
          * Removes a ready result from the queue, which we know exists.
          */
-        std::unique_ptr<task_group_result<T>> await_resume() noexcept {
-            std::unique_ptr<task_group_result<T>> result;
+        std::unique_ptr<task_group_result_node<T>> await_resume() noexcept {
+            std::unique_ptr<task_group_result_node<T>> result;
             if (!ready_queue) {
                 // Note: acquire here synchronizes with release in push
                 void* headValue = last_ready.exchange(nullptr, std::memory_order_acquire);
                 assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
                 assert(headValue != reinterpret_cast<void*>(MarkerDetached));
-                task_group_result<T>* head = reinterpret_cast<task_group_result<T>*>(headValue);
+                task_group_result_node<T>* head = reinterpret_cast<task_group_result_node<T>*>(headValue);
                 assert(head && "Task group is resuming with an empty queue");
                 while (head) {
                     // We invert the linked list here
@@ -181,6 +199,19 @@ namespace coroactors::detail {
             ready_queue.reset(next);
             return result;
         }
+
+    private:
+        // Signals there is a continuation waiting for the first result
+        static constexpr uintptr_t MarkerAwaiting = 1;
+        // Signals task group is detached and new results will not be consumed
+        static constexpr uintptr_t MarkerDetached = 2;
+
+        // A linked list of ready results (last result first) or a marker
+        std::atomic<void*> last_ready{ nullptr };
+        // A linked list of ready results removed from the atomic head
+        std::unique_ptr<task_group_result_node<T>> ready_queue;
+        // Continuation waiting for the next result
+        std::coroutine_handle<> continuation;
     };
 
     template<class T>
@@ -191,7 +222,7 @@ namespace coroactors::detail {
         }
 
     protected:
-        std::unique_ptr<task_group_result<T>> result_ = std::make_unique<task_group_result<T>>();
+        std::unique_ptr<task_group_result_node<T>> result_ = std::make_unique<task_group_result_node<T>>();
     };
 
     template<class T>
@@ -259,7 +290,8 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return TFinalSuspend{}; }
 
-        void start(const std::shared_ptr<task_group_sink<T>>& sink) {
+        void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
+            this->result_->index = index;
             sink_ = sink;
             active = true;
             task_group_handle<T>::from_promise(*this).resume();
@@ -281,8 +313,8 @@ namespace coroactors::detail {
     public:
         using promise_type = task_group_promise<T>;
 
-        void start(const std::shared_ptr<task_group_sink<T>>& sink) {
-            handle.promise().start(sink);
+        void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
+            handle.promise().start(sink, index);
         }
 
     private:
@@ -310,17 +342,19 @@ namespace coroactors {
     template<class T>
     class task_group {
     public:
-        using result_type = detail::result<T>;
+        using result_type = detail::task_group_result<T>;
         using value_type = T;
 
         task_group() = default;
 
         task_group(task_group&& rhs)
             : sink_(std::move(rhs.sink_))
-            , count_(std::move(rhs.count_))
+            , count_(rhs.count_)
+            , left_(rhs.left_)
         {
             rhs.sink_.reset();
             rhs.count_ = 0;
+            rhs.left_ = 0;
         }
 
         ~task_group() {
@@ -332,28 +366,30 @@ namespace coroactors {
         task_group& operator=(const task_group&) = delete;
 
         /**
-         * Adds a new awaitable to the task group
+         * Adds a new awaitable to the task group and returns its index
          */
         template<class TAwaitable>
-        void add(TAwaitable&& awaitable) {
+        size_t add(TAwaitable&& awaitable) {
             assert(sink_);
+            size_t index = count_++;
             auto coro = detail::make_task_group_coroutine<T>(std::forward<TAwaitable>(awaitable));
-            coro.start(sink_);
-            ++count_;
+            coro.start(sink_, index);
+            ++left_;
+            return index;
         }
 
         /**
          * Returns the number of started and unawaited tasks
          */
-        size_t count() const {
-            return count_;
+        size_t left() const {
+            return left_;
         }
 
         /**
          * Returns true if task group has at least one unawaited task
          */
         explicit operator bool() const {
-            return count_ > 0;
+            return left_ > 0;
         }
 
         /**
@@ -371,8 +407,8 @@ namespace coroactors {
             {}
 
             bool await_ready() noexcept {
-                assert(group.count_ > 0 && "Task group has no tasks to await");
-                --group.count_;
+                assert(group.left_ > 0 && "Task group has no tasks to await");
+                --group.left_;
                 return group.sink_->await_ready();
             }
 
@@ -404,8 +440,8 @@ namespace coroactors {
             {}
 
             bool await_ready() noexcept {
-                assert(group.count_ > 0 && "Task group has no tasks to await");
-                --group.count_;
+                assert(group.left_ > 0 && "Task group has no tasks to await");
+                --group.left_;
                 return group.sink_->await_ready();
             }
 
@@ -433,6 +469,7 @@ namespace coroactors {
     private:
         std::shared_ptr<detail::task_group_sink<T>> sink_ = std::make_shared<detail::task_group_sink<T>>();
         size_t count_ = 0;
+        size_t left_ = 0;
     };
 
 } // namespace coroactors
