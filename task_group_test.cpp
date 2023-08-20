@@ -51,6 +51,16 @@ public:
         std::exchange(handle, {}).resume();
     }
 
+    void resume() {
+        assert(handle);
+        std::exchange(handle, {}).resume();
+    }
+
+    void destroy() {
+        assert(handle);
+        std::exchange(handle, {}).destroy();
+    }
+
 private:
     std::optional<T>* result;
     std::coroutine_handle<> handle;
@@ -127,7 +137,7 @@ struct value_provider {
 enum class EAction {
     AddTask,
     AwaitTask,
-    AwaitTaskSkipErrors,
+    AwaitTaskWrapped,
     AwaitValue,
     Return,
 };
@@ -145,12 +155,14 @@ actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::functio
                 results.push_back(co_await group.next());
                 break;
             }
-            case EAction::AwaitTaskSkipErrors: {
+            case EAction::AwaitTaskWrapped: {
                 auto result = co_await group.next_result();
-                if (!result.has_exception()) {
+                if (result.has_value()) {
                     results.push_back(std::move(result).take());
-                } else {
+                } else if (result.has_exception()) {
                     results.push_back(-1);
+                } else {
+                    results.push_back(-2);
                 }
                 break;
             }
@@ -428,7 +440,7 @@ TEST(TaskGroupTest, ResumeException) {
 
     ASSERT_EQ(provider.queue.size(), 3);
     provider.resume(1);
-    provider.take(); // this task will fail
+    provider.take().resume();
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0);
     ASSERT_TRUE(had_exception);
@@ -438,7 +450,6 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
     size_t last_step = 0;
     value_provider<int> provider;
     std::optional<std::vector<int>> result;
-    bool had_exception = false;
 
     detach_awaitable(
         run_scenario(provider, [&]{
@@ -447,24 +458,50 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
                 return EAction::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTaskSkipErrors;
+                return EAction::AwaitTaskWrapped;
             }
             return EAction::Return;
-        }).result(),
+        }),
         [&](auto&& value) {
-            if (value.has_exception()) {
-                had_exception = true;
-            } else {
-                result = std::move(value).take();
-            }
+            result = std::move(value);
         });
 
     ASSERT_EQ(provider.queue.size(), 3);
     provider.resume(1);
-    provider.take(); // this task will fail
+    provider.take().resume();
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0);
     ASSERT_TRUE(result);
     std::vector<int> expected{ 1, -1, 3 };
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
+    size_t last_step = 0;
+    value_provider<int> provider;
+    std::optional<std::vector<int>> result;
+
+    detach_awaitable(
+        run_scenario(provider, [&]{
+            auto step = ++last_step;
+            if (step <= 3) {
+                return EAction::AddTask;
+            }
+            if (step <= 6) {
+                return EAction::AwaitTaskWrapped;
+            }
+            return EAction::Return;
+        }),
+        [&](auto&& value) {
+            result = std::move(value);
+        });
+
+    ASSERT_EQ(provider.queue.size(), 3);
+    provider.resume(1);
+    provider.take().destroy();
+    provider.resume(3);
+    EXPECT_EQ(provider.queue.size(), 0);
+    ASSERT_TRUE(result);
+    std::vector<int> expected{ 1, -2, 3 };
     EXPECT_EQ(*result, expected);
 }

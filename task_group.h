@@ -45,7 +45,7 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerDetached = 2;
 
         ~task_group_sink() {
-            detach(/* from_destructor */ true);
+            detach();
         }
 
         /**
@@ -54,18 +54,27 @@ namespace coroactors::detail {
          * awaited and may be discarded. However we also call detach from
          * destructor to make sure pending results are deallocated.
         */
-        void detach(bool from_destructor = false) {
+        void detach() {
             // Note: detach is usually called from the task group, and it holds
             // a strong reference to the sink. However we also call detach from
             // destructor and usually it's already detached.
             void* headValue = last_ready.exchange(reinterpret_cast<void*>(MarkerDetached), std::memory_order_acq_rel);
-            if (headValue && (!from_destructor || headValue != reinterpret_cast<void*>(MarkerDetached))) {
-                // Task group should not call detach twice
-                assert(headValue != reinterpret_cast<void*>(MarkerDetached));
-                // Task group should not call detach while awaiting
-                assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
-                // Destroy current linked list of results
-                std::unique_ptr<task_group_result<T>> head(reinterpret_cast<task_group_result<T>*>(headValue));
+            if (headValue) {
+                if (headValue == reinterpret_cast<void*>(MarkerDetached)) {
+                    // Task group already detached, normal for destructor
+                } else if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) {
+                    // Task group destroyed while awaiting, but the awaiting
+                    // continuation is supposed to have a strong reference to
+                    // task sink, so it means the parent coroutine was likely
+                    // destroyed. This is unsafe in multi-threaded environment,
+                    // because it could lead to a race between destroy and
+                    // resume being called concurrently, but here it means we're
+                    // lucky and may just ignore it.
+                    continuation = {};
+                } else {
+                    // Destroy current linked list of results
+                    std::unique_ptr<task_group_result<T>> head(reinterpret_cast<task_group_result<T>*>(headValue));
+                }
             }
             // Eagerly destroy ready queue to free unnecessary memory
             ready_queue.reset();
@@ -214,6 +223,18 @@ namespace coroactors::detail {
     template<class T>
     class task_group_promise : public task_group_result_handler<T> {
     public:
+        ~task_group_promise() {
+            if (active) {
+                // Coroutine was destroyed before it could finish. This could
+                // happen when e.g. it was suspended and caller decided to
+                // destroy it instead of resuming, unwinding frames back to
+                // us. Make sure we wake up awaiter with an empty result.
+                if (auto next = sink_->push(std::move(this->result_))) {
+                    next.resume();
+                }
+            }
+        }
+
         [[nodiscard]] task_group_coroutine<T> get_return_object() noexcept {
             return task_group_coroutine<T>(task_group_handle<T>::from_promise(*this));
         }
@@ -226,6 +247,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
+                self.active = false;
                 auto sink = std::move(self.sink_);
                 auto next = sink->push(std::move(self.result_));
                 h.destroy();
@@ -237,12 +259,15 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return TFinalSuspend{}; }
 
-        void set_sink(const std::shared_ptr<task_group_sink<T>>& sink) {
+        void start(const std::shared_ptr<task_group_sink<T>>& sink) {
             sink_ = sink;
+            active = true;
+            task_group_handle<T>::from_promise(*this).resume();
         }
 
     private:
         std::shared_ptr<task_group_sink<T>> sink_;
+        bool active = false;
     };
 
     template<class T>
@@ -257,8 +282,7 @@ namespace coroactors::detail {
         using promise_type = task_group_promise<T>;
 
         void start(const std::shared_ptr<task_group_sink<T>>& sink) {
-            handle.promise().set_sink(sink);
-            handle.resume();
+            handle.promise().start(sink);
         }
 
     private:
@@ -306,7 +330,6 @@ namespace coroactors {
         }
 
         task_group& operator=(const task_group&) = delete;
-        task_group& operator=(task_group&&) = delete;
 
         /**
          * Adds a new awaitable to the task group

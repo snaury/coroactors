@@ -307,3 +307,47 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(scheduler.queue.size(), 0);
 }
+
+struct set_destroyed_guard {
+    bool* destroyed;
+
+    ~set_destroyed_guard() {
+        *destroyed = true;
+    }
+};
+
+actor<void> actor_wrapper(actor<void> nested, bool* destroyed) {
+    set_destroyed_guard guard{ destroyed };
+    co_await std::move(nested);
+}
+
+TEST(WithContinuationTest, DestroyUnwind) {
+    int stage = 0;
+    bool finished = false;
+    bool destroyed = false;
+
+    std::coroutine_handle<> continuation;
+
+    detach_awaitable(
+        actor_wrapper(
+            actor_with_continuation(&stage, [&](std::coroutine_handle<> c){
+                EXPECT_EQ(stage, 1);
+                continuation = c;
+            }),
+            &destroyed),
+        [&]{
+            finished = true;
+        });
+
+    EXPECT_EQ(stage, 1);
+    ASSERT_TRUE(continuation);
+    EXPECT_FALSE(finished);
+    ASSERT_FALSE(destroyed);
+
+    // Destroy continuation, only safe when done non-concurrently
+    continuation.destroy();
+
+    // Coroutine shouldn't finish, but stack should be unwound
+    EXPECT_FALSE(finished);
+    ASSERT_TRUE(destroyed);
+}

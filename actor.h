@@ -118,6 +118,15 @@ namespace coroactors::detail {
         friend class actor_promise;
 
     public:
+        ~actor_promise() noexcept {
+            if (continuation) {
+                // We have a continuation, but promise is destroyed before
+                // coroutine has finished. This means it was destroyed while
+                // suspended and all we can do is destroy continuation as well.
+                continuation.destroy();
+            }
+        }
+
         [[nodiscard]] actor<T> get_return_object() noexcept {
             return actor<T>(actor_continuation<T>::from_promise(*this));
         }
@@ -294,6 +303,43 @@ namespace coroactors::detail {
             return TRescheduleLockedAwaiter{};
         }
 
+        struct TRestoreContextCallback {
+            actor_promise<T>& self;
+            std::coroutine_handle<> c;
+
+            TRestoreContextCallback(actor_promise<T>& self, std::coroutine_handle<> c) noexcept
+                : self(self)
+                , c(c)
+            {}
+
+            TRestoreContextCallback(TRestoreContextCallback&& rhs) noexcept
+                : self(rhs.self)
+                , c(std::exchange(rhs.c, {}))
+            {}
+
+            ~TRestoreContextCallback() noexcept {
+                if (c) {
+                    // Callback was not invoked, but we are supposed to resume
+                    // our continuation. All we can do now is destroy it and
+                    // hope it unwinds its stack correctly.
+                    c.destroy();
+                }
+            }
+
+            TRestoreContextCallback& operator=(const TRestoreContextCallback&) = delete;
+
+            std::coroutine_handle<> operator()() noexcept {
+                if (auto next = self.context.push(std::exchange(c, {}))) {
+                    if (!self.context.scheduler().preempt()) {
+                        // Run directly unless preempted by scheduler
+                        return next;
+                    }
+                    self.context.scheduler().schedule(next);
+                }
+                return std::noop_coroutine();
+            }
+        };
+
         std::coroutine_handle<> wrap_restore_context(std::coroutine_handle<> c) {
             if (!context) {
                 // There is nothing to restore
@@ -301,16 +347,7 @@ namespace coroactors::detail {
             }
 
             // Generate a wrapped continuation that will restore context on resume
-            return with_resume_callback([this, c]() noexcept -> std::coroutine_handle<> {
-                if (auto next = context.push(c)) {
-                    if (!context.scheduler().preempt()) {
-                        // Run directly unless preempted by scheduler
-                        return next;
-                    }
-                    context.scheduler().schedule(next);
-                }
-                return std::noop_coroutine();
-            });
+            return with_resume_callback(TRestoreContextCallback{ *this, c });
         }
 
         void release_context() {
@@ -421,15 +458,17 @@ namespace coroactors::detail {
         {}
 
         actor_awaiter& operator=(const actor_awaiter&) = delete;
-        actor_awaiter& operator=(actor_awaiter&&) = delete;
 
         ~actor_awaiter() noexcept {
-            if (handle) {
+            if (handle && !active) {
                 handle.destroy();
             }
         }
 
-        bool await_ready() noexcept { return false; }
+        bool await_ready() noexcept {
+            active = true;
+            return false;
+        }
 
         template<class TPromise>
         __attribute__((__noinline__))
@@ -440,11 +479,13 @@ namespace coroactors::detail {
         }
 
         std::add_rvalue_reference_t<T> await_resume() {
+            active = false;
             return std::move(handle.promise().result_).take();
         }
 
     private:
         actor_continuation<T> handle;
+        bool active = false;
     };
 
     template<class T>
@@ -459,15 +500,17 @@ namespace coroactors::detail {
         {}
 
         actor_result_awaiter& operator=(const actor_result_awaiter&) = delete;
-        actor_result_awaiter& operator=(actor_result_awaiter&&) = delete;
 
         ~actor_result_awaiter() noexcept {
-            if (handle) {
+            if (handle && !active) {
                 handle.destroy();
             }
         }
 
-        bool await_ready() noexcept { return false; }
+        bool await_ready() noexcept {
+            active = true;
+            return false;
+        }
 
         template<class TPromise>
         __attribute__((__noinline__))
@@ -478,11 +521,13 @@ namespace coroactors::detail {
         }
 
         result<T>&& await_resume() {
+            active = false;
             return std::move(handle.promise().result_);
         }
 
     private:
         actor_continuation<T> handle;
+        bool active = false;
     };
 
 } // namespace coroactors::detail
@@ -536,21 +581,21 @@ namespace coroactors {
             return bool(handle);
         }
 
-        actor&& with_context(const actor_context& context) && noexcept {
+        [[nodiscard]] actor&& with_context(const actor_context& context) && noexcept {
             handle.promise().set_context(context);
             return std::move(*this);
         }
 
-        actor&& without_context() && noexcept {
+        [[nodiscard]] actor&& without_context() && noexcept {
             handle.promise().set_context(actor_context());
             return std::move(*this);
         }
 
-        auto operator co_await() && noexcept {
+        [[nodiscard]] auto operator co_await() && noexcept {
             return detail::actor_awaiter(std::exchange(handle, {}));
         }
 
-        auto result() && noexcept {
+        [[nodiscard]] auto result() && noexcept {
             return detail::actor_result_awaiter(std::exchange(handle, {}));
         }
 

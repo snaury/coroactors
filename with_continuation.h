@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cassert>
 #include <coroutine>
 #include <utility>
 
@@ -22,9 +23,20 @@ namespace coroactors::detail {
     template<class TCallback>
     class with_continuation_promise {
     public:
-        with_continuation_promise(TCallback& callback)
+        with_continuation_promise(TCallback& callback) noexcept
             : callback(callback)
         {}
+
+        ~with_continuation_promise() noexcept {
+            void* addr = continuation.exchange(
+                reinterpret_cast<void*>(MarkerDestroyed), std::memory_order_acq_rel);
+            if (addr && addr != reinterpret_cast<void*>(MarkerFinished)) {
+                // We have a continuation, but promise is destroyed before
+                // coroutine has finished. This means it was destroyed while
+                // suspended and all we can do is destroy continuation as well.
+                std::coroutine_handle<>::from_address(addr).destroy();
+            }
+        }
 
         [[nodiscard]] with_continuation_coroutine<TCallback> get_return_object() noexcept {
             return with_continuation_handle<TCallback>::from_promise(*this);
@@ -40,6 +52,8 @@ namespace coroactors::detail {
                 auto& self = c.promise();
                 void* addr = self.continuation.exchange(
                     reinterpret_cast<void*>(MarkerFinished), std::memory_order_acq_rel);
+                assert(addr != reinterpret_cast<void*>(MarkerDestroyed)
+                    && "Unexpected race between destroy and resume");
                 if (addr) {
                     c.destroy();
                     return std::coroutine_handle<>::from_address(addr);
@@ -73,6 +87,7 @@ namespace coroactors::detail {
 
     private:
         static constexpr uintptr_t MarkerFinished = 1;
+        static constexpr uintptr_t MarkerDestroyed = 2;
 
     private:
         TCallback& callback;

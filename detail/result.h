@@ -6,6 +6,13 @@
 
 namespace coroactors::detail {
 
+    class result_error : public std::logic_error {
+    public:
+        result_error(const char* message)
+            : logic_error(message)
+        {}
+    };
+
     /**
      * Encapsulates a result of computation which may fail with an exception
      */
@@ -56,7 +63,7 @@ namespace coroactors::detail {
                     std::rethrow_exception(std::get<2>(result_));
                 }
             }
-            throw std::logic_error("result has no value");
+            throw result_error("result has neither value nor exception");
         }
 
         std::add_rvalue_reference_t<T> take() && {
@@ -72,7 +79,7 @@ namespace coroactors::detail {
                     std::rethrow_exception(std::get<2>(std::move(result_)));
                 }
             }
-            throw std::logic_error("result has no value");
+            throw result_error("result has neither value nor exception");
         }
 
         std::exception_ptr get_exception() const {
