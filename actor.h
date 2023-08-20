@@ -125,7 +125,7 @@ namespace coroactors::detail {
                 // We have a continuation, but promise is destroyed before
                 // coroutine has finished. This means it was destroyed while
                 // suspended and all we can do is destroy continuation as well.
-                continuation.destroy();
+                std::exchange(continuation, {}).destroy();
             }
         }
 
@@ -206,8 +206,12 @@ namespace coroactors::detail {
             continuation = c;
         }
 
-        void unset_continuation() noexcept {
-            continuation = nullptr;
+        bool unset_continuation() noexcept {
+            if (continuation) {
+                continuation = nullptr;
+                return true;
+            }
+            return false;
         }
 
         std::coroutine_handle<> start() noexcept {
@@ -409,7 +413,7 @@ namespace coroactors::detail {
             return with_resume_callback(TRestoreContextCallback{ *this, c });
         }
 
-        void release_context() {
+        static void release_context(const actor_context& context) {
             if (context) {
                 if (auto next = context.pop()) {
                     context.scheduler().schedule(next);
@@ -417,7 +421,7 @@ namespace coroactors::detail {
             }
         }
 
-        std::coroutine_handle<> next_from_context() {
+        static std::coroutine_handle<> next_from_context(const actor_context& context) {
             if (context) {
                 if (auto next = context.pop()) {
                     return next;
@@ -444,10 +448,12 @@ namespace coroactors::detail {
                 requires (has_await_suspend_void<TAwaiter>)
             {
                 auto& self = c.promise();
+                auto context = self.context;
                 auto k = self.wrap_restore_context(c);
                 awaiter.await_suspend(std::move(k));
                 // We still have context locked, move to the next task
-                return self.next_from_context();
+                // Note: self may have been destroyed already
+                return next_from_context(context);
             }
 
             __attribute__((__noinline__))
@@ -456,14 +462,16 @@ namespace coroactors::detail {
                 requires (has_await_suspend_bool<TAwaiter>)
             {
                 auto& self = c.promise();
+                auto context = self.context;
                 auto k = self.wrap_restore_context(c);
                 if (!awaiter.await_suspend(std::move(k))) {
                     // Awaiter did not suspend, transfer back directly
-                    self.release_context();
+                    release_context(context);
                     return k;
                 }
                 // We still have context locked, move to the next task
-                return self.next_from_context();
+                // Note: self may have been destroyed already
+                return next_from_context(context);
             }
 
             __attribute__((__noinline__))
@@ -472,14 +480,17 @@ namespace coroactors::detail {
                 requires (has_await_suspend_handle<TAwaiter>)
             {
                 auto& self = c.promise();
+                auto context = self.context;
                 auto k = awaiter.await_suspend(self.wrap_restore_context(c));
                 if (k != std::noop_coroutine()) {
                     // Transfer directly to the task from awaiter
-                    self.release_context();
+                    // Note: self may have been destroyed already
+                    release_context(context);
                     return k;
                 }
                 // We still have context locked, move to the next task
-                return self.next_from_context();
+                // Note: self may have been destroyed already
+                return next_from_context(context);
             }
 
             TResult await_resume()
@@ -548,8 +559,11 @@ namespace coroactors::detail {
 
         ~actor_awaiter() noexcept {
             if (handle) {
-                if (active) {
-                    handle.promise().unset_continuation();
+                if (suspended) {
+                    if (handle.promise().unset_continuation()) {
+                        // Continue bottom-up frame cleanup
+                        handle.destroy();
+                    }
                 } else {
                     handle.destroy();
                 }
@@ -557,7 +571,6 @@ namespace coroactors::detail {
         }
 
         bool await_ready() noexcept {
-            active = true;
             return handle.promise().ready();
         }
 
@@ -566,17 +579,18 @@ namespace coroactors::detail {
         std::coroutine_handle<> await_suspend(std::coroutine_handle<TPromise> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c);
+            suspended = true;
             return p.start();
         }
 
         std::add_rvalue_reference_t<T> await_resume() {
-            active = false;
+            suspended = false;
             return std::move(handle.promise().result).take();
         }
 
     private:
         actor_continuation<T> handle;
-        bool active = false;
+        bool suspended = false;
     };
 
     template<class T>
@@ -596,8 +610,11 @@ namespace coroactors::detail {
 
         ~actor_result_awaiter() noexcept {
             if (handle) {
-                if (active) {
-                    handle.promise().unset_continuation();
+                if (suspended) {
+                    if (handle.promise().unset_continuation()) {
+                        // Continue bottom-up frame cleanup
+                        handle.destroy();
+                    }
                 } else {
                     handle.destroy();
                 }
@@ -605,7 +622,6 @@ namespace coroactors::detail {
         }
 
         bool await_ready() noexcept {
-            active = true;
             return handle.promise().ready();
         }
 
@@ -614,17 +630,18 @@ namespace coroactors::detail {
         std::coroutine_handle<> await_suspend(std::coroutine_handle<TPromise> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c);
+            suspended = true;
             return p.start();
         }
 
         result<T>&& await_resume() {
-            active = false;
+            suspended = false;
             return std::move(handle.promise().result);
         }
 
     private:
         actor_continuation<T> handle;
-        bool active = false;
+        bool suspended = false;
     };
 
 } // namespace coroactors::detail

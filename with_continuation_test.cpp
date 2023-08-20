@@ -310,34 +310,50 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(scheduler.queue.size(), 0);
 }
 
-struct set_destroyed_guard {
-    bool* destroyed;
-
-    ~set_destroyed_guard() {
-        *destroyed = true;
+class count_refs_guard {
+public:
+    explicit count_refs_guard(int* refs)
+        : refs(refs)
+    {
+        ++*refs;
     }
+
+    count_refs_guard(const count_refs_guard& rhs)
+        : refs(rhs.refs)
+    {
+        ++*refs;
+    }
+
+    ~count_refs_guard() {
+        --*refs;
+    }
+
+private:
+    int* refs;
 };
 
-actor<void> actor_wrapper(actor<void> nested, bool* destroyed) {
+actor<void> actor_wrapper(actor<void> nested, int* refs) {
     co_await no_actor_context;
-    set_destroyed_guard guard{ destroyed };
+    count_refs_guard guard{ refs };
     co_await std::move(nested);
 }
 
 TEST(WithContinuationTest, DestroyUnwind) {
     int stage = 0;
     bool finished = false;
-    bool destroyed = false;
+    int refs = 0;
 
     std::coroutine_handle<> continuation;
 
     detach_awaitable(
         actor_wrapper(
-            actor_with_continuation(no_actor_context, &stage, [&](std::coroutine_handle<> c){
-                EXPECT_EQ(stage, 1);
-                continuation = c;
-            }),
-            &destroyed),
+            actor_with_continuation(no_actor_context, &stage,
+                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(refs, 3);
+                    continuation = c;
+                }),
+            &refs),
         [&]{
             finished = true;
         });
@@ -345,12 +361,85 @@ TEST(WithContinuationTest, DestroyUnwind) {
     EXPECT_EQ(stage, 1);
     ASSERT_TRUE(continuation);
     EXPECT_FALSE(finished);
-    ASSERT_FALSE(destroyed);
+    ASSERT_EQ(refs, 2);
 
     // Destroy continuation, only safe when done non-concurrently
     continuation.destroy();
 
     // Coroutine shouldn't finish, but stack should be unwound
     EXPECT_FALSE(finished);
-    ASSERT_TRUE(destroyed);
+    ASSERT_EQ(refs, 0);
+}
+
+TEST(WithContinuationTest, DestroyFromCallback) {
+    int stage = 0;
+    bool finished = false;
+    int refs = 0;
+
+    detach_awaitable(
+        actor_wrapper(
+            actor_with_continuation(no_actor_context, &stage,
+                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(refs, 3);
+                    c.destroy();
+                }),
+            &refs),
+        [&]{
+            finished = true;
+        });
+
+    EXPECT_EQ(stage, 1);
+    EXPECT_FALSE(finished);
+    EXPECT_EQ(refs, 0);
+}
+
+// A very simple class for grabbing the bottom (outer) coroutine frame
+struct simple_coroutine {
+    std::coroutine_handle<> handle;
+
+    struct promise_type {
+        auto initial_suspend() noexcept { return std::suspend_never{}; }
+        auto final_suspend() noexcept { return std::suspend_never{}; }
+
+        simple_coroutine get_return_object() noexcept {
+            return simple_coroutine{
+                std::coroutine_handle<promise_type>::from_promise(*this),
+            };
+        }
+
+        void unhandled_exception() noexcept { std::terminate(); }
+        void return_void() noexcept {}
+    };
+};
+
+template<class TAwaitable>
+simple_coroutine simple_run(TAwaitable awaitable) {
+    co_return co_await std::move(awaitable);
+}
+
+TEST(WithContinuationTest, DestroyBottomUp) {
+    int stage = 0;
+    int refs = 0;
+
+    std::coroutine_handle<> continuation;
+
+    auto coro = simple_run(
+        actor_wrapper(
+            actor_with_continuation(no_actor_context, &stage,
+                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(refs, 3);
+                    continuation = c;
+                }),
+            &refs));
+
+    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(refs, 2);
+    ASSERT_TRUE(continuation);
+
+    coro.handle.destroy();
+
+    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(refs, 0);
 }

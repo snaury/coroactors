@@ -255,7 +255,7 @@ namespace coroactors::detail {
     class task_group_promise : public task_group_result_handler<T> {
     public:
         ~task_group_promise() {
-            if (active) {
+            if (running) {
                 // Coroutine was destroyed before it could finish. This could
                 // happen when e.g. it was suspended and caller decided to
                 // destroy it instead of resuming, unwinding frames back to
@@ -278,7 +278,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
-                self.active = false;
+                self.running = false;
                 auto sink = std::move(self.sink_);
                 auto next = sink->push(std::move(self.result_));
                 h.destroy();
@@ -293,13 +293,13 @@ namespace coroactors::detail {
         void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
             this->result_->index = index;
             sink_ = sink;
-            active = true;
+            running = true;
             task_group_handle<T>::from_promise(*this).resume();
         }
 
     private:
         std::shared_ptr<task_group_sink<T>> sink_;
-        bool active = false;
+        bool running = false;
     };
 
     template<class T>
