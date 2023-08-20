@@ -28,7 +28,6 @@ private:
 class TPinger {
 public:
     struct TRunResult {
-        std::chrono::microseconds elapsed;
         std::chrono::microseconds max_latency;
     };
 
@@ -36,13 +35,22 @@ public:
         : pingable(pingable)
     {}
 
-    actor<TRunResult> run(int count) {
-        TTime start = TClock::now();
+    actor<TRunResult> runWithoutLatencies(int count) {
+        co_await context;
 
+        for (int i = 0; i < count; ++i) {
+            int value = co_await pingable.ping();
+            (void)value;
+        }
+
+        co_return TRunResult{};
+    }
+
+    actor<TRunResult> runWithLatencies(int count, TTime start) {
         co_await context;
 
         TTime end = TClock::now();
-        auto max_latency = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        auto maxLatency = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
         for (int i = 0; i < count; ++i) {
             TTime call_start = end;
@@ -50,16 +58,21 @@ public:
             (void)value;
             TTime call_end = TClock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(call_end - call_start);
-            max_latency = std::max(max_latency, elapsed);
+            maxLatency = std::max(maxLatency, elapsed);
             end = call_end;
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
         co_return TRunResult{
-            elapsed,
-            max_latency,
+            maxLatency,
         };
+    }
+
+    actor<TRunResult> run(int count, TTime start, bool withLatencies) {
+        if (withLatencies) {
+            return runWithLatencies(count, start);
+        } else {
+            return runWithoutLatencies(count);
+        }
     }
 
 private:
@@ -345,6 +358,7 @@ int main(int argc, char** argv) {
     long long count = 10'000'000;
     std::chrono::microseconds preemptUs(10);
     ESchedulerQueue queueType = ESchedulerQueue::LockFree;
+    bool withLatencies = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -385,6 +399,10 @@ int main(int argc, char** argv) {
             queueType = ESchedulerQueue::StdMutex;
             continue;
         }
+        if (arg == "--without-latencies") {
+            withLatencies = false;
+            continue;
+        }
         std::cerr << "ERROR: unexpected argument: " << argv[i] << std::endl;
         return 1;
     }
@@ -403,13 +421,13 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Warming up..." << std::endl;
-    run_sync(pingers[0].run(count / numPingers / 100));
+    run_sync(pingers[0].run(count / numPingers / 100, TClock::now(), withLatencies));
 
     std::cout << "Starting..." << std::endl;
     std::vector<actor<TPinger::TRunResult>> runs;
     auto start = TClock::now();
     for (auto& pinger : pingers) {
-        runs.push_back(pinger.run(count / numPingers));
+        runs.push_back(pinger.run(count / numPingers, start, withLatencies));
     }
     auto results = run_sync(std::move(runs));
     auto end = TClock::now();
