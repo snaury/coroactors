@@ -212,13 +212,15 @@ struct test_scheduler : public actor_scheduler {
 };
 
 template<class TCallback>
-actor<void> actor_with_continuation(int* stage, TCallback callback) {
+actor<void> actor_with_continuation(const actor_context& context, int* stage, TCallback callback) {
+    co_await context;
     *stage = 1;
     co_await with_continuation(callback);
     *stage = 2;
 }
 
-actor<int> actor_with_result(int result) {
+actor<int> actor_with_result(const actor_context& context, int result) {
+    co_await context;
     co_return result;
 }
 
@@ -230,11 +232,11 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     actor_context context(scheduler);
 
     // Start the first actor function
-    actor_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+    actor_with_continuation(context, &stage, [&](std::coroutine_handle<> c) {
         EXPECT_EQ(stage, 1);
         c.resume();
         EXPECT_EQ(stage, 1);
-    }).with_context(context).detach();
+    }).detach();
 
     // It should initially block on context activation
     EXPECT_EQ(stage, 0);
@@ -242,7 +244,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(42).with_context(context),
+        actor_with_result(context, 42),
         [&](int value) {
             result = value;
         });
@@ -270,10 +272,10 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     std::coroutine_handle<> continuation;
 
     // Start the first actor function
-    actor_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+    actor_with_continuation(context, &stage, [&](std::coroutine_handle<> c) {
         EXPECT_EQ(stage, 1);
         continuation = c;
-    }).with_context(context).detach();
+    }).detach();
 
     // It should initially block on context activation
     EXPECT_EQ(stage, 0);
@@ -281,7 +283,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(42).with_context(context),
+        actor_with_result(context, 42),
         [&](int value) {
             result = value;
         });
@@ -317,6 +319,7 @@ struct set_destroyed_guard {
 };
 
 actor<void> actor_wrapper(actor<void> nested, bool* destroyed) {
+    co_await no_actor_context;
     set_destroyed_guard guard{ destroyed };
     co_await std::move(nested);
 }
@@ -330,7 +333,7 @@ TEST(WithContinuationTest, DestroyUnwind) {
 
     detach_awaitable(
         actor_wrapper(
-            actor_with_continuation(&stage, [&](std::coroutine_handle<> c){
+            actor_with_continuation(no_actor_context, &stage, [&](std::coroutine_handle<> c){
                 EXPECT_EQ(stage, 1);
                 continuation = c;
             }),

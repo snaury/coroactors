@@ -15,7 +15,7 @@ This repository takes ideas from the Swift language and standard library, and tr
 
 ## Actors with C++ coroutines
 
-The primary class here is `actor<T>` that should be used as the return type for actor coroutines. This would be your standard initially suspended lazy coroutine that only starts on `co_await`. However, when actor coroutine `co_await`s on an `actor_context` object it binds to that context and will never execute code in parallel with other coroutines bound to the same context. Effectively actor context acts like a localized mutex, and allows sharing state between different coroutines, for example:
+The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either return immediately or `co_await` an `actor_context` instance, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context. Unlike a mutex it is automatically released when coroutine `co_await`s an awaitable, and reacquired before that awaitable returns. For efficiency this release/reacquire only happens when coroutine actually suspends.
 
 ```c++
 class Counter {
@@ -45,7 +45,7 @@ private:
 
 Multiple coroutines may be calling `Counter` methods concurrently, but all accesses to the `value_` member variables will be serialized automatically.
 
-Unlike a mutex however, context is also automatically released when actor coroutine `co_await`s on various other async activities. For example:
+Unlike a mutex context is automatically released when actor `co_await`s an awaitable, and required before that awaitable returns. For efficiency this release/reacquire only happens when coroutine actually suspends. For example:
 
 ```c++
 // Note: not an actor coroutine
@@ -72,4 +72,20 @@ private:
 }
 ```
 
-Multiple coroutines may be calling `CachingService::get`, getting cached results most of the time. However a very long fetch of a particular url will not block other coroutines from getting results that are already cached.
+Multiple coroutines may be calling `CachingService::get`, getting cached results most of the time. And a very long fetch of a particular url will not block other coroutines from getting results that are already cached.
+
+## Fast context switching
+
+In a system with many actors it should be very common for actors to often call other actors instead of arbitrary coroutines. The first common case would be for actor to call its own methods, and since they are on the same context it should not be released and reacquired everytime. Instead coroutine uses direct transfer between coroutine frames, which is similar to how normal functions transfer stack to a nested call and how it returns.
+
+The second common case would be for calls to an uncontended service, and since it's uncontended it should also use direct frame transfer when possible, switching to a new available context, releasing the old context (maybe rescheduling it when there is more work), and doing the same on the same on the way back. There is some synchronization with actor mailboxes, but otherwise scheduler is not involved.
+
+When there is contention between actors (target mailbox is locked by another thread, or the source mailbox is not empty) we have to involve scheduler for one side or the other. Actors prefer switching to the new context when possible, rescheduling old context when it is not empty, since caches (e.g. argument or the result) are more likely to stay warm without interleaving with other work and especially switching threads. This is probably key for C++ coroutines here, as opposed to classical actors, because unlike message sending we know that frames are changing and parent frame is suspending.
+
+## Coroutine handle destruction
+
+Coroutine handle destruction in C++ is tricky. It seems to be common to have coroutine awaiters in the wild that unconditionally destroy handles in destructor (e.g folly, stdexec). This works for bottom-up destruction, where a scheduler holds on to "root" coroutine handles, destroys them on exit, and they in turn destroy nested frames via unfinished awaiters. There is a problem with this approach however, you never know what innermost coroutine is awaiting on, how well does it support unexpected cancellation, and this makes races between destroy and resume possible (and even impossible to avoid), violating an invariant that there is only one way to resume a suspended coroutine (which would be via their continuation from await_suspend).
+
+Actors support top-down destruction instead. When some service is holding on to a continuation (coroutine handle), but cannot resume it for some reason (e.g. there is no way to generate an error), it can just be destroyed instead. When that happens the stack of the innermost coroutine is unwound, and its promise type (e.g. actor_promise<T>) is destroyed. Promise detects when this destructor is called with an active continuation (before coroutine finished), and also destroy it, which recursively unwinds the stack level above. Actor awaiter detects its destruction before resuming, and instead of destroying the awaited handle will unset its continuation instead (effectively detaching from the nested coroutine), which kinda supports both top-down and bottom-up destruction. Eventually this will reach the bottom, destroying the full chain of awaiting frames.
+
+Unfortunate downside of this support is compilers having a hard time figuring out if nested coroutine frame is guaranteed to be destroyed before the parent, and turn off coroutine allocation elision as a result. This doesn't seem to really be a problem for actors though, since their context-related logic is already complex.

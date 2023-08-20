@@ -32,6 +32,7 @@ void run_sync(actor<void> a) {
 }
 
 actor<void> runme(timer_service& timer, int count) {
+    co_await no_actor_context;
     auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < count; ++i) {
         printf("Sleeping...\n");

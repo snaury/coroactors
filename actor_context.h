@@ -20,7 +20,7 @@ namespace coroactors {
         };
 
     public:
-        actor_context() = default;
+        actor_context() noexcept = default;
 
         actor_context(actor_scheduler& s)
             : impl_(std::make_shared<impl>(s))
@@ -72,8 +72,12 @@ namespace coroactors {
             return k;
         }
 
+        struct inherit_t {};
         struct reschedule_t {};
         struct reschedule_locked_t {};
+
+        // When awaited will inherit context of the caller
+        static constexpr inherit_t inherit;
 
         // When awaited will reschedule current coroutine allowing other code in the same context to run
         static constexpr reschedule_t reschedule;
@@ -84,5 +88,10 @@ namespace coroactors {
     private:
         std::shared_ptr<impl> impl_;
     };
+
+    /**
+     * A special empty actor context that does not isolate shared state
+     */
+    static inline const actor_context no_actor_context;
 
 } // namespace coroactors
