@@ -47,8 +47,12 @@ struct with_suspend_hook {
 };
 
 template<detail::awaiter TAwaiter>
-struct autostart_inspect {
-    TAwaiter awaiter;
+class autostart_inspect {
+public:
+    template<class TArg>
+    autostart_inspect(TArg&& arg)
+        : awaiter(std::forward<TArg>(arg))
+    {}
 
     bool await_ready() {
         ++await_ready_count;
@@ -64,10 +68,13 @@ struct autostart_inspect {
         return awaiter.await_suspend(std::forward<TArg>(arg));
     }
 
-    auto await_resume() {
+    decltype(auto) await_resume() {
         ++await_resume_count;
         return awaiter.await_resume();
     }
+
+private:
+    TAwaiter awaiter;
 };
 
 struct autostart_promise {
@@ -81,10 +88,10 @@ struct autostart_promise {
     void unhandled_exception() noexcept { std::terminate(); }
     void return_void() noexcept {}
 
-    template<class TAwaitable>
+    template<detail::awaitable TAwaitable>
     auto await_transform(TAwaitable&& awaitable) {
         using TAwaiter = std::remove_reference_t<decltype(detail::get_awaiter((TAwaitable&&)awaitable))>;
-        return autostart_inspect<TAwaiter>{ detail::get_awaiter((TAwaitable&&)awaitable) };
+        return autostart_inspect<TAwaiter>(detail::get_awaiter((TAwaitable&&)awaitable));
     }
 };
 
@@ -106,7 +113,7 @@ TEST(WithContinuationTest, CompleteSync) {
 
     int stage = 0;
 
-    run_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+    run_with_continuation(&stage, [&](continuation<> c) {
         // We must be running in await_ready
         EXPECT_EQ(stage, 1);
         EXPECT_EQ(await_ready_count, 1);
@@ -131,27 +138,25 @@ TEST(WithContinuationTest, CompleteAsync) {
     clear_await_count();
 
     int stage = 0;
-    std::coroutine_handle<> continuation;
+    continuation<> suspended;
 
-    run_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+    run_with_continuation(&stage, [&](continuation<> c) {
         // We must be running in await_ready
         EXPECT_EQ(stage, 1);
         EXPECT_EQ(await_ready_count, 1);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
-        continuation = c;
+        suspended = c;
     });
 
     // Must be suspended with continuation
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(await_suspend_count, 1);
     EXPECT_EQ(await_resume_count, 0);
-    ASSERT_TRUE(continuation);
+    ASSERT_TRUE(suspended);
 
     // Resume
-    if (continuation) {
-        continuation.resume();
-    }
+    suspended.resume();
 
     // Should complete during resume
     EXPECT_EQ(stage, 2);
@@ -160,36 +165,124 @@ TEST(WithContinuationTest, CompleteAsync) {
     EXPECT_EQ(await_resume_count, 1);
 }
 
-TEST(WithContinuationTest, CompleteRace) {
+TEST(WithContinuationTest, CompleteRaceWithState) {
     clear_await_count();
 
     int stage = 0;
-    std::coroutine_handle<> continuation;
+    continuation<> suspended;
 
     with_suspend_hook hook([&]{
         EXPECT_EQ(await_suspend_count, 1);
-        EXPECT_TRUE(continuation);
+        EXPECT_TRUE(suspended);
 
-        if (continuation) {
-            std::exchange(continuation, {}).resume();
+        if (suspended) {
+            // Resume while keeping the state alive
+            // Awaiter won't be able to set continuation and will resume
+            suspended.resume();
             // Should not resume until suspend finishes
             EXPECT_EQ(await_resume_count, 0);
         }
     });
 
-    run_with_continuation(&stage, [&](std::coroutine_handle<> c) {
+    run_with_continuation(&stage, [&](continuation<> c) {
         // We must be running in await_ready
         EXPECT_EQ(stage, 1);
         EXPECT_EQ(await_ready_count, 1);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
-        continuation = c;
+        suspended = c;
     });
 
     // Must resume and complete before returning
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(await_ready_count, 1);
     EXPECT_EQ(await_suspend_count, 1);
+    EXPECT_EQ(await_resume_count, 1);
+}
+
+TEST(WithContinuationTest, CompleteRaceWithoutState) {
+    clear_await_count();
+
+    int stage = 0;
+    continuation<> suspended;
+
+    with_suspend_hook hook([&]{
+        EXPECT_EQ(await_suspend_count, 1);
+        EXPECT_TRUE(suspended);
+
+        if (suspended) {
+            // State will be destroyed with continuation
+            std::exchange(suspended, {}).resume();
+            // Should not resume until suspend finishes
+            EXPECT_EQ(await_resume_count, 0);
+        }
+    });
+
+    run_with_continuation(&stage, [&](continuation<> c) {
+        // We must be running in await_ready
+        EXPECT_EQ(stage, 1);
+        EXPECT_EQ(await_ready_count, 1);
+        EXPECT_EQ(await_suspend_count, 0);
+        // Store continuation for later
+        suspended = c;
+    });
+
+    // Must resume and complete before returning
+    EXPECT_EQ(stage, 2);
+    EXPECT_EQ(await_ready_count, 1);
+    EXPECT_EQ(await_suspend_count, 1);
+    EXPECT_EQ(await_resume_count, 1);
+}
+
+template<class TCallback>
+autostart run_with_continuation_int(int* stage, TCallback callback) {
+    *stage = 1;
+    try {
+        int value = co_await with_continuation<int>(callback);
+        EXPECT_EQ(value, 42);
+        *stage = 2;
+    } catch (const std::exception&) {
+        *stage = 3;
+    }
+}
+
+TEST(WithContinuationTest, CompleteWithValue) {
+    clear_await_count();
+
+    int stage = 0;
+
+    run_with_continuation_int(&stage, [&](continuation<int> c) {
+        EXPECT_EQ(stage, 1);
+        c.resume(42);
+        EXPECT_EQ(stage, 1);
+    });
+
+    // Should complete before returning
+    EXPECT_EQ(stage, 2);
+
+    // Coroutine should not have suspended
+    EXPECT_EQ(await_ready_count, 1);
+    EXPECT_EQ(await_suspend_count, 0);
+    EXPECT_EQ(await_resume_count, 1);
+}
+
+TEST(WithContinuationTest, CompleteWithException) {
+    clear_await_count();
+
+    int stage = 0;
+
+    run_with_continuation_int(&stage, [&](continuation<int> c) {
+        EXPECT_EQ(stage, 1);
+        c.resume_with_exception(std::make_exception_ptr(std::exception()));
+        EXPECT_EQ(stage, 1);
+    });
+
+    // Should complete with exception
+    EXPECT_EQ(stage, 3);
+
+    // Coroutine should not have suspended
+    EXPECT_EQ(await_ready_count, 1);
+    EXPECT_EQ(await_suspend_count, 0);
     EXPECT_EQ(await_resume_count, 1);
 }
 
@@ -232,7 +325,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     actor_context context(scheduler);
 
     // Start the first actor function
-    actor_with_continuation(context, &stage, [&](std::coroutine_handle<> c) {
+    actor_with_continuation(context, &stage, [&](continuation<> c) {
         EXPECT_EQ(stage, 1);
         c.resume();
         EXPECT_EQ(stage, 1);
@@ -269,12 +362,12 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     test_scheduler scheduler;
     actor_context context(scheduler);
 
-    std::coroutine_handle<> continuation;
+    continuation<> suspended;
 
     // Start the first actor function
-    actor_with_continuation(context, &stage, [&](std::coroutine_handle<> c) {
+    actor_with_continuation(context, &stage, [&](continuation<> c) {
         EXPECT_EQ(stage, 1);
-        continuation = c;
+        suspended = c;
     }).detach();
 
     // It should initially block on context activation
@@ -297,14 +390,14 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
 
     // The first function should be suspended now
     EXPECT_EQ(stage, 1);
-    ASSERT_TRUE(continuation);
+    ASSERT_TRUE(suspended);
 
     // However the second function should have started running and completed
     EXPECT_EQ(result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 
     // Resume the continuation, actor should resume and complete
-    continuation.resume();
+    suspended.resume();
 
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(scheduler.queue.size(), 0);
@@ -343,15 +436,15 @@ TEST(WithContinuationTest, DestroyUnwind) {
     bool finished = false;
     int refs = 0;
 
-    std::coroutine_handle<> continuation;
+    continuation<> suspended;
 
     detach_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, &stage,
-                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 1);
                     EXPECT_EQ(refs, 3);
-                    continuation = c;
+                    suspended = c;
                 }),
             &refs),
         [&]{
@@ -359,12 +452,12 @@ TEST(WithContinuationTest, DestroyUnwind) {
         });
 
     EXPECT_EQ(stage, 1);
-    ASSERT_TRUE(continuation);
+    ASSERT_TRUE(suspended);
     EXPECT_FALSE(finished);
     ASSERT_EQ(refs, 2);
 
-    // Destroy continuation, only safe when done non-concurrently
-    continuation.destroy();
+    // Destroy continuation
+    suspended.reset();
 
     // Coroutine shouldn't finish, but stack should be unwound
     EXPECT_FALSE(finished);
@@ -379,10 +472,10 @@ TEST(WithContinuationTest, DestroyFromCallback) {
     detach_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, &stage,
-                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                [&, guard = count_refs_guard{ &refs }](continuation<>&& c) {
                     EXPECT_EQ(stage, 1);
                     EXPECT_EQ(refs, 3);
-                    c.destroy();
+                    c.reset();
                 }),
             &refs),
         [&]{
@@ -422,21 +515,21 @@ TEST(WithContinuationTest, DestroyBottomUp) {
     int stage = 0;
     int refs = 0;
 
-    std::coroutine_handle<> continuation;
+    continuation<> suspended;
 
     auto coro = simple_run(
         actor_wrapper(
             actor_with_continuation(no_actor_context, &stage,
-                [&, guard = count_refs_guard{ &refs }](std::coroutine_handle<> c) {
+                [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 1);
                     EXPECT_EQ(refs, 3);
-                    continuation = c;
+                    suspended = c;
                 }),
             &refs));
 
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(refs, 2);
-    ASSERT_TRUE(continuation);
+    ASSERT_TRUE(suspended);
 
     coro.handle.destroy();
 

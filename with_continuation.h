@@ -4,96 +4,113 @@
 #include <coroutine>
 #include <memory>
 #include <utility>
+#include <variant>
+
+namespace coroactors {
+
+    template<class T>
+    class continuation;
+
+} // namespace coroactors
 
 namespace coroactors::detail {
 
-    template<class TCallback>
-    concept is_with_continuation_callback = requires(TCallback&& callback, std::coroutine_handle<> c) {
+    template<class TCallback, class T>
+    concept is_with_continuation_callback = requires(TCallback&& callback, continuation<T> c) {
         { ((TCallback&&) callback)(std::move(c)) } -> std::same_as<void>;
     };
 
-    template<class TCallback>
-    class with_continuation_coroutine;
-
-    template<class TCallback>
-    class with_continuation_promise;
-
-    template<class TCallback>
-    using with_continuation_handle = std::coroutine_handle<with_continuation_promise<TCallback>>;
-
-    class with_continuation_state {
+    template<class T>
+    class continuation_result {
     public:
-        // Called by promise destructor exactly once.
-        // Returns currently set continuation if any.
-        std::coroutine_handle<> destroy() noexcept {
+        continuation_result() = default;
+
+        template<class... TArgs>
+        void set_result(TArgs&&... args) {
+            result_.template emplace<1>(std::forward<TArgs>(args)...);
+            initialized_.store(true, std::memory_order_release);
+        }
+
+        void set_exception(std::exception_ptr&& e) noexcept {
+            result_.template emplace<2>(std::move(e));
+            initialized_.store(true, std::memory_order_release);
+        }
+
+        bool has_result() const noexcept {
+            return initialized_.load(std::memory_order_acquire) == true;
+        }
+
+        std::add_rvalue_reference_t<T> take_result() {
+            // This synchronizes with release in set_result/set_exception
+            if (initialized_.load(std::memory_order_acquire)) {
+                switch (result_.index()) {
+                case 1:
+                    if constexpr (!std::is_void_v<T>) {
+                        return std::get<1>(std::move(result_));
+                    } else {
+                        return;
+                    }
+                case 2:
+                    std::rethrow_exception(std::get<2>(std::move(result_)));
+                }
+            }
+            assert(false && "Unexpected state in take_result");
+            throw std::logic_error("unexpected state in take_result");
+        }
+
+    private:
+        struct TVoid {};
+        using TValue = std::conditional_t<std::is_void_v<T>, TVoid, T>;
+        std::variant<std::monostate, TValue, std::exception_ptr> result_;
+        std::atomic<bool> initialized_{ false };
+    };
+
+    template<class T>
+    class continuation_state {
+    public:
+        continuation_state(continuation_result<T>* result) noexcept
+            : result(result)
+        {}
+
+        ~continuation_state() noexcept {
+            // This synchronizes with release in set_continuation
             void* addr = continuation.exchange(
-                reinterpret_cast<void*>(MarkerDestroyed), std::memory_order_acq_rel);
+                reinterpret_cast<void*>(MarkerDestroyed),
+                std::memory_order_acquire);
             assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
             if (addr && addr != reinterpret_cast<void*>(MarkerFinished)) {
-                // We have a continuation, but promise is destroyed before
-                // coroutine has finished. This means it was destroyed while
-                // suspended and all we can do is destroy continuation as well.
-                return std::coroutine_handle<>::from_address(addr);
-            } else {
-                return {};
+                // Continuation was not resumed and this is the last reference
+                // Propagate this as an awaiting coroutine frame destruction
+                std::coroutine_handle<>::from_address(addr).destroy();
             }
         }
 
-        enum class status {
-            set,
-            finished,
-            destroyed,
-        };
+        continuation_state(const continuation_state&) = delete;
+        continuation_state& operator=(const continuation_state&) = delete;
 
-        // Called by awaiter when it suspends
-        // The continuation may have already been finished or destroyed
-        status set_continuation(std::coroutine_handle<> c) noexcept {
+        bool set_continuation(std::coroutine_handle<> c) noexcept {
             void* addr = nullptr;
-            if (continuation.compare_exchange_strong(addr, c.address(), std::memory_order_acq_rel)) {
-                return status::set;
-            }
-            if (addr == reinterpret_cast<void*>(MarkerFinished)) {
-                return status::finished;
-            }
-            if (addr == reinterpret_cast<void*>(MarkerDestroyed)) {
-                return status::destroyed;
-            }
-            assert(false && "Unexpected existing continuation");
+            // Note: this synchronizes with later resume or destroy
+            // This does not synchronize with the result of resume in any way
+            return continuation.compare_exchange_strong(addr, c.address(), std::memory_order_release);
         }
 
-        // Called by awaiter destructor to prevent it from resuming in the
-        // future. There are two cases to consider. One where user continuation
-        // is destroyed, which destroys the promise, which in turn destroys the
-        // frame with awaiter, which tries to cancel because it was suspended.
-        // Another where awaiter frame is destroyed while suspended, because
-        // destruction is going bottom up from some root frame, and user must
-        // somehow guarantee continuation will not be resumed concurrently or
-        // in the future, otherwise it's very racy. Returns the current/previous
-        // state of continuation.
-        status cancel() noexcept {
-            void* addr = continuation.load(std::memory_order_relaxed);
-            for (;;) {
-                assert(addr && "Trying to unset a missing continuation");
-                if (addr == reinterpret_cast<void*>(MarkerFinished)) {
-                    return status::finished;
-                }
-                if (addr == reinterpret_cast<void*>(MarkerDestroyed)) {
-                    return status::destroyed;
-                }
-                if (continuation.compare_exchange_weak(addr, nullptr, std::memory_order_release)) {
-                    return status::set;
-                }
-            }
+        template<class... TArgs>
+        void set_result(TArgs&&... args) {
+            result->set_result(std::forward<TArgs>(args)...);
         }
 
-        // Called by the promise when it is resumed
-        // Returns currently set continuation, if any
+        void set_exception(std::exception_ptr&& e) noexcept {
+            result->set_exception(std::move(e));
+        }
+
         std::coroutine_handle<> finish() noexcept {
+            // This synchronizes with release in set_continuation
             void* addr = continuation.exchange(
-                reinterpret_cast<void*>(MarkerFinished), std::memory_order_acq_rel);
+                reinterpret_cast<void*>(MarkerFinished),
+                std::memory_order_acquire);
             assert(addr != reinterpret_cast<void*>(MarkerFinished));
-            assert(addr != reinterpret_cast<void*>(MarkerDestroyed)
-                && "Unexpected race between destroy and resume");
+            assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
             if (addr) {
                 return std::coroutine_handle<>::from_address(addr);
             } else {
@@ -101,10 +118,12 @@ namespace coroactors::detail {
             }
         }
 
-        // Returns true if the promise has finished normally
-        bool finished() const noexcept {
-            void* addr = continuation.load(std::memory_order_acquire);
-            return addr == reinterpret_cast<void*>(MarkerFinished);
+        void cancel() noexcept {
+            // Called by awaiter when it is destroyed without resuming
+            // Tries to make sure it will not be resumed or destroyed later,
+            // but it's up to the user to make sure there is no race with both
+            // ends trying to resume/destroy the same coroutine frame.
+            continuation.store(nullptr, std::memory_order_release);
         }
 
     private:
@@ -112,150 +131,80 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerDestroyed = 2;
 
     private:
+        continuation_result<T>* const result;
         std::atomic<void*> continuation{ nullptr };
     };
 
-    template<class TCallback>
-    class with_continuation_promise {
+    template<class T, class TCallback>
+    class with_continuation_awaiter
+        : private continuation_result<T>
+    {
     public:
-        with_continuation_promise(TCallback& callback) noexcept
+        with_continuation_awaiter(TCallback& callback) noexcept
             : callback(callback)
         {}
 
-        ~with_continuation_promise() noexcept {
-            if (auto continuation = state->destroy()) {
-                // Promise was destroyed instead of resuming
-                // Propagate it to the continuation
-                continuation.destroy();
-            }
-        }
-
-        [[nodiscard]] with_continuation_coroutine<TCallback> get_return_object() noexcept {
-            return with_continuation_coroutine(
-                with_continuation_handle<TCallback>::from_promise(*this),
-                state);
-        }
-
-        auto initial_suspend() noexcept { return std::suspend_always{}; }
-
-        struct TFinalSuspend {
-            bool await_ready() noexcept { return false; }
-
-            __attribute__((__noinline__))
-            std::coroutine_handle<> await_suspend(with_continuation_handle<TCallback> c) noexcept {
-                auto& self = c.promise();
-                if (auto continuation = self.state->finish()) {
-                    // Resumed after continuation was set
-                    // destroy ourselves and switch to that continuation
-                    c.destroy();
-                    return continuation;
-                }
-                // We resumed before continuation was set
-                // Suspend and give awaiter a chance to clean us up
-                return std::noop_coroutine();
-            }
-
-            void await_resume() noexcept {}
-        };
-
-        auto final_suspend() noexcept { return TFinalSuspend{}; }
-
-        void run_callback(std::coroutine_handle<> c) {
-            // Note: we may be destroyed before callback returns
-            std::forward<TCallback>(callback)(std::move(c));
-        }
-
-        void unhandled_exception() noexcept {
-            // our coroutine never throws exceptions
-        }
-
-        void return_void() noexcept {
-            // nothing
-        }
-
-    private:
-        static constexpr uintptr_t MarkerFinished = 1;
-        static constexpr uintptr_t MarkerDestroyed = 2;
-
-    private:
-        TCallback& callback;
-        std::shared_ptr<with_continuation_state> state = std::make_shared<with_continuation_state>();
-    };
-
-    template<class TCallback>
-    class with_continuation_coroutine {
-        friend class with_continuation_promise<TCallback>;
-
-        with_continuation_coroutine(
-                with_continuation_handle<TCallback> handle,
-                const std::shared_ptr<with_continuation_state>& state) noexcept
-            : handle(handle)
-            , state(state)
+        // Awaiter should only ever be moved before await starts
+        // So all we have to move is reference to the callback
+        with_continuation_awaiter(with_continuation_awaiter&& rhs) noexcept
+            : callback(rhs.callback)
         {}
 
-    public:
-        using promise_type = with_continuation_promise<TCallback>;
+        with_continuation_awaiter& operator=(const with_continuation_awaiter&) = delete;
 
-        with_continuation_coroutine(with_continuation_coroutine&& rhs) noexcept
-            : handle(std::exchange(rhs.handle, {}))
-            , state(std::move(rhs.state))
-            , suspended(rhs.suspended)
-        {}
-
-        ~with_continuation_coroutine() {
-            if (handle) {
-                if (suspended) {
-                    switch (state->cancel()) {
-                    case with_continuation_state::status::set:
-                        // Continue bottom-up frame cleanup
-                        handle.destroy();
-                        break;
-                    case with_continuation_state::status::finished:
-                    case with_continuation_state::status::destroyed:
-                        // Nothing to clean up
-                        break;
-                    }
-                } else {
-                    handle.destroy();
-                }
+        ~with_continuation_awaiter() noexcept {
+            if (auto state = state_.lock()) {
+                state->cancel();
             }
         }
 
-        with_continuation_coroutine& operator=(const with_continuation_coroutine&) = delete;
-
-        bool await_ready() {
-            assert(handle && !suspended);
-            handle.promise().run_callback(handle);
-            // Note: handle may be destroyed already, in that case we will suspend
-            return state->finished();
+        bool await_ready() noexcept {
+            auto state = std::make_shared<continuation_state<T>>(
+                static_cast<continuation_result<T>*>(this));
+            state_ = state;
+            std::forward<TCallback>(callback)(continuation<T>(state));
+            // Avoid suspending when continuation has the result already
+            return this->has_result();
         }
 
         __attribute__((__noinline__))
         bool await_suspend(std::coroutine_handle<> c) noexcept {
-            suspended = true;
-            switch (state->set_continuation(c)) {
-            case with_continuation_state::status::set:
-                // May resume concurrently
-                return true;
-            case with_continuation_state::status::finished:
-                // Actually resumed already
-                suspended = false;
-                return false;
-            case with_continuation_state::status::destroyed:
-                // Actually destroyed already
-                c.destroy();
+            if (auto state = state_.lock()) {
+                if (!state->set_continuation(c)) {
+                    // Continuation resumed concurrently in another thread
+                    // Note: there is no result synchronization yet
+                    return false;
+                }
+
+                // Continuation is set and this coroutine will be resumed or
+                // destroyed eventually, possibly concurrently with us in
+                // another thread. There's also an edge case where the last
+                // reference is dropped while we are holding on to the state,
+                // but state destructor will then destroy our own coroutine
+                // frame, which should be ok since we are suspended.
                 return true;
             }
+
+            // Continuation object is already destroyed, which could happen
+            // just after it was resumed with some result. We should resume.
+            if (this->has_result()) {
+                return false;
+            }
+
+            // The last reference was dropped without resuming, so we need to
+            // destroy our own coroutine frame.
+            c.destroy();
+            return true;
         }
 
-        void await_resume() noexcept {
-            // caller resumed
+        T await_resume() {
+            state_.reset();
+            return this->take_result();
         }
 
     private:
-        with_continuation_handle<TCallback> handle;
-        std::shared_ptr<with_continuation_state> state;
-        bool suspended = false;
+        std::weak_ptr<continuation_state<T>> state_;
+        TCallback& callback;
     };
 
 } // namespace coroactors::detail
@@ -263,7 +212,99 @@ namespace coroactors::detail {
 namespace coroactors {
 
     /**
-     * Provides arbitrary suspension points to coroutines
+     * A type-safe resumable continuation of an arbitrary coroutine
+     */
+    template<class T = void>
+    class continuation {
+        template<class TResult, class TCallback>
+        friend class detail::with_continuation_awaiter;
+
+        continuation(const std::shared_ptr<detail::continuation_state<T>>& state)
+            : state(std::move(state))
+        {}
+
+    public:
+        continuation() noexcept = default;
+
+        explicit operator bool() const noexcept {
+            return bool(state);
+        }
+
+        void reset() noexcept {
+            state.reset();
+        }
+
+        /**
+         * Returns a coroutine handle that may be resumed manually with the
+         * result constructed from args
+         */
+        template<class... TArgs>
+        std::coroutine_handle<> release_with_result(TArgs&&... args)
+            noexcept(std::is_void_v<T>)
+        {
+            state->set_result(std::forward<TArgs>(args)...);
+            if (auto c = state->finish()) {
+                return c;
+            } else {
+                return std::noop_coroutine();
+            }
+        }
+
+        /**
+         * Returns a coroutine handle that may be resumed manually by throwing
+         * an exception
+         */
+        std::coroutine_handle<> release_with_exception(std::exception_ptr&& e) noexcept {
+            state->set_exception(std::move(e));
+            if (auto c = state->finish()) {
+                return c;
+            } else {
+                return std::noop_coroutine();
+            }
+        }
+
+        /**
+         * Resumes continuation with the result constructed from args
+         *
+         * Returns true if suspended continuation was resumed
+         * Returns false if continuation will continue without suspending
+         */
+        template<class... TArgs>
+        bool resume(TArgs&&... args)
+            noexcept(std::is_void_v<T>)
+        {
+            state->set_result(std::forward<TArgs>(args)...);
+            if (auto c = state->finish()) {
+                c.resume();
+                return true;
+            } else {
+                return false;
+            }
+        }
+
+        /**
+         * Resumes continuation by throwing an exception
+         *
+         * Returns true if suspended continuation was resumed
+         * Returns false if continuation will continue without suspending
+         */
+        bool resume_with_exception(std::exception_ptr&& e) noexcept {
+            state->set_exception(std::move(e));
+            if (auto c = state->finish()) {
+                c.resume();
+                return true;
+            } else {
+                return false;
+            }
+        }
+
+    private:
+        // Note: awaiter only keeps a weak reference to this state
+        std::shared_ptr<detail::continuation_state<T>> state;
+    };
+
+    /**
+     * Provides arbitrary suspension points for coroutines
      *
      * When the result is co_awaited (which must happen in the same expression
      * as the call to with_continuation) callback will be called with some
@@ -271,14 +312,20 @@ namespace coroactors {
      * awaiting coroutine might not suspend if the provided handle is resumed
      * before the callback returns.
      */
-    template<class TCallback>
-    detail::with_continuation_coroutine<TCallback>
-    with_continuation(TCallback&& callback)
-        requires (detail::is_with_continuation_callback<TCallback>)
+    template<class T, class TCallback>
+    detail::with_continuation_awaiter<T, TCallback>
+    with_continuation(TCallback&& callback) noexcept
+        requires (detail::is_with_continuation_callback<TCallback, T>)
     {
-        // Note: coroutine binds to the argument and calls callback when awaited
-        (void)callback;
-        co_return;
+        return detail::with_continuation_awaiter<T, TCallback>(callback);
+    }
+
+    template<class TCallback>
+    detail::with_continuation_awaiter<void, TCallback>
+    with_continuation(TCallback&& callback) noexcept
+        requires (detail::is_with_continuation_callback<TCallback, void>)
+    {
+        return detail::with_continuation_awaiter<void, TCallback>(callback);
     }
 
 } // namespace coroactors

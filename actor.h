@@ -431,10 +431,14 @@ namespace coroactors::detail {
         }
 
         template<awaiter TAwaiter>
-        struct TContextReleaseRestoreAwaiter {
+        class TContextReleaseRestoreAwaiter {
             using TResult = decltype(std::declval<TAwaiter&>().await_resume());
 
-            TAwaiter awaiter;
+        public:
+            template<class TArg>
+            TContextReleaseRestoreAwaiter(TArg&& arg)
+                : awaiter(std::forward<TArg>(arg))
+            {}
 
             bool await_ready()
                 noexcept(has_noexcept_await_ready<TAwaiter>)
@@ -498,6 +502,9 @@ namespace coroactors::detail {
             {
                 return awaiter.await_resume();
             }
+
+        private:
+            TAwaiter awaiter;
         };
 
         // N.B.: it's awaitable and not awaitable<actor_promise<T>>
