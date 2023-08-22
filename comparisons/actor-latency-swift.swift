@@ -85,7 +85,7 @@ func main() async {
     }
 
     print("Warming up...")
-    var r = count / numPingers / 100
+    let r = count / numPingers / 100
     _ = await pingers[0].run(r, start: clock.now, withLatencies: withLatencies)
 
     print("Starting...")
@@ -111,10 +111,11 @@ func main() async {
     }
     let end = clock.now
 
+    var sum = 0
     for pingable in pingables {
-        r += await pingable.getCounter()
+        sum += await pingable.getCounter()
     }
-    assert(r == count)
+    precondition(sum == r + count)
 
     let elapsed = end - start
     let elapsedSeconds = elapsed / Duration.seconds(1)
