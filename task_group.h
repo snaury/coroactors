@@ -347,6 +347,9 @@ namespace coroactors {
 
         task_group() = default;
 
+        task_group(const task_group&) = delete;
+        task_group& operator=(const task_group&) = delete;
+
         task_group(task_group&& rhs)
             : sink_(std::move(rhs.sink_))
             , count_(rhs.count_)
@@ -362,8 +365,6 @@ namespace coroactors {
                 sink_->detach();
             }
         }
-
-        task_group& operator=(const task_group&) = delete;
 
         /**
          * Adds a new awaitable to the task group and returns its index

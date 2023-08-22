@@ -375,6 +375,9 @@ namespace coroactors::detail {
                 , c(c)
             {}
 
+            TRestoreContextCallback(const TRestoreContextCallback&) = delete;
+            TRestoreContextCallback& operator=(const TRestoreContextCallback&) = delete;
+
             TRestoreContextCallback(TRestoreContextCallback&& rhs) noexcept
                 : self(rhs.self)
                 , c(std::exchange(rhs.c, {}))
@@ -388,8 +391,6 @@ namespace coroactors::detail {
                     c.destroy();
                 }
             }
-
-            TRestoreContextCallback& operator=(const TRestoreContextCallback&) = delete;
 
             std::coroutine_handle<> operator()() noexcept {
                 if (auto next = self.context.push(std::exchange(c, {}))) {
@@ -430,15 +431,25 @@ namespace coroactors::detail {
             return std::noop_coroutine();
         }
 
-        template<awaiter TAwaiter>
+        template<awaitable TAwaitable>
         class TContextReleaseRestoreAwaiter {
+            // Note: TAwaiter may be a reference type
+            using TAwaiter = decltype(get_awaiter(std::declval<TAwaitable&&>()));
+            // Note: TResult may be a reference type
             using TResult = decltype(std::declval<TAwaiter&>().await_resume());
 
         public:
-            template<class TArg>
-            TContextReleaseRestoreAwaiter(TArg&& arg)
-                : awaiter(std::forward<TArg>(arg))
+            // Note: if operator co_await returns a value we will construct it
+            // in place without moves. If it returns a reference we will bind
+            // to that. This should be safe because it's all part of the same
+            // co_await expression and we have the same lifetime as the
+            // awaitable.
+            TContextReleaseRestoreAwaiter(TAwaitable&& awaitable)
+                : awaiter(get_awaiter(std::forward<TAwaitable>(awaitable)))
             {}
+
+            TContextReleaseRestoreAwaiter(const TContextReleaseRestoreAwaiter&) = delete;
+            TContextReleaseRestoreAwaiter& operator=(const TContextReleaseRestoreAwaiter&) = delete;
 
             bool await_ready()
                 noexcept(has_noexcept_await_ready<TAwaiter>)
@@ -515,10 +526,7 @@ namespace coroactors::detail {
         {
             check_context_initialized();
 
-            using TAwaiter = std::remove_reference_t<decltype(get_awaiter((TAwaitable&&) awaitable))>;
-            return TContextReleaseRestoreAwaiter<TAwaiter>{
-                get_awaiter((TAwaitable&&) awaitable)
-            };
+            return TContextReleaseRestoreAwaiter<TAwaitable>((TAwaitable&&) awaitable);
         }
 
         // Awaitables marked with is_actor_passthru_awaitable claim to support
@@ -558,11 +566,12 @@ namespace coroactors::detail {
             : handle(h)
         {}
 
+        actor_awaiter(const actor_awaiter&) = delete;
+        actor_awaiter& operator=(const actor_awaiter&) = delete;
+
         actor_awaiter(actor_awaiter&& rhs)
             : handle(std::exchange(rhs.handle, {}))
         {}
-
-        actor_awaiter& operator=(const actor_awaiter&) = delete;
 
         ~actor_awaiter() noexcept {
             if (handle) {
@@ -609,11 +618,12 @@ namespace coroactors::detail {
             : handle(h)
         {}
 
+        actor_result_awaiter(const actor_result_awaiter&) = delete;
+        actor_result_awaiter& operator=(const actor_result_awaiter&) = delete;
+
         actor_result_awaiter(actor_result_awaiter&& rhs)
             : handle(std::exchange(rhs.handle, {}))
         {}
-
-        actor_result_awaiter& operator=(const actor_result_awaiter&) = delete;
 
         ~actor_result_awaiter() noexcept {
             if (handle) {

@@ -144,13 +144,14 @@ namespace coroactors::detail {
             : callback(callback)
         {}
 
-        // Awaiter should only ever be moved before await starts
-        // So all we have to move is reference to the callback
+        with_continuation_awaiter(const with_continuation_awaiter&) = delete;
+        with_continuation_awaiter& operator=(const with_continuation_awaiter&) = delete;
+
+        // Awaiter may be moved by some wrappers, but only before the await
+        // starts, so all we have to "move" is a reference to the callback
         with_continuation_awaiter(with_continuation_awaiter&& rhs) noexcept
             : callback(rhs.callback)
         {}
-
-        with_continuation_awaiter& operator=(const with_continuation_awaiter&) = delete;
 
         ~with_continuation_awaiter() noexcept {
             if (auto state = state_.lock()) {

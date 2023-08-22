@@ -46,12 +46,13 @@ struct with_suspend_hook {
     }
 };
 
-template<detail::awaiter TAwaiter>
+template<detail::awaitable TAwaitable>
 class autostart_inspect {
+    using TAwaiter = decltype(detail::get_awaiter(std::declval<TAwaitable&&>()));
+
 public:
-    template<class TArg>
-    autostart_inspect(TArg&& arg)
-        : awaiter(std::forward<TArg>(arg))
+    autostart_inspect(TAwaitable&& awaitable)
+        : awaiter(detail::get_awaiter((TAwaitable&&) awaitable))
     {}
 
     bool await_ready() {
@@ -90,8 +91,7 @@ struct autostart_promise {
 
     template<detail::awaitable TAwaitable>
     auto await_transform(TAwaitable&& awaitable) {
-        using TAwaiter = std::remove_reference_t<decltype(detail::get_awaiter((TAwaitable&&)awaitable))>;
-        return autostart_inspect<TAwaiter>(detail::get_awaiter((TAwaitable&&)awaitable));
+        return autostart_inspect<TAwaitable>((TAwaitable&&) awaitable);
     }
 };
 
