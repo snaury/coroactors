@@ -1,8 +1,8 @@
 #pragma once
-#include "actor_context.h"
-#include "detail/awaiters.h"
-#include "detail/result.h"
-#include "with_resume_callback.h"
+#include <coroactors/actor_context.h>
+#include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/result.h>
+#include <coroactors/with_resume_callback.h>
 #include <cassert>
 #include <functional>
 #include <type_traits>

@@ -1,4 +1,4 @@
-#include "detail/mailbox.h"
+#include <coroactors/detail/mailbox.h>
 #include <benchmark/benchmark.h>
 #include <thread>
 

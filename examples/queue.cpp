@@ -1,5 +1,5 @@
-#include <actor.h>
-#include <with_continuation.h>
+#include <coroactors/actor.h>
+#include <coroactors/with_continuation.h>
 #include <deque>
 
 using namespace coroactors;

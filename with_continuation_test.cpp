@@ -1,7 +1,7 @@
-#include "with_continuation.h"
-#include "actor.h"
-#include "detach_awaitable.h"
-#include "detail/awaiters.h"
+#include <coroactors/with_continuation.h>
+#include <coroactors/actor.h>
+#include <coroactors/detach_awaitable.h>
+#include <coroactors/detail/awaiters.h>
 #include <exception>
 #include <functional>
 #include <gtest/gtest.h>

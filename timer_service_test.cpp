@@ -1,6 +1,6 @@
-#include "actor.h"
-#include "detach_awaitable.h"
 #include "timer_service.h"
+#include <coroactors/actor.h>
+#include <coroactors/detach_awaitable.h>
 
 using namespace coroactors;
 

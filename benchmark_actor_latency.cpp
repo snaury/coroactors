@@ -1,6 +1,6 @@
-#include "actor.h"
-#include "detach_awaitable.h"
-#include "detail/blocking_queue.h"
+#include <coroactors/actor.h>
+#include <coroactors/detach_awaitable.h>
+#include <coroactors/detail/blocking_queue.h>
 #include <absl/synchronization/mutex.h>
 #include <deque>
 #include <iostream>

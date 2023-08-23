@@ -1,7 +1,7 @@
 #pragma once
-#include "actor_scheduler.h"
-#include "detail/awaiters.h"
-#include "detail/mailbox.h"
+#include <coroactors/actor_scheduler.h>
+#include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/mailbox.h>
 #include <cassert>
 #include <coroutine>
 

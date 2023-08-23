@@ -1,4 +1,4 @@
-#include "detail/blocking_queue.h"
+#include <coroactors/detail/blocking_queue.h>
 #include <benchmark/benchmark.h>
 #include <thread>
 

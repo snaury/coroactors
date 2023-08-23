@@ -1,5 +1,5 @@
 #pragma once
-#include "detail/result.h"
+#include <coroactors/detail/result.h>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
