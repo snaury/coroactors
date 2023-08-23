@@ -44,11 +44,12 @@ namespace coroactors {
         }
 
         /**
-         * Add continuation to this actor context
+         * Add a new continuation to this actor context
          *
-         * Returns the next continuation that is runnable on
-         * this context (could be scheduled using a scheduler),
-         * or nullptr if context may be running somewhere else.
+         * Returns it if this context becomes locked and runnable as the result
+         * of this push, which could either be resumed directly or scheduled
+         * using a scheduler. Returns nullptr if this context is currently
+         * locked and/or running, possibly in another thread.
          */
         std::coroutine_handle<> push(std::coroutine_handle<> c) const {
             if (impl_->mailbox.Push(c)) {
@@ -61,9 +62,12 @@ namespace coroactors {
         }
 
         /**
-         * Returns the next continuation from this actor context
+         * Returns the next continuation from this actor context or nullptr
          *
-         * May only be used when this context is currently running
+         * This context must be locked and running by the caller, otherwise the
+         * behavior is undefined. When nullptr is returned the context is
+         * unlocked and no longer runnable, which may become locked by another
+         * push possibly in another concurrent thread.
          */
         std::coroutine_handle<> pop() const {
             std::coroutine_handle<> k = impl_->mailbox.Pop();
@@ -73,6 +77,20 @@ namespace coroactors {
         /**
          * A placeholder type for `actor_context::operator()`
          */
+        struct bind_context_t {
+            const actor_context& context;
+        };
+
+        /**
+         * Will switch to this context before returning
+        */
+        bind_context_t operator()() const {
+            return bind_context_t{ *this };
+        }
+
+        /**
+         * A placeholder type for `actor_context::operator(awaitable)`
+         */
         template<detail::awaitable Awaitable>
         struct bind_awaitable_t {
             Awaitable&& awaitable;
@@ -80,7 +98,10 @@ namespace coroactors {
         };
 
         /**
-         * Returns an awaitable that will switch to this context before returning
+         * Returns a wrapped awaitable that will release current context before
+         * suspending and will switch actor to this context before returning.
+         * It is guaranteed that awaitable's await_ready will be called with
+         * actor's current context locked however.
          */
         template<detail::awaitable Awaitable>
         bind_awaitable_t<Awaitable> operator()(Awaitable&& awaitable) const {
@@ -95,7 +116,19 @@ namespace coroactors {
          */
         struct caller_context_t {
             /**
-             * A placeholder type for `actor_context::caller_context(...)`
+             * A placeholder type for `actor_context::caller_context()`
+             */
+            struct bind_context_t {};
+
+            /**
+             * Will switch to caller context before returning when awaited
+            */
+            bind_context_t operator()() const {
+                return bind_context_t{};
+            }
+
+            /**
+             * A placeholder type for `actor_context::caller_context(awaitable)`
              */
             template<detail::awaitable Awaitable>
             struct bind_awaitable_t {
@@ -103,7 +136,10 @@ namespace coroactors {
             };
 
             /**
-             * Returns an awaitable that will switch to a caller context before returning
+             * Returns a wrapped awaitable that will release current context
+             * before suspending and will switch actor caller context before
+             * returning. It is guaranteed that awaitable's await_ready will
+             * be called with actor's current context locked however.
              */
             template<detail::awaitable Awaitable>
             bind_awaitable_t<Awaitable> operator()(Awaitable&& awaitable) const {
@@ -114,9 +150,19 @@ namespace coroactors {
         };
 
         /**
-         * Binds to actor coroutine's caller (awaiter) context when awaited
+         * Placeholder for the context of the current actor's caller (awaiter)
          */
         static constexpr caller_context_t caller_context;
+
+        /**
+         * A placeholder type for `actor_context::current_context`
+         */
+        struct current_context_t {};
+
+        /**
+         * Placeholder for the context of the current actor
+         */
+        static constexpr current_context_t current_context;
 
         /**
          * A placeholder type for `actor_context::yield`

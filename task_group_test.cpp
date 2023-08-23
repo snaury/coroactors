@@ -143,7 +143,7 @@ enum class EAction {
 };
 
 actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::function<EAction()> next) {
-    co_await no_actor_context;
+    co_await no_actor_context();
     std::vector<int> results;
     task_group<int> group;
     for (;;) {

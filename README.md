@@ -15,7 +15,7 @@ This repository takes ideas from the Swift language and standard library, and tr
 
 ## Actors with C++ coroutines
 
-The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either return immediately or `co_await` an `actor_context` instance, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context. Unlike a mutex it is automatically released when coroutine `co_await`s an awaitable, and reacquired before that awaitable returns. For efficiency this release/reacquire only happens when coroutine actually suspends.
+The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either return immediately or `co_await` on `actor_context::operator()` call, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context.
 
 ```c++
 class Counter {
@@ -23,17 +23,17 @@ public:
     // ...
 
     actor<int> get() const {
-        co_await context;
+        co_await context();
         co_return value_;
     }
 
     actor<void> set(int value) {
-        co_await context;
+        co_await context();
         value_ = value;
     }
 
     actor<int> increment() {
-        co_await context;
+        co_await context();
         co_return ++value_;
     }
 
@@ -45,7 +45,7 @@ private:
 
 Multiple coroutines may be calling `Counter` methods concurrently, but all accesses to the `value_` member variables will be serialized automatically.
 
-Unlike a mutex context is automatically released when actor `co_await`s an awaitable, and required before that awaitable returns. For efficiency this release/reacquire only happens when coroutine actually suspends. For example:
+Unlike a mutex context is automatically released when actor `co_await`s an awaitable, and reacquired before that awaitable returns. For efficiency this release/reacquire only happens when coroutine actually suspends. For example:
 
 ```c++
 // Note: not an actor coroutine
@@ -56,7 +56,7 @@ public:
     // ...
 
     actor<std::string> get(const std::string& url) {
-        co_await context;
+        co_await context();
         if (!cache.contains(url)) {
             // Context automatically released on co_await
             std::string data = co_await fetch_url(url);
@@ -67,7 +67,7 @@ public:
     }
 
 private:
-    actor_context context;
+    actor_context context();
     std::unordered_map<std::string, std::string> cache;
 }
 ```

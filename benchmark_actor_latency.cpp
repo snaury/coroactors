@@ -15,7 +15,7 @@ using TTime = std::chrono::time_point<TClock>;
 class TPingable {
 public:
     actor<int> ping() {
-        co_await context;
+        co_await context();
         int result = ++counter;
         co_return result;
     }
@@ -36,7 +36,7 @@ public:
     {}
 
     actor<TRunResult> runWithoutLatencies(int count) {
-        co_await context;
+        co_await context();
 
         for (int i = 0; i < count; ++i) {
             int value = co_await pingable.ping();
@@ -47,7 +47,7 @@ public:
     }
 
     actor<TRunResult> runWithLatencies(int count, TTime start) {
-        co_await context;
+        co_await context();
 
         TTime end = TClock::now();
         auto maxLatency = std::chrono::duration_cast<std::chrono::microseconds>(end - start);

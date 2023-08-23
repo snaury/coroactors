@@ -9,17 +9,17 @@ public:
     {}
 
     actor<int> get() const {
-        co_await context;
+        co_await context();
         co_return value_;
     }
 
     actor<void> set(int value) {
-        co_await context;
+        co_await context();
         value_ = value;
     }
 
     actor<int> increment() {
-        co_await context;
+        co_await context();
         co_return ++value_;
     }
 

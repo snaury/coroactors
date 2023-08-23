@@ -7,8 +7,8 @@ namespace coroactors {
      * Used as the return type of actor coroutines
      *
      * Actor coroutines are eagerly started, but must either return the result,
-     * or co_await context first. When bound to a context they will continue
-     * execution on that context, automatically releasing it on co_awaits and
+     * or co_await context() first. When bound to a context they will continue
+     * executing on that context, automatically releasing it on co_awaits and
      * reacquiring it before they return.
      */
     template<class T>

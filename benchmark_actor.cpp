@@ -40,7 +40,7 @@ public:
 
     __attribute__((__noinline__))
     actor<int> increment() {
-        co_await context;
+        co_await context();
         co_return ++value_;
     }
 
@@ -76,18 +76,18 @@ public:
 
     __attribute__((__noinline__))
     actor<int> get_const_context() const {
-        co_await context;
+        co_await context();
         co_return 42;
     }
 
     __attribute__((__noinline__))
     actor<int> get_indirect() const {
-        co_await context;
+        co_await context();
         co_return co_await counter.increment();
     }
 
     actor<void> run_const_immediate(benchmark::State& state) {
-        co_await context;
+        co_await context();
         for (auto _ : state) {
             int value = co_await get_const_immediate();
             benchmark::DoNotOptimize(value);
@@ -96,7 +96,7 @@ public:
     }
 
     actor<void> run_const_context(benchmark::State& state) {
-        co_await context;
+        co_await context();
         for (auto _ : state) {
             int value = co_await get_const_context();
             benchmark::DoNotOptimize(value);
@@ -105,7 +105,7 @@ public:
     }
 
     actor<void> run_direct(benchmark::State& state) {
-        co_await context;
+        co_await context();
         for (auto _ : state) {
             int value = co_await counter.increment();
             benchmark::DoNotOptimize(value);
@@ -114,7 +114,7 @@ public:
     }
 
     actor<void> run_indirect(benchmark::State& state) {
-        co_await context;
+        co_await context();
         for (auto _ : state) {
             int value = co_await get_indirect();
             benchmark::DoNotOptimize(value);

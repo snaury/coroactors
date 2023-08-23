@@ -273,36 +273,36 @@ namespace coroactors::detail {
             }
         };
 
-        switch_context_awaiter await_transform(const actor_context& to) {
+        switch_context_awaiter await_transform(actor_context::bind_context_t bound) {
             if (!context_initialized) {
                 // This is the first time we suspend
                 assert(!context_inherited);
-                context = to;
+                context = bound.context;
                 context_initialized = true;
-                return switch_context_awaiter{ to, ESwitchContext::Initial };
+                return switch_context_awaiter{ bound.context, ESwitchContext::Initial };
             }
 
-            if (context == to) {
+            if (context == bound.context) {
                 // We are not changing context, no op
-                return switch_context_awaiter{ to, ESwitchContext::Ready };
+                return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
-            if (!to) {
+            if (!bound.context) {
                 // Switching to an empty context, release without suspending
                 auto from = std::move(context);
-                context = to;
+                context = bound.context;
                 assert(from);
                 if (auto next = from.pop()) {
                     from.scheduler().schedule(next);
                 }
-                return switch_context_awaiter{ to, ESwitchContext::Ready };
+                return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
             // We need to suspend and resume on the new context
-            return switch_context_awaiter{ to, ESwitchContext::Switch };
+            return switch_context_awaiter{ bound.context, ESwitchContext::Switch };
         }
 
-        auto await_transform(actor_context::caller_context_t) {
+        auto await_transform(actor_context::caller_context_t::bind_context_t) {
             if (!context_initialized) {
                 // This is the first time we suspend
                 assert(!context_inherited);
@@ -310,7 +310,8 @@ namespace coroactors::detail {
                 return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
             }
 
-            return await_transform(continuation_context);
+            // Reuse await_transform above for binding to continuation context
+            return await_transform(actor_context::bind_context_t{ continuation_context });
         }
 
         void check_context_initialized() const {
@@ -318,6 +319,26 @@ namespace coroactors::detail {
                 [[unlikely]]
                 throw std::logic_error("actor must co_await context first");
             }
+        }
+
+        struct return_context_awaiter_t {
+            const actor_context& context;
+
+            bool await_ready() noexcept { return true; }
+            bool await_suspend(std::coroutine_handle<>) noexcept { return false; }
+            const actor_context& await_resume() noexcept { return context; }
+        };
+
+        auto await_transform(actor_context::caller_context_t) {
+            check_context_initialized();
+
+            return return_context_awaiter_t{ context };
+        }
+
+        auto await_transform(actor_context::current_context_t) {
+            check_context_initialized();
+
+            return return_context_awaiter_t{ continuation_context };
         }
 
         struct yield_context_awaiter_t {

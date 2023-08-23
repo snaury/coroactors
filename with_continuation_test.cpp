@@ -306,14 +306,14 @@ struct test_scheduler : public actor_scheduler {
 
 template<class Callback>
 actor<void> actor_with_continuation(const actor_context& context, int* stage, Callback callback) {
-    co_await context;
+    co_await context();
     *stage = 1;
     co_await with_continuation(callback);
     *stage = 2;
 }
 
 actor<int> actor_with_result(const actor_context& context, int result) {
-    co_await context;
+    co_await context();
     co_return result;
 }
 
@@ -433,7 +433,7 @@ private:
 };
 
 actor<void> actor_wrapper(actor<void> nested, int* refs) {
-    co_await no_actor_context;
+    co_await no_actor_context();
     count_refs_guard guard{ refs };
     co_await std::move(nested);
 }

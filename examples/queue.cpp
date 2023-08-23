@@ -11,7 +11,7 @@ public:
     {}
 
     actor<void> push(int value) {
-        co_await context;
+        co_await context();
         if (awaiters.empty()) {
             values.push_back(value);
         } else {
@@ -22,7 +22,7 @@ public:
     }
 
     actor<int> pop() {
-        co_await context;
+        co_await context();
         if (values.empty()) {
             // Note: we use caller_context here to make sure push does not have
             // to serialize on this actor context when resuming continuations.
