@@ -160,6 +160,116 @@ private:
 };
 
 template<class T>
+class TBlockingQueueWithAbslMailbox {
+public:
+    TBlockingQueueWithAbslMailbox() {
+        Active = !Mailbox.TryUnlock();
+    }
+
+    template<class... TArgs>
+    void Push(TArgs&&... args) {
+        // Most of the time this will be lockfree
+        if (Mailbox.Push(std::forward<TArgs>(args)...)) {
+            absl::MutexLock l(&Lock);
+            Active = true;
+        }
+    }
+
+    T Pop() {
+        for (;;) {
+            absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::IsActive));
+            std::optional<T> result = Mailbox.TryPop();
+            if (!result) {
+                // This installed a waiter flag, now wait
+                Active = false;
+                continue;
+            }
+            return std::move(*result);
+        }
+    }
+
+    std::optional<T> TryPop() {
+        absl::MutexLock l(&Lock);
+        if (!Active) {
+            return std::nullopt;
+        }
+        std::optional<T> result = Mailbox.TryPop();
+        if (!result) {
+            // This installed a waiter flag, new ops will wait
+            Active = false;
+            return std::nullopt;
+        }
+        return std::move(*result);
+    }
+
+private:
+    bool IsActive() const {
+        return Active;
+    }
+
+public:
+    absl::Mutex Lock;
+    detail::TMailbox<T> Mailbox;
+    bool Active = false;
+};
+
+template<class T>
+class TBlockingQueueWithStdMailbox {
+public:
+    TBlockingQueueWithStdMailbox() {
+        Active = !Mailbox.TryUnlock();
+    }
+
+    template<class... TArgs>
+    void Push(TArgs&&... args) {
+        // Most of the time this will be lockfree
+        if (Mailbox.Push(std::forward<TArgs>(args)...)) {
+            {
+                std::unique_lock l(Lock);
+                Active = true;
+            }
+            BecomeActive.notify_all();
+        }
+    }
+
+    T Pop() {
+        for (;;) {
+            std::unique_lock l(Lock);
+            while (!Active) {
+                BecomeActive.wait(l);
+            }
+            std::optional<T> result = Mailbox.TryPop();
+            if (!result) {
+                // This installed a waiter flag, now wait
+                Active = false;
+                continue;
+            }
+            return std::move(*result);
+        }
+    }
+
+    std::optional<T> TryPop() {
+        std::unique_lock l(Lock);
+        if (!Active) {
+            return std::nullopt;
+        }
+        std::optional<T> result = Mailbox.TryPop();
+        if (!result) {
+            // This installed a waiter flag, new ops will wait
+            Active = false;
+            return std::nullopt;
+        }
+        return std::move(*result);
+    }
+
+public:
+    std::mutex Lock;
+    std::condition_variable BecomeActive;
+    detail::TMailbox<T> Mailbox;
+    bool Active = false;
+};
+
+template<class T>
 class TBlockingQueue {
     struct IBlockingQueue {
         virtual ~IBlockingQueue() = default;
@@ -211,6 +321,8 @@ enum class ESchedulerQueue {
     LockFree,
     AbslMutex,
     StdMutex,
+    AbslMailbox,
+    StdMailbox,
 };
 
 class TScheduler : public actor_scheduler {
@@ -231,6 +343,14 @@ public:
             }
             case ESchedulerQueue::StdMutex: {
                 Queue.Reset<TBlockingQueueWithStdMutex<std::coroutine_handle<>>>();
+                break;
+            }
+            case ESchedulerQueue::AbslMailbox: {
+                Queue.Reset<TBlockingQueueWithAbslMailbox<std::coroutine_handle<>>>();
+                break;
+            }
+            case ESchedulerQueue::StdMailbox: {
+                Queue.Reset<TBlockingQueueWithStdMailbox<std::coroutine_handle<>>>();
                 break;
             }
         }
@@ -397,6 +517,14 @@ int main(int argc, char** argv) {
         }
         if (arg == "--use-std-mutex") {
             queueType = ESchedulerQueue::StdMutex;
+            continue;
+        }
+        if (arg == "--use-absl-mailbox") {
+            queueType = ESchedulerQueue::AbslMailbox;
+            continue;
+        }
+        if (arg == "--use-std-mailbox") {
+            queueType = ESchedulerQueue::StdMailbox;
             continue;
         }
         if (arg == "--without-latencies") {

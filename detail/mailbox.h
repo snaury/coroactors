@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace coroactors::detail {
@@ -50,10 +51,10 @@ namespace coroactors::detail {
          * Returns false when mailbox is already locked (or will be)
          * Returns true when a new first item is pushed and it became locked
          */
-        template<class TArg, class... TArgs>
-        bool Push(TArg&& arg, TArgs&&... args) {
+        template<class... TArgs>
+        bool Push(TArgs&&... args) {
             // Constructs a new item, it is the only point that may throw on Push
-            TNode* node = new TNode(std::forward<TArg>(arg), std::forward<TArgs>(args)...);
+            TNode* node = new TNode(std::forward<TArgs>(args)...);
             // Note: acquire/release synchronizes with another Push
             TNode* prev = Tail.exchange(node, std::memory_order_acq_rel);
             // Note: release synchronizes with Pop, acquire synchronizes with unlock
@@ -74,6 +75,28 @@ namespace coroactors::detail {
                 if (head->Next.compare_exchange_strong(next, (TNode*)MarkerUnlocked, std::memory_order_acq_rel)) {
                     // Successfully unlocked
                     return T();
+                }
+                // Lost the race: now next != nullptr
+                assert(next != nullptr);
+            }
+            assert(next != (TNode*)MarkerUnlocked);
+            std::unique_ptr<TNode> current(head);
+            Head = next;
+            return std::move(next->Item);
+        }
+
+        /**
+         * Returns the next item from the locked mailbox when it is not empty
+         * Returns std::nullopt and unlocks when mailbox is empty
+         */
+        std::optional<T> TryPop() {
+            TNode* head = Head;
+            TNode* next = head->Next.load(std::memory_order_acquire);
+            if (next == nullptr) {
+                // Mailbox is currently empty, try to unlock
+                if (head->Next.compare_exchange_strong(next, (TNode*)MarkerUnlocked, std::memory_order_acq_rel)) {
+                    // Successfully unlocked
+                    return std::nullopt;
                 }
                 // Lost the race: now next != nullptr
                 assert(next != nullptr);
