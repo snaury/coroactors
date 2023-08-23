@@ -159,114 +159,109 @@ private:
     size_t Waiters = 0;
 };
 
+static std::atomic<size_t> mailbox_wakeups{ 0 };
+
 template<class T>
 class TBlockingQueueWithAbslMailbox {
 public:
     TBlockingQueueWithAbslMailbox() {
-        Active = !Mailbox.TryUnlock();
+        MailboxLocked = !Mailbox.try_unlock();
     }
 
     template<class... TArgs>
     void Push(TArgs&&... args) {
         // Most of the time this will be lockfree
-        if (Mailbox.Push(std::forward<TArgs>(args)...)) {
+        if (Mailbox.emplace(std::forward<TArgs>(args)...)) {
+            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
             absl::MutexLock l(&Lock);
-            Active = true;
+            MailboxLocked = true;
         }
     }
 
     T Pop() {
         for (;;) {
-            absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::IsActive));
-            std::optional<T> result = Mailbox.TryPop();
-            if (!result) {
-                // This installed a waiter flag, now wait
-                Active = false;
-                continue;
+            absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::CanPop));
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
             }
-            return std::move(*result);
+            // Mailbox was unlocked, now wait
+            MailboxLocked = false;
         }
     }
 
     std::optional<T> TryPop() {
         absl::MutexLock l(&Lock);
-        if (!Active) {
-            return std::nullopt;
+        if (MailboxLocked) {
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
+            }
+            // Mailbox was unlocked, new ops will wait
+            MailboxLocked = false;
         }
-        std::optional<T> result = Mailbox.TryPop();
-        if (!result) {
-            // This installed a waiter flag, new ops will wait
-            Active = false;
-            return std::nullopt;
-        }
-        return std::move(*result);
+        return std::nullopt;
     }
 
 private:
-    bool IsActive() const {
-        return Active;
+    bool CanPop() const {
+        return MailboxLocked;
     }
 
 public:
     absl::Mutex Lock;
-    detail::TMailbox<T> Mailbox;
-    bool Active = false;
+    detail::mailbox<T> Mailbox;
+    bool MailboxLocked;
 };
 
 template<class T>
 class TBlockingQueueWithStdMailbox {
 public:
     TBlockingQueueWithStdMailbox() {
-        Active = !Mailbox.TryUnlock();
+        MailboxLocked = !Mailbox.try_unlock();
     }
 
     template<class... TArgs>
     void Push(TArgs&&... args) {
         // Most of the time this will be lockfree
-        if (Mailbox.Push(std::forward<TArgs>(args)...)) {
+        if (Mailbox.emplace(std::forward<TArgs>(args)...)) {
+            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
             {
                 std::unique_lock l(Lock);
-                Active = true;
+                MailboxLocked = true;
             }
-            BecomeActive.notify_all();
+            CanPop.notify_all();
         }
     }
 
     T Pop() {
+        std::unique_lock l(Lock);
         for (;;) {
-            std::unique_lock l(Lock);
-            while (!Active) {
-                BecomeActive.wait(l);
+            while (!MailboxLocked) {
+                CanPop.wait(l);
             }
-            std::optional<T> result = Mailbox.TryPop();
-            if (!result) {
-                // This installed a waiter flag, now wait
-                Active = false;
-                continue;
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
             }
-            return std::move(*result);
+            // Mailbox was unlocked, now wait
+            MailboxLocked = false;
         }
     }
 
     std::optional<T> TryPop() {
         std::unique_lock l(Lock);
-        if (!Active) {
-            return std::nullopt;
+        if (MailboxLocked) {
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
+            }
+            MailboxLocked = false;
         }
-        std::optional<T> result = Mailbox.TryPop();
-        if (!result) {
-            // This installed a waiter flag, new ops will wait
-            Active = false;
-            return std::nullopt;
-        }
-        return std::move(*result);
+        return std::nullopt;
     }
 
 public:
     std::mutex Lock;
-    std::condition_variable BecomeActive;
-    detail::TMailbox<T> Mailbox;
-    bool Active = false;
+    std::condition_variable CanPop;
+    detail::mailbox<T> Mailbox;
+    bool MailboxLocked;
 };
 
 template<class T>
@@ -479,6 +474,7 @@ int main(int argc, char** argv) {
     std::chrono::microseconds preemptUs(10);
     ESchedulerQueue queueType = ESchedulerQueue::LockFree;
     bool withLatencies = true;
+    bool debugWakeups = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -531,6 +527,10 @@ int main(int argc, char** argv) {
             withLatencies = false;
             continue;
         }
+        if (arg == "--debug-wakeups") {
+            debugWakeups = true;
+            continue;
+        }
         std::cerr << "ERROR: unexpected argument: " << argv[i] << std::endl;
         return 1;
     }
@@ -569,6 +569,12 @@ int main(int argc, char** argv) {
     long long rps = count * 1000000LL / elapsed.count();
     std::cout << "Finished in " << (elapsed.count() / 1000) << "ms (" << rps << "/s)"
         ", max latency = " << (maxLatency.count()) << "us" << std::endl;
+
+    if (debugWakeups) {
+        if (auto wakeups = mailbox_wakeups.load(std::memory_order_relaxed)) {
+            std::cout << "Mailbox wakeups: " << wakeups << std::endl;
+        }
+    }
 
     return 0;
 }

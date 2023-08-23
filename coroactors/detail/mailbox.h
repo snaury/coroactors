@@ -11,14 +11,14 @@ namespace coroactors::detail {
      * A multiple producers single consumer mailbox
      */
     template<class T>
-    class TMailbox {
-        struct TNode {
-            std::atomic<TNode*> Next{ nullptr };
-            T Item;
+    class mailbox {
+        struct node {
+            std::atomic<node*> next{ nullptr };
+            T item;
 
             template<class... TArgs>
-            explicit TNode(TArgs&&... args)
-                : Item(std::forward<TArgs>(args)...)
+            explicit node(TArgs&&... args)
+                : item(std::forward<TArgs>(args)...)
             {}
         };
 
@@ -26,125 +26,140 @@ namespace coroactors::detail {
         /**
          * Constructs a new mailbox, initially locked and empty
          */
-        TMailbox() = default;
+        mailbox() = default;
 
         /**
          * Destroys all items in the mailbox
          * Caller must ensure no concurrent operations are running
          */
-        ~TMailbox() {
-            TNode* head = std::exchange(Head, nullptr);
+        ~mailbox() noexcept {
+            std::unique_ptr<node> head(std::move(head_));
             assert(head != nullptr);
             do {
-                TNode* next = head->Next.load(std::memory_order_acquire);
-                if (next == (TNode*)MarkerUnlocked) {
+                node* next = head->next.load(std::memory_order_acquire);
+                if (next == reinterpret_cast<node*>(MarkerUnlocked)) {
                     next = nullptr;
                 }
-                delete head;
-                head = next;
+                head.reset(next);
             } while (head);
         }
 
     public:
         /**
-         * Appends a new item to the mailbox
-         * Returns false when mailbox is already locked (or will be)
-         * Returns true when a new first item is pushed and it became locked
+         * Emplaces a new item to this mailbox
+         *
+         * Thread-safe and lock-free (wait-free except for allocation when a
+         * new node and item are constructed), may be performed by any thread.
+         * Returns false when mailbox is already locked (or a concurrent push
+         * will return true sooner or later, unblocking the mailbox), which
+         * should be the most common case under contention. Returns true when a
+         * new first item is pushed (the next pop is guaranteed to remove it)
+         * and this operation locked the mailbox, caller is supposed to
+         * schedule it for processing.
          */
         template<class... TArgs>
-        bool Push(TArgs&&... args) {
-            // Constructs a new item, it is the only point that may throw on Push
-            TNode* node = new TNode(std::forward<TArgs>(args)...);
-            // Note: acquire/release synchronizes with another Push
-            TNode* prev = Tail.exchange(node, std::memory_order_acq_rel);
+        bool emplace(TArgs&&... args) {
+            // Constructs a new item, it is the only point that may throw on push
+            node* next = new node(std::forward<TArgs>(args)...);
+            // Note: acquire/release synchronizes with another push
+            node* prev = tail_.exchange(next, std::memory_order_acq_rel);
             // Note: release synchronizes with Pop, acquire synchronizes with unlock
-            TNode* marker = prev->Next.exchange(node, std::memory_order_acq_rel);
-            // The mailbox was unlocked only if previous Next was MarkerUnlocked
-            return marker == (TNode*)MarkerUnlocked;
+            node* marker = prev->next.exchange(next, std::memory_order_acq_rel);
+            // The mailbox was unlocked only if previous next was MarkerUnlocked
+            return marker == reinterpret_cast<node*>(MarkerUnlocked);
         }
 
+
+
         /**
-         * Returns the next item from the locked mailbox when it is not empty
-         * Returns a default value and unlocks when mailbox is empty
+         * Removes the next item from a locked mailbox
+         *
+         * Returns it when the next item is available.
+         * Returns a default value and unlocks otherwise.
          */
-        T Pop() {
-            TNode* head = Head;
-            TNode* next = head->Next.load(std::memory_order_acquire);
+        T pop_default() {
+            node* head = head_.get();
+            node* next = head->next.load(std::memory_order_acquire);
             if (next == nullptr) {
-                // Mailbox is currently empty, try to unlock
-                if (head->Next.compare_exchange_strong(next, (TNode*)MarkerUnlocked, std::memory_order_acq_rel)) {
+                // Next item is unavailable, try to unlock
+                if (head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_acq_rel)) {
                     // Successfully unlocked
                     return T();
                 }
                 // Lost the race: now next != nullptr
                 assert(next != nullptr);
             }
-            assert(next != (TNode*)MarkerUnlocked);
-            std::unique_ptr<TNode> current(head);
-            Head = next;
-            return std::move(next->Item);
+            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            head_.reset(next);
+            return std::move(next->item);
         }
 
         /**
-         * Returns the next item from the locked mailbox when it is not empty
-         * Returns std::nullopt and unlocks when mailbox is empty
+         * Removes the next item from a locked mailbox
+         *
+         * Returns it when the next item is available.
+         * Returns std::nullopt and unlocks otherwise.
          */
-        std::optional<T> TryPop() {
-            TNode* head = Head;
-            TNode* next = head->Next.load(std::memory_order_acquire);
+        std::optional<T> pop_optional() {
+            node* head = head_.get();
+            node* next = head->next.load(std::memory_order_acquire);
             if (next == nullptr) {
-                // Mailbox is currently empty, try to unlock
-                if (head->Next.compare_exchange_strong(next, (TNode*)MarkerUnlocked, std::memory_order_acq_rel)) {
+                // Next item is unavailable, try to unlock
+                if (head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_acq_rel)) {
                     // Successfully unlocked
                     return std::nullopt;
                 }
                 // Lost the race: now next != nullptr
                 assert(next != nullptr);
             }
-            assert(next != (TNode*)MarkerUnlocked);
-            std::unique_ptr<TNode> current(head);
-            Head = next;
-            return std::move(next->Item);
+            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            head_.reset(next);
+            return std::move(next->item);
         }
 
         /**
-         * Returns pointer to the next element or nullptr if the mailbox is empty
+         * Returns a pointer to the next item in a locked mailbox,
+         * or nullptr if no next item is available.
          */
-        const T* Peek() const {
-            TNode* head = Head;
-            TNode* next = head->Next.load(std::memory_order_acquire);
+        T* peek() {
+            node* head = head_.get();
+            node* next = head->next.load(std::memory_order_acquire);
             if (next == nullptr) {
-                // Mailbox is currently empty, keep it locked
+                // Next item is unavailable, keep it locked
                 return nullptr;
             }
-            return &next->Item;
+            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            return &next->item;
         }
 
         /**
-         * Returns true if the mailbox is empty and push is likely to produce a new first element
-         * Note: it may return false even when Peek returns nullptr, e.g. when a
-         * concurrent push is currently 
-         * Requires mailbox to be locked
+         * Returns true if the locked mailbox is empty and push is likely to
+         * produce a new first item. It may return false (not empty) even when
+         * peek returns nullptr (no item available), e.g. when a concurrent
+         * push operation is currently running and blocking mailbox head.
          */
-        bool Empty() const {
-            TNode* head = Head;
-            TNode* tail = Tail.load(std::memory_order_relaxed);
+        bool empty() const {
+            node* head = head_.get();
+            node* tail = tail_.load(std::memory_order_relaxed);
             return head == tail;
         }
 
         /**
-         * Tries to unlock an empty mailbox
-         * Returns true on success or false when it's not empty
+         * Tries to unlock a locked mailbox
+         *
+         * Returns true on success (a future or currently running concurrent
+         * push will return true and lock this mailbox) or false when there's
+         * an item currently available at the head.
          */
-        bool TryUnlock() {
-            TNode* head = Head;
-            TNode* next = head->Next.load(std::memory_order_relaxed);
+        bool try_unlock() {
+            node* head = head_.get();
+            node* next = head->next.load(std::memory_order_relaxed);
             if (next == nullptr) {
-                // We either succeed at unlocking or mailbox becomes non-empty
-                return head->Next.compare_exchange_strong(next, (TNode*)MarkerUnlocked, std::memory_order_release);
+                // We either succeed at unlocking or next item becomes available
+                return head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_release);
             }
-            assert(next != (TNode*)MarkerUnlocked);
-            // Mailbox is not empty
+            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            // Next item is available
             return false;
         }
 
@@ -152,10 +167,10 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerUnlocked = 1;
 
     private:
-        TNode* Head = new TNode;
-        char HeadPadding[64 - sizeof(Head)];
-        std::atomic<TNode*> Tail{ Head };
-        char TailPadding[64 - sizeof(Tail)];
+        std::unique_ptr<node> head_{ new node };
+        char head_padding[64 - sizeof(head_)];
+        std::atomic<node*> tail_{ head_.get() };
+        char tail_padding[64 - sizeof(tail_)];
     };
 
 } // namespace coroactors::detail

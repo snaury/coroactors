@@ -10,13 +10,15 @@ namespace coroactors {
     class actor_context {
         struct impl {
             actor_scheduler& scheduler;
-            detail::TMailbox<std::coroutine_handle<>> mailbox;
+            detail::mailbox<std::coroutine_handle<>> mailbox;
 
             explicit impl(class actor_scheduler& s)
                 : scheduler(s)
             {
-                // Mailbox must be initially unlocked
-                mailbox.TryUnlock();
+                // Change mailbox to initially unlocked
+                if (!mailbox.try_unlock()) {
+                    assert(false && "Unexpected failure to unlock the mailbox");
+                }
             }
         };
 
@@ -52,8 +54,9 @@ namespace coroactors {
          * locked and/or running, possibly in another thread.
          */
         std::coroutine_handle<> push(std::coroutine_handle<> c) const {
-            if (impl_->mailbox.Push(c)) {
-                std::coroutine_handle<> k = impl_->mailbox.Pop();
+            assert(c && "Attempt to push a nullptr coroutine handle");
+            if (impl_->mailbox.emplace(c)) {
+                std::coroutine_handle<> k = impl_->mailbox.pop_default();
                 assert(k == c);
                 return k;
             } else {
@@ -70,7 +73,7 @@ namespace coroactors {
          * push possibly in another concurrent thread.
          */
         std::coroutine_handle<> pop() const {
-            std::coroutine_handle<> k = impl_->mailbox.Pop();
+            std::coroutine_handle<> k = impl_->mailbox.pop_default();
             return k;
         }
 

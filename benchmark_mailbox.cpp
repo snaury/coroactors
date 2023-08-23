@@ -6,36 +6,36 @@ using namespace coroactors;
 
 static void TestBasics() {
     int item;
-    detail::TMailbox<int> mailbox;
-    assert(mailbox.Peek() == nullptr);
-    bool push1 = mailbox.Push(1);
+    detail::mailbox<int> mailbox;
+    assert(mailbox.peek() == nullptr);
+    bool push1 = mailbox.emplace(1);
     assert(push1 == false);
-    bool push2 = mailbox.Push(2);
+    bool push2 = mailbox.emplace(2);
     assert(push2 == false);
-    item = mailbox.Pop();
+    item = mailbox.pop_default();
     assert(item == 1);
-    item = mailbox.Pop();
+    item = mailbox.pop_default();
     assert(item == 2);
-    item = mailbox.Pop();
+    item = mailbox.pop_default();
     assert(item == 0);
-    bool push3 = mailbox.Push(3);
+    bool push3 = mailbox.emplace(3);
     assert(push3 == true);
-    const int* current = mailbox.Peek();
+    const int* current = mailbox.peek();
     assert(current && *current == 3);
-    bool unlocked = mailbox.TryUnlock();
+    bool unlocked = mailbox.try_unlock();
     assert(!unlocked);
-    item = mailbox.Pop();
+    item = mailbox.pop_default();
     assert(item == 3);
-    unlocked = mailbox.TryUnlock();
+    unlocked = mailbox.try_unlock();
     assert(unlocked);
 }
 
 static void BM_Push(benchmark::State& state) {
-    detail::TMailbox<int> mailbox;
+    detail::mailbox<int> mailbox;
     benchmark::DoNotOptimize(mailbox);
     int last = 0;
     for (auto _ : state) {
-        mailbox.Push(++last);
+        mailbox.emplace(++last);
     }
     state.SetItemsProcessed(state.iterations());
 }
@@ -43,12 +43,12 @@ static void BM_Push(benchmark::State& state) {
 BENCHMARK(BM_Push);
 
 static void BM_PushPop_NoThreads(benchmark::State& state) {
-    detail::TMailbox<int> mailbox;
+    detail::mailbox<int> mailbox;
     benchmark::DoNotOptimize(mailbox);
     int last = 0;
     for (auto _ : state) {
-        mailbox.Push(++last);
-        int value = mailbox.Pop();
+        mailbox.emplace(++last);
+        int value = mailbox.pop_default();
         assert(value == last);
         benchmark::DoNotOptimize(value);
     }
@@ -59,7 +59,7 @@ BENCHMARK(BM_PushPop_NoThreads);
 
 struct BM_PushPop : public benchmark::Fixture {
     struct TState {
-        detail::TMailbox<int> Mailbox;
+        detail::mailbox<int> Mailbox;
         std::atomic_signed_lock_free Semaphore{ 0 }; // initially locked
         std::optional<std::thread> Consumer;
         std::atomic<size_t> WakeUps{ 0 };
@@ -93,7 +93,7 @@ struct BM_PushPop : public benchmark::Fixture {
 
     void RunConsumer(size_t threads) {
         while (threads > 0) {
-            int value = State->Mailbox.Pop();
+            int value = State->Mailbox.pop_default();
             if (value == 0) {
                 // mailbox is empty and unlocked
                 WaitMailbox();
@@ -107,7 +107,7 @@ struct BM_PushPop : public benchmark::Fixture {
     }
 
     void Push(int value) {
-        if (State->Mailbox.Push(value)) {
+        if (State->Mailbox.emplace(value)) {
             WakeConsumer();
         }
     }
