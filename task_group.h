@@ -274,7 +274,7 @@ namespace coroactors::detail {
 
         auto initial_suspend() noexcept { return std::suspend_always(); }
 
-        struct TFinalSuspend {
+        struct final_suspend_t {
             bool await_ready() noexcept { return false; }
 
             __attribute__((__noinline__))
@@ -290,7 +290,7 @@ namespace coroactors::detail {
             void await_resume() noexcept {}
         };
 
-        auto final_suspend() noexcept { return TFinalSuspend{}; }
+        auto final_suspend() noexcept { return final_suspend_t{}; }
 
         void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
             this->result_->index = index;
@@ -403,9 +403,9 @@ namespace coroactors {
             return sink_->await_ready();
         }
 
-        class TNextAwaiter {
+        class next_awaiter_t {
         public:
-            explicit TNextAwaiter(task_group& group) noexcept
+            explicit next_awaiter_t(task_group& group) noexcept
                 : group(group)
             {}
 
@@ -432,13 +432,13 @@ namespace coroactors {
         /**
          * Returns the next available result value when awaited
          */
-        TNextAwaiter next() noexcept {
-            return TNextAwaiter{ *this };
+        next_awaiter_t next() noexcept {
+            return next_awaiter_t{ *this };
         }
 
-        class TNextResultAwaiter {
+        class next_result_awaiter_t {
         public:
-            explicit TNextResultAwaiter(task_group& group) noexcept
+            explicit next_result_awaiter_t(task_group& group) noexcept
                 : group(group)
             {}
 
@@ -465,8 +465,8 @@ namespace coroactors {
         /**
          * Returns the next available result wrapper when awaited
          */
-        TNextResultAwaiter next_result() noexcept {
-            return TNextResultAwaiter{ *this };
+        next_result_awaiter_t next_result() noexcept {
+            return next_result_awaiter_t{ *this };
         }
 
     private:

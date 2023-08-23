@@ -1,5 +1,6 @@
 #pragma once
 #include <coroutine>
+#include <stdexcept>
 
 namespace coroactors {
 
@@ -26,16 +27,27 @@ namespace coroactors {
 
     public:
         /**
-         * Returns scheduler bound to the current thread
+         * Returns scheduler bound to the current thread, or throws an exception
          */
-        static actor_scheduler* current() {
+        static actor_scheduler& current() {
+            if (current_) {
+                [[likely]]
+                return *current_;
+            }
+            throw std::runtime_error("current thread does not have an actor_scheduler");
+        }
+
+        /**
+         * Returns scheduler bound to the current thread, or nullptr
+         */
+        static actor_scheduler* current_ptr() noexcept {
             return current_;
         }
 
         /**
          * Sets scheduler bound to the current thread
          */
-        static void set(actor_scheduler* s) {
+        static void set_current_ptr(actor_scheduler* s) noexcept {
             current_ = s;
         }
 

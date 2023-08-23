@@ -21,7 +21,7 @@ public:
     }
 
 private:
-    actor_context context = actor_context::create();
+    actor_context context{ actor_scheduler::current() };
     int counter = 0;
 };
 
@@ -76,7 +76,7 @@ public:
     }
 
 private:
-    actor_context context = actor_context::create();
+    actor_context context{ actor_scheduler::current() };
     TPingable& pingable;
 };
 
@@ -270,7 +270,7 @@ public:
 
 private:
     void RunWorker() {
-        actor_scheduler::set(this);
+        actor_scheduler::set_current_ptr(this);
         TTime deadline{};
         thread_deadline = &deadline;
         while (auto c = Queue.Pop()) {
@@ -408,7 +408,7 @@ int main(int argc, char** argv) {
     }
 
     TScheduler scheduler(numThreads, preemptUs, queueType);
-    actor_scheduler::set(&scheduler);
+    actor_scheduler::set_current_ptr(&scheduler);
 
     std::deque<TPingable> pingables;
     std::deque<TPinger> pingers;

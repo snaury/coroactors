@@ -141,7 +141,7 @@ namespace coroactors::detail {
 
         static auto initial_suspend() noexcept { return std::suspend_never{}; }
 
-        struct TFinalSuspend {
+        struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
             static void await_resume() noexcept {}
 
@@ -182,7 +182,7 @@ namespace coroactors::detail {
             }
         };
 
-        static auto final_suspend() noexcept { return TFinalSuspend{}; }
+        static auto final_suspend() noexcept { return final_suspend_t{}; }
 
         template<class U>
         void set_continuation(actor_continuation<U> c) noexcept {
@@ -249,7 +249,7 @@ namespace coroactors::detail {
             Switch,
         };
 
-        struct TSwitchContextAwaiter {
+        struct switch_context_awaiter {
             const actor_context& to;
             const ESwitchContext type;
 
@@ -275,17 +275,18 @@ namespace coroactors::detail {
             }
         };
 
-        TSwitchContextAwaiter await_transform(const actor_context& to) {
+        switch_context_awaiter await_transform(const actor_context& to) {
             if (!context_initialized) {
                 // This is the first time we suspend
+                assert(!context_inherited);
                 context = to;
                 context_initialized = true;
-                return TSwitchContextAwaiter{ to, ESwitchContext::Initial };
+                return switch_context_awaiter{ to, ESwitchContext::Initial };
             }
 
             if (context == to) {
                 // We are not changing context, no op
-                return TSwitchContextAwaiter{ to, ESwitchContext::Ready };
+                return switch_context_awaiter{ to, ESwitchContext::Ready };
             }
 
             if (!to) {
@@ -296,21 +297,22 @@ namespace coroactors::detail {
                 if (auto next = from.pop()) {
                     from.scheduler().schedule(next);
                 }
-                return TSwitchContextAwaiter{ to, ESwitchContext::Ready };
+                return switch_context_awaiter{ to, ESwitchContext::Ready };
             }
 
             // We need to suspend and resume on the new context
-            return TSwitchContextAwaiter{ to, ESwitchContext::Switch };
+            return switch_context_awaiter{ to, ESwitchContext::Switch };
         }
 
-        auto await_transform(actor_context::inherit_t) {
-            if (context_initialized || context_inherited) {
-                [[unlikely]]
-                throw std::logic_error("cannot inherit context (already initialized)");
+        auto await_transform(actor_context::caller_context_t) {
+            if (!context_initialized) {
+                // This is the first time we suspend
+                assert(!context_inherited);
+                context_inherited = true;
+                return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
             }
 
-            context_inherited = true;
-            return TSwitchContextAwaiter{ no_actor_context, ESwitchContext::Initial };
+            return await_transform(continuation_context);
         }
 
         void check_context_initialized() const {
@@ -320,72 +322,86 @@ namespace coroactors::detail {
             }
         }
 
-        struct TRescheduleAwaiter {
-            bool await_ready() { return false; }
+        struct yield_context_awaiter_t {
+            bool await_ready() noexcept { return false; }
 
             __attribute__((__noinline__))
-            void await_suspend(actor_continuation<T> c) noexcept {
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                assert(self.context && "Cannot reschedule without a context");
-                auto& scheduler = self.context.scheduler();
-                // note: current context is locked
+                if (!self.context) {
+                    return c;
+                }
+                // We push current coroutine to the end of the queue
                 auto next = self.context.push(c);
-                assert(!next && "Unexpected continuation from a locked context");
-                next = self.context.pop();
                 if (next) {
+                    [[unlikely]]
+                    throw std::logic_error("Expected no continuation when pushing to a locked context");
+                }
+                // Check the front of the queue, there's at least one continuation now
+                next = self.context.pop();
+                if (!next) {
+                    [[unlikely]]
+                    throw std::logic_error("Expected at least one continuation after pushing to a locked context");
+                }
+                // Switch to the next coroutine in our context, unless preempted
+                auto& scheduler = self.context.scheduler();
+                if (scheduler.preempt()) {
                     scheduler.schedule(next);
+                    return std::noop_coroutine();
+                } else {
+                    return next;
                 }
             }
 
-            void await_resume() noexcept {
-                // nothing
-            }
+            void await_resume() noexcept {}
         };
 
-        auto await_transform(actor_context::reschedule_t) {
+        auto await_transform(actor_context::yield_t) {
             check_context_initialized();
-            return TRescheduleAwaiter{};
+
+            return yield_context_awaiter_t{};
         }
 
-        struct TRescheduleLockedAwaiter {
-            bool await_ready() { return false; }
+        struct preempt_context_awaiter_t {
+            bool await_ready() noexcept { return false; }
 
             __attribute__((__noinline__))
-            void await_suspend(actor_continuation<T> c) noexcept {
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                assert(self.context && "Cannot reschedule without a context");
-                auto& scheduler = self.context.scheduler();
-                scheduler.schedule(c);
+                if (!self.context) {
+                    return c;
+                }
+                self.context.scheduler().schedule(c);
+                return std::noop_coroutine();
             }
 
-            void await_resume() noexcept {
-                // nothing
-            }
+            void await_resume() noexcept {}
         };
 
-        auto await_transform(actor_context::reschedule_locked_t) {
+        auto await_transform(actor_context::preempt_t) {
             check_context_initialized();
-            return TRescheduleLockedAwaiter{};
+
+            return preempt_context_awaiter_t{};
         }
 
-        struct TRestoreContextCallback {
-            actor_promise<T>& self;
+        struct restore_context_callback {
+            const actor_context& context;
             std::coroutine_handle<> c;
 
-            TRestoreContextCallback(actor_promise<T>& self, std::coroutine_handle<> c) noexcept
-                : self(self)
+            restore_context_callback(const actor_context& context, std::coroutine_handle<> c) noexcept
+                : context(context)
                 , c(c)
             {}
 
-            TRestoreContextCallback(const TRestoreContextCallback&) = delete;
-            TRestoreContextCallback& operator=(const TRestoreContextCallback&) = delete;
+            restore_context_callback(const restore_context_callback&) = delete;
+            restore_context_callback& operator=(const restore_context_callback&) = delete;
 
-            TRestoreContextCallback(TRestoreContextCallback&& rhs) noexcept
-                : self(rhs.self)
+            restore_context_callback(restore_context_callback&& rhs) noexcept
+                : context(rhs.context)
                 , c(std::exchange(rhs.c, {}))
             {}
 
-            ~TRestoreContextCallback() noexcept {
+            ~restore_context_callback() noexcept {
                 if (c) {
                     // Callback was not invoked, but we are supposed to resume
                     // our continuation. All we can do now is destroy it and
@@ -395,25 +411,27 @@ namespace coroactors::detail {
             }
 
             std::coroutine_handle<> operator()() noexcept {
-                if (auto next = self.context.push(std::exchange(c, {}))) {
-                    if (!self.context.scheduler().preempt()) {
-                        // Run directly unless preempted by scheduler
-                        return next;
-                    }
-                    self.context.scheduler().schedule(next);
+                if (auto next = context.push(std::exchange(c, {}))) {
+                    // Note: caller may have called resume recursively, from
+                    // a different actor even, and won't be expecting us to
+                    // keep going indefinitely. So we always reschedule.
+                    context.scheduler().schedule(next);
                 }
                 return std::noop_coroutine();
             }
         };
 
-        std::coroutine_handle<> wrap_restore_context(std::coroutine_handle<> c) {
+        static std::coroutine_handle<> wrap_restore_context(const actor_context& context, std::coroutine_handle<> c) {
             if (!context) {
-                // There is nothing to restore
                 return c;
             }
 
             // Generate a wrapped continuation that will restore context on resume
-            return with_resume_callback(TRestoreContextCallback{ *this, c });
+            return with_resume_callback(restore_context_callback{ context, c });
+        }
+
+        std::coroutine_handle<> wrap_restore_context(std::coroutine_handle<> c) {
+            return wrap_restore_context(context, c);
         }
 
         static void release_context(const actor_context& context) {
@@ -427,14 +445,18 @@ namespace coroactors::detail {
         static std::coroutine_handle<> next_from_context(const actor_context& context) {
             if (context) {
                 if (auto next = context.pop()) {
-                    return next;
+                    auto& scheduler = context.scheduler();
+                    if (!scheduler.preempt()) {
+                        return next;
+                    }
+                    scheduler.schedule(next);
                 }
             }
             return std::noop_coroutine();
         }
 
         template<awaitable Awaitable>
-        class TContextReleaseRestoreAwaiter {
+        class same_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
             using Awaiter = decltype(get_awaiter(std::declval<Awaitable&&>()));
             // Note: Result may be a reference type
@@ -446,12 +468,12 @@ namespace coroactors::detail {
             // to that. This should be safe because it's all part of the same
             // co_await expression and we have the same lifetime as the
             // awaitable.
-            TContextReleaseRestoreAwaiter(Awaitable&& awaitable)
+            same_context_wrapped_awaiter(Awaitable&& awaitable)
                 : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
             {}
 
-            TContextReleaseRestoreAwaiter(const TContextReleaseRestoreAwaiter&) = delete;
-            TContextReleaseRestoreAwaiter& operator=(const TContextReleaseRestoreAwaiter&) = delete;
+            same_context_wrapped_awaiter(const same_context_wrapped_awaiter&) = delete;
+            same_context_wrapped_awaiter& operator=(const same_context_wrapped_awaiter&) = delete;
 
             bool await_ready()
                 noexcept(has_noexcept_await_ready<Awaiter>)
@@ -462,51 +484,36 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 noexcept(has_noexcept_await_suspend<Awaiter>)
-                requires (has_await_suspend_void<Awaiter>)
             {
                 auto& self = c.promise();
+                std::coroutine_handle<> k = wrap_restore_context(self.context, c);
+                // Note: we still have context locked, but after the call to
+                // Awaiter's await_suspend our frame may be destroyed and we
+                // cannot access self or any members. Make a copy of context.
                 auto context = self.context;
-                auto k = self.wrap_restore_context(c);
-                awaiter.await_suspend(std::move(k));
-                // We still have context locked, move to the next task
-                // Note: self may have been destroyed already
-                return next_from_context(context);
-            }
-
-            __attribute__((__noinline__))
-            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
-                noexcept(has_noexcept_await_suspend<Awaiter>)
-                requires (has_await_suspend_bool<Awaiter>)
-            {
-                auto& self = c.promise();
-                auto context = self.context;
-                auto k = self.wrap_restore_context(c);
-                if (!awaiter.await_suspend(std::move(k))) {
-                    // Awaiter did not suspend, transfer back directly
-                    release_context(context);
-                    return k;
+                if constexpr (has_await_suspend_void<Awaiter>) {
+                    // Awaiter always suspends
+                    awaiter.await_suspend(std::move(k));
+                } else if constexpr (has_await_suspend_bool<Awaiter>) {
+                    if (!awaiter.await_suspend(std::move(k))) {
+                        // Awaiter did not suspend, release context and resume
+                        release_context(context);
+                        return k;
+                    }
+                } else {
+                    static_assert(has_await_suspend_handle<Awaiter>);
+                    k = awaiter.await_suspend(std::move(k));
+                    if (k != std::noop_coroutine()) {
+                        // Awaiter is asking us to resume some coroutine, but
+                        // we cannot know if it is the same coroutine, even
+                        // if it has the same address (it may have been
+                        // destroyed and reallocated again)
+                        release_context(context);
+                        return k;
+                    }
                 }
-                // We still have context locked, move to the next task
-                // Note: self may have been destroyed already
-                return next_from_context(context);
-            }
-
-            __attribute__((__noinline__))
-            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
-                noexcept(has_noexcept_await_suspend<Awaiter>)
-                requires (has_await_suspend_handle<Awaiter>)
-            {
-                auto& self = c.promise();
-                auto context = self.context;
-                auto k = awaiter.await_suspend(self.wrap_restore_context(c));
-                if (k != std::noop_coroutine()) {
-                    // Transfer directly to the task from awaiter
-                    // Note: self may have been destroyed already
-                    release_context(context);
-                    return k;
-                }
-                // We still have context locked, move to the next task
-                // Note: self may have been destroyed already
+                // Awaiter suspended without a continuation
+                // Take the next continuation from our context
                 return next_from_context(context);
             }
 
@@ -520,7 +527,7 @@ namespace coroactors::detail {
             Awaiter awaiter;
         };
 
-        // N.B.: it's awaitable and not awaitable<actor_promise<T>>
+        // Note: it's awaitable and not awaitable<actor_promise<T>>
         //       we always supply wrapped awaiter with a type erased handle
         template<awaitable Awaitable>
         auto await_transform(Awaitable&& awaitable)
@@ -528,7 +535,113 @@ namespace coroactors::detail {
         {
             check_context_initialized();
 
-            return TContextReleaseRestoreAwaiter<Awaitable>(std::forward<Awaitable>(awaitable));
+            return same_context_wrapped_awaiter<Awaitable>(std::forward<Awaitable>(awaitable));
+        }
+
+        template<awaitable Awaitable>
+        class change_context_wrapped_awaiter {
+            // Note: Awaiter may be a reference type
+            using Awaiter = decltype(get_awaiter(std::declval<Awaitable&&>()));
+            // Note: Result may be a reference type
+            using Result = decltype(std::declval<Awaiter&>().await_resume());
+
+        public:
+            // Note: if operator co_await returns a value we will construct it
+            // in place without moves. If it returns a reference we will bind
+            // to that. This should be safe because it's all part of the same
+            // co_await expression and we have the same lifetime as the
+            // awaitable.
+            change_context_wrapped_awaiter(Awaitable&& awaitable, const actor_context& new_context, bool same_context)
+                : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
+                , new_context(new_context)
+                , same_context(same_context)
+            {}
+
+            change_context_wrapped_awaiter(const change_context_wrapped_awaiter&) = delete;
+            change_context_wrapped_awaiter& operator=(const change_context_wrapped_awaiter&) = delete;
+
+            bool await_ready()
+                noexcept(has_noexcept_await_ready<Awaiter>)
+            {
+                return (ready = awaiter.await_ready()) && same_context;
+            }
+
+            __attribute__((__noinline__))
+            std::coroutine_handle<> await_suspend(actor_continuation<T> c)
+                noexcept(has_noexcept_await_suspend<Awaiter>)
+            {
+                auto& self = c.promise();
+                std::coroutine_handle<> k = wrap_restore_context(new_context, c);
+                if (ready) {
+                    // Awaiter's await_ready returned true, we just need to change context
+                    assert(self.context != new_context);
+                    release_context(self.context);
+                    self.context = new_context;
+                    return k;
+                }
+                // Note: we still have context locked, but after the call to
+                // Awaiter's await_suspend our frame may be destroyed and we
+                // cannot access self or any members. Make a copy of context.
+                auto context = self.context;
+                // Change promise context to new context
+                self.context = new_context;
+                if constexpr (has_await_suspend_void<Awaiter>) {
+                    // Awaiter always suspends
+                    awaiter.await_suspend(std::move(k));
+                } else if constexpr (has_await_suspend_bool<Awaiter>) {
+                    if (!awaiter.await_suspend(std::move(k))) {
+                        // Awaiter did not suspend, release context and resume
+                        release_context(context);
+                        return k;
+                    }
+                } else {
+                    static_assert(has_await_suspend_handle<Awaiter>);
+                    k = awaiter.await_suspend(std::move(k));
+                    if (k != std::noop_coroutine()) {
+                        // Awaiter is asking us to resume some coroutine, but
+                        // we cannot know if it is the same coroutine, even
+                        // if it has the same address (it may have been
+                        // destroyed and reallocated again)
+                        release_context(context);
+                        return k;
+                    }
+                }
+                // Awaiter suspended without a continuation
+                // Take the next continuation from our context
+                return next_from_context(context);
+            }
+
+            Result await_resume()
+                noexcept(has_noexcept_await_resume<Awaiter>)
+            {
+                return awaiter.await_resume();
+            }
+
+        private:
+            Awaiter awaiter;
+            const actor_context& new_context;
+            const bool same_context;
+            bool ready = false;
+        };
+
+        template<awaitable Awaitable>
+        auto await_transform(actor_context::bind_awaitable_t<Awaitable> bound) {
+            check_context_initialized();
+
+            return change_context_wrapped_awaiter<Awaitable>(
+                std::forward<Awaitable>(bound.awaitable),
+                bound.context,
+                bound.context == context);
+        }
+
+        template<awaitable Awaitable>
+        auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
+            check_context_initialized();
+
+            return change_context_wrapped_awaiter<Awaitable>(
+                std::forward<Awaitable>(bound.awaitable),
+                continuation_context,
+                continuation_context == context);
         }
 
         // Awaitables marked with is_actor_passthru_awaitable claim to support

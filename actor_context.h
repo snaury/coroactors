@@ -1,5 +1,6 @@
 #pragma once
 #include "actor_scheduler.h"
+#include "detail/awaiters.h"
 #include "detail/mailbox.h"
 #include <cassert>
 #include <coroutine>
@@ -25,14 +26,6 @@ namespace coroactors {
         actor_context(actor_scheduler& s)
             : impl_(std::make_shared<impl>(s))
         {}
-
-        static actor_context create() {
-            auto* s = actor_scheduler::current();
-            if (!s) {
-                throw std::runtime_error("current thread is missing a scheduler");
-            }
-            return actor_context(*s);
-        }
 
         explicit operator bool() const {
             return bool(impl_);
@@ -67,23 +60,89 @@ namespace coroactors {
             }
         }
 
+        /**
+         * Returns the next continuation from this actor context
+         *
+         * May only be used when this context is currently running
+         */
         std::coroutine_handle<> pop() const {
             std::coroutine_handle<> k = impl_->mailbox.Pop();
             return k;
         }
 
-        struct inherit_t {};
-        struct reschedule_t {};
-        struct reschedule_locked_t {};
+        /**
+         * A placeholder type for `actor_context::operator()`
+         */
+        template<detail::awaitable Awaitable>
+        struct bind_awaitable_t {
+            Awaitable&& awaitable;
+            const actor_context& context;
+        };
 
-        // When awaited will inherit context of the caller
-        static constexpr inherit_t inherit;
+        /**
+         * Returns an awaitable that will switch to this context before returning
+         */
+        template<detail::awaitable Awaitable>
+        bind_awaitable_t<Awaitable> operator()(Awaitable&& awaitable) const {
+            return bind_awaitable_t<Awaitable>{
+                std::forward<Awaitable>(awaitable),
+                *this,
+            };
+        }
 
-        // When awaited will reschedule current coroutine allowing other code in the same context to run
-        static constexpr reschedule_t reschedule;
+        /**
+         * A placeholder type for `actor_context::caller_context`
+         */
+        struct caller_context_t {
+            /**
+             * A placeholder type for `actor_context::caller_context(...)`
+             */
+            template<detail::awaitable Awaitable>
+            struct bind_awaitable_t {
+                Awaitable&& awaitable;
+            };
 
-        // When awaited will reschedule current coroutine without allowing other code in the same context to run
-        static constexpr reschedule_locked_t reschedule_locked;
+            /**
+             * Returns an awaitable that will switch to a caller context before returning
+             */
+            template<detail::awaitable Awaitable>
+            bind_awaitable_t<Awaitable> operator()(Awaitable&& awaitable) const {
+                return bind_awaitable_t<Awaitable>{
+                    std::forward<Awaitable>(awaitable),
+                };
+            }
+        };
+
+        /**
+         * Binds to actor coroutine's caller (awaiter) context when awaited
+         */
+        static constexpr caller_context_t caller_context;
+
+        /**
+         * A placeholder type for `actor_context::yield`
+         */
+        struct yield_t {};
+
+        /**
+         * Yields current actor coroutine when awaited
+         *
+         * Allows running other activies in the same actor context, and may also
+         * switch to other actor contexts subject to scheduler preemption.
+         */
+        static constexpr yield_t yield;
+
+        /**
+         * A placeholder type for `actor_context::preempt`
+         */
+        struct preempt_t {};
+
+        /**
+         * Preempts current actor coroutine when awaited
+         *
+         * Allows running other activities in other actor contexts, but no other
+         * activities in the same actor context will run until it returns.
+         */
+        static constexpr preempt_t preempt;
 
     private:
         std::shared_ptr<impl> impl_;

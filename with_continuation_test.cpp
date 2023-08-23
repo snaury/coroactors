@@ -396,9 +396,16 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 
-    // Resume the continuation, actor should resume and complete
+    // Resume the continuation, it should not monopolize our thread here
     suspended.resume();
 
+    EXPECT_EQ(stage, 1);
+    ASSERT_EQ(scheduler.queue.size(), 1);
+
+    // Activate the context
+    scheduler.run_next();
+
+    // It should now complete
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(scheduler.queue.size(), 0);
 }

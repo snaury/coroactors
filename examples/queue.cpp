@@ -24,9 +24,16 @@ public:
     actor<int> pop() {
         co_await context;
         if (values.empty()) {
-            co_return co_await with_continuation<int>([this](continuation<int> c) {
-                awaiters.push_back(std::move(c));
-            });
+            // Note: we use caller_context here to make sure push does not have
+            // to serialize on this actor context when resuming continuations.
+            // The callback still runs in our context though, so push_back to
+            // awaiters is thread-safe. Without it we would first enqueue a
+            // return from co_await on this context, and then immediately
+            // switch to caller context, causing scheduler thrashing.
+            co_return co_await actor_context::caller_context(
+                with_continuation<int>([this](continuation<int> c) {
+                    awaiters.push_back(std::move(c));
+                }));
         } else {
             int value = values.front();
             values.pop_front();

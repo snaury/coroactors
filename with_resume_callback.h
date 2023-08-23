@@ -50,7 +50,7 @@ namespace coroactors::detail {
 
         auto initial_suspend() noexcept { return std::suspend_always{}; }
 
-        struct TFinalSuspend {
+        struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
 
             __attribute__((__noinline__))
@@ -74,7 +74,7 @@ namespace coroactors::detail {
             static void await_resume() noexcept {}
         };
 
-        auto final_suspend() noexcept { return TFinalSuspend{}; }
+        auto final_suspend() noexcept { return final_suspend_t{}; }
 
     private:
         Callback& callback;
