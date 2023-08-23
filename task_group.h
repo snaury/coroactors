@@ -228,9 +228,11 @@ namespace coroactors::detail {
     template<class T>
     class task_group_result_handler : public task_group_result_handler_base<T> {
     public:
-        template<class TArg>
-        void return_value(TArg&& arg) {
-            this->result_->set_value(std::forward<TArg>(arg));
+        template<class Value>
+        void return_value(Value&& value)
+            requires (std::is_convertible_v<Value&&, T>)
+        {
+            this->result_->set_value(std::forward<Value>(value));
         }
     };
 
@@ -321,8 +323,8 @@ namespace coroactors::detail {
         task_group_handle<T> handle;
     };
 
-    template<class T, class TAwaitable>
-    task_group_coroutine<T> make_task_group_coroutine(TAwaitable awaitable) {
+    template<class T, class Awaitable>
+    task_group_coroutine<T> make_task_group_coroutine(Awaitable awaitable) {
         co_return co_await std::move(awaitable);
     }
 
@@ -369,11 +371,11 @@ namespace coroactors {
         /**
          * Adds a new awaitable to the task group and returns its index
          */
-        template<class TAwaitable>
-        size_t add(TAwaitable&& awaitable) {
+        template<class Awaitable>
+        size_t add(Awaitable&& awaitable) {
             assert(sink_);
             size_t index = count_++;
-            auto coro = detail::make_task_group_coroutine<T>(std::forward<TAwaitable>(awaitable));
+            auto coro = detail::make_task_group_coroutine<T>(std::forward<Awaitable>(awaitable));
             coro.start(sink_, index);
             ++left_;
             return index;

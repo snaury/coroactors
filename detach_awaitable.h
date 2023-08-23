@@ -10,8 +10,8 @@ namespace coroactors::detail {
     public:
         detach_awaitable_ignore_result_handler() noexcept = default;
 
-        template<class TArg>
-        void return_value(TArg&&) noexcept {
+        template<class Value>
+        void return_value(Value&&) noexcept {
             // ignore
         }
     };
@@ -26,19 +26,19 @@ namespace coroactors::detail {
         }
     };
 
-    template<class TAwaitable>
+    template<class Awaitable>
     struct detach_awaitable_ignore_coroutine;
 
-    template<class TAwaitable>
+    template<class Awaitable>
     class detach_awaitable_ignore_promise
-        : public detach_awaitable_ignore_result_handler<await_result_t<TAwaitable>>
+        : public detach_awaitable_ignore_result_handler<await_result_t<Awaitable>>
     {
-        using handle_t = std::coroutine_handle<detach_awaitable_ignore_promise<TAwaitable>>;
+        using handle_t = std::coroutine_handle<detach_awaitable_ignore_promise<Awaitable>>;
 
     public:
         detach_awaitable_ignore_promise() noexcept = default;
 
-        detach_awaitable_ignore_coroutine<TAwaitable> get_return_object() noexcept {
+        detach_awaitable_ignore_coroutine<Awaitable> get_return_object() noexcept {
             return {};
         }
 
@@ -50,58 +50,58 @@ namespace coroactors::detail {
         }
     };
 
-    template<class TAwaitable>
+    template<class Awaitable>
     struct detach_awaitable_ignore_coroutine {
-        using promise_type = detach_awaitable_ignore_promise<TAwaitable>;
+        using promise_type = detach_awaitable_ignore_promise<Awaitable>;
     };
 
-    template<class TCallback, class T>
+    template<class Callback, class T>
     class detach_awaitable_callback_result_handler {
     public:
-        detach_awaitable_callback_result_handler(TCallback& callback) noexcept
+        detach_awaitable_callback_result_handler(Callback& callback) noexcept
             : callback_(callback)
         {}
 
-        template<class TArg>
-        void return_value(TArg&& arg) {
-            callback_(std::forward<TArg>(arg));
+        template<class Value>
+        void return_value(Value&& value) {
+            callback_(std::forward<Value>(value));
         }
 
     private:
-        TCallback& callback_;
+        Callback& callback_;
     };
 
-    template<class TCallback>
-    class detach_awaitable_callback_result_handler<TCallback, void> {
+    template<class Callback>
+    class detach_awaitable_callback_result_handler<Callback, void> {
     public:
-        detach_awaitable_callback_result_handler(TCallback& callback) noexcept
+        detach_awaitable_callback_result_handler(Callback& callback) noexcept
             : callback_(callback)
         {}
 
-        void return_void() noexcept {
+        void return_void() {
             callback_();
         }
 
     private:
-        TCallback& callback_;
+        Callback& callback_;
     };
 
-    template<class TAwaitable, class TCallback>
+    template<class Awaitable, class Callback>
     struct detach_awaitable_callback_coroutine;
 
-    template<class TAwaitable, class TCallback>
+    template<class Awaitable, class Callback>
     class detach_awaitable_callback_promise
-        : public detach_awaitable_callback_result_handler<TCallback, await_result_t<TAwaitable>>
+        : public detach_awaitable_callback_result_handler<Callback, await_result_t<Awaitable>>
     {
-        using handle_t = std::coroutine_handle<detach_awaitable_callback_promise<TAwaitable, TCallback>>;
-        using result_handler_t = detach_awaitable_callback_result_handler<TCallback, await_result_t<TAwaitable>>;
+        using handle_t = std::coroutine_handle<detach_awaitable_callback_promise<Awaitable, Callback>>;
+        using result_handler_t = detach_awaitable_callback_result_handler<Callback, await_result_t<Awaitable>>;
 
     public:
-        detach_awaitable_callback_promise(TAwaitable&, TCallback& callback) noexcept
+        detach_awaitable_callback_promise(Awaitable&, Callback& callback) noexcept
             : result_handler_t(callback)
         {}
 
-        detach_awaitable_callback_coroutine<TAwaitable, TCallback> get_return_object() noexcept {
+        detach_awaitable_callback_coroutine<Awaitable, Callback> get_return_object() noexcept {
             return {};
         }
 
@@ -113,24 +113,24 @@ namespace coroactors::detail {
         }
     };
 
-    template<class TAwaitable, class TCallback>
+    template<class Awaitable, class Callback>
     struct detach_awaitable_callback_coroutine {
-        using promise_type = detach_awaitable_callback_promise<TAwaitable, TCallback>;
+        using promise_type = detach_awaitable_callback_promise<Awaitable, Callback>;
     };
 
 } // namespace coroactors::detail
 
 namespace coroactors {
 
-    template<class TAwaitable>
-    detail::detach_awaitable_ignore_coroutine<TAwaitable>
-    detach_awaitable(TAwaitable awaitable) {
+    template<class Awaitable>
+    detail::detach_awaitable_ignore_coroutine<Awaitable>
+    detach_awaitable(Awaitable awaitable) {
         co_return co_await std::move(awaitable);
     }
 
-    template<class TAwaitable, class TCallback>
-    detail::detach_awaitable_callback_coroutine<TAwaitable, TCallback>
-    detach_awaitable(TAwaitable awaitable, TCallback) {
+    template<class Awaitable, class Callback>
+    detail::detach_awaitable_callback_coroutine<Awaitable, Callback>
+    detach_awaitable(Awaitable awaitable, Callback) {
         // Note: underlying promise takes callback argument address and calls it when we return
         co_return co_await std::move(awaitable);
     }

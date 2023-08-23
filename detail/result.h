@@ -27,11 +27,11 @@ namespace coroactors::detail {
             result_.template emplace<1>();
         }
 
-        template<class TArg>
-        void set_value(TArg&& arg)
-            requires (!std::is_void_v<T>)
+        template<class Value>
+        void set_value(Value&& value)
+            requires (!std::is_void_v<T> && std::is_convertible_v<Value&&, T>)
         {
-            result_.template emplace<1>(std::forward<TArg>(arg));
+            result_.template emplace<1>(std::forward<Value>(value));
         }
 
         void set_exception(std::exception_ptr&& e) noexcept {
@@ -91,9 +91,9 @@ namespace coroactors::detail {
         }
 
     private:
-        struct TVoid {};
-        using TValue = std::conditional_t<std::is_void_v<T>, TVoid, T>;
-        std::variant<std::monostate, TValue, std::exception_ptr> result_;
+        struct Void {};
+        using Result = std::conditional_t<std::is_void_v<T>, Void, T>;
+        std::variant<std::monostate, Result, std::exception_ptr> result_;
     };
 
 } // namespace coroactors::detail

@@ -46,13 +46,13 @@ struct with_suspend_hook {
     }
 };
 
-template<detail::awaitable TAwaitable>
+template<detail::awaitable Awaitable>
 class autostart_inspect {
-    using TAwaiter = decltype(detail::get_awaiter(std::declval<TAwaitable&&>()));
+    using Awaiter = decltype(detail::get_awaiter(std::declval<Awaitable&&>()));
 
 public:
-    autostart_inspect(TAwaitable&& awaitable)
-        : awaiter(detail::get_awaiter((TAwaitable&&) awaitable))
+    autostart_inspect(Awaitable&& awaitable)
+        : awaiter(detail::get_awaiter(std::forward<Awaitable>(awaitable)))
     {}
 
     bool await_ready() {
@@ -60,13 +60,13 @@ public:
         return awaiter.await_ready();
     }
 
-    template<class TArg>
-    decltype(auto) await_suspend(TArg&& arg) {
+    template<class Promise>
+    decltype(auto) await_suspend(std::coroutine_handle<Promise> c) {
         ++await_suspend_count;
         if (await_suspend_hook) {
             (*await_suspend_hook)();
         }
-        return awaiter.await_suspend(std::forward<TArg>(arg));
+        return awaiter.await_suspend(c);
     }
 
     decltype(auto) await_resume() {
@@ -75,7 +75,7 @@ public:
     }
 
 private:
-    TAwaiter awaiter;
+    Awaiter awaiter;
 };
 
 struct autostart_promise {
@@ -89,9 +89,9 @@ struct autostart_promise {
     void unhandled_exception() noexcept { std::terminate(); }
     void return_void() noexcept {}
 
-    template<detail::awaitable TAwaitable>
-    auto await_transform(TAwaitable&& awaitable) {
-        return autostart_inspect<TAwaitable>((TAwaitable&&) awaitable);
+    template<detail::awaitable Awaitable>
+    auto await_transform(Awaitable&& awaitable) {
+        return autostart_inspect<Awaitable>(std::forward<Awaitable>(awaitable));
     }
 };
 
@@ -101,8 +101,8 @@ struct autostart {
     autostart(std::coroutine_handle<autostart_promise>) {}
 };
 
-template<class TCallback>
-autostart run_with_continuation(int* stage, TCallback callback) {
+template<class Callback>
+autostart run_with_continuation(int* stage, Callback callback) {
     *stage = 1;
     co_await with_continuation(callback);
     *stage = 2;
@@ -234,8 +234,8 @@ TEST(WithContinuationTest, CompleteRaceWithoutState) {
     EXPECT_EQ(await_resume_count, 1);
 }
 
-template<class TCallback>
-autostart run_with_continuation_int(int* stage, TCallback callback) {
+template<class Callback>
+autostart run_with_continuation_int(int* stage, Callback callback) {
     *stage = 1;
     try {
         int value = co_await with_continuation<int>(callback);
@@ -304,8 +304,8 @@ struct test_scheduler : public actor_scheduler {
     }
 };
 
-template<class TCallback>
-actor<void> actor_with_continuation(const actor_context& context, int* stage, TCallback callback) {
+template<class Callback>
+actor<void> actor_with_continuation(const actor_context& context, int* stage, Callback callback) {
     co_await context;
     *stage = 1;
     co_await with_continuation(callback);
@@ -506,8 +506,8 @@ struct simple_coroutine {
     };
 };
 
-template<class TAwaitable>
-simple_coroutine simple_run(TAwaitable awaitable) {
+template<class Awaitable>
+simple_coroutine simple_run(Awaitable awaitable) {
     co_return co_await std::move(awaitable);
 }
 

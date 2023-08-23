@@ -3,88 +3,85 @@
 
 namespace coroactors::detail {
 
-    template<class TAwaiter>
-    concept has_await_ready = requires(TAwaiter& awaiter) {
+    template<class Awaiter>
+    concept has_await_ready = requires(Awaiter& awaiter) {
         awaiter.await_ready() ? 1 : 0;
     };
 
-    template<class TAwaiter>
-    concept has_noexcept_await_ready = requires(TAwaiter& awaiter) {
+    template<class Awaiter>
+    concept has_noexcept_await_ready = requires(Awaiter& awaiter) {
         { awaiter.await_ready() ? 1 : 0 } noexcept;
     };
 
-    template<class TAwaiter, class TPromise = void>
-    concept has_await_suspend_void = requires(TAwaiter& awaiter, std::coroutine_handle<TPromise> h) {
+    template<class Awaiter, class Promise = void>
+    concept has_await_suspend_void = requires(Awaiter& awaiter, std::coroutine_handle<Promise> h) {
         { awaiter.await_suspend(h) } -> std::same_as<void>;
     };
 
-    template<class TAwaiter, class TPromise = void>
-    concept has_await_suspend_bool = requires(TAwaiter& awaiter, std::coroutine_handle<TPromise> h) {
+    template<class Awaiter, class Promise = void>
+    concept has_await_suspend_bool = requires(Awaiter& awaiter, std::coroutine_handle<Promise> h) {
         { awaiter.await_suspend(h) } -> std::same_as<bool>;
     };
 
-    template<class TAwaiter, class TPromise = void>
-    concept has_await_suspend_handle = requires(TAwaiter& awaiter, std::coroutine_handle<TPromise> h) {
+    template<class Awaiter, class Promise = void>
+    concept has_await_suspend_handle = requires(Awaiter& awaiter, std::coroutine_handle<Promise> h) {
         { awaiter.await_suspend(h) } -> std::convertible_to<std::coroutine_handle<>>;
     };
 
-    template<class TAwaiter, class TPromise = void>
-    concept has_noexcept_await_suspend = requires(TAwaiter& awaiter, std::coroutine_handle<TPromise> h) {
+    template<class Awaiter, class Promise = void>
+    concept has_noexcept_await_suspend = requires(Awaiter& awaiter, std::coroutine_handle<Promise> h) {
         { awaiter.await_suspend(h) } noexcept;
     };
 
-    template<class TAwaiter>
-    concept has_await_resume = requires(TAwaiter& awaiter) {
+    template<class Awaiter>
+    concept has_await_resume = requires(Awaiter& awaiter) {
         awaiter.await_resume();
     };
 
-    template<class TAwaiter>
-    concept has_noexcept_await_resume = requires(TAwaiter& awaiter) {
+    template<class Awaiter>
+    concept has_noexcept_await_resume = requires(Awaiter& awaiter) {
         { awaiter.await_resume() } noexcept;
     };
 
-    template<class TAwaiter, class TPromise = void>
+    template<class Awaiter, class Promise = void>
     concept awaiter =
-        has_await_ready<TAwaiter> &&
-        has_await_resume<TAwaiter> && (
-            has_await_suspend_void<TAwaiter, TPromise> ||
-            has_await_suspend_bool<TAwaiter, TPromise> ||
-            has_await_suspend_handle<TAwaiter, TPromise>);
+        has_await_ready<Awaiter> &&
+        has_await_resume<Awaiter> && (
+            has_await_suspend_void<Awaiter, Promise> ||
+            has_await_suspend_bool<Awaiter, Promise> ||
+            has_await_suspend_handle<Awaiter, Promise>);
 
-    template<class TAwaiter>
-    using awaiter_result_t = decltype(std::declval<TAwaiter&>().await_resume());
+    template<class Awaiter>
+    using awaiter_result_t = decltype(std::declval<Awaiter&>().await_resume());
 
-    template<class TAwaitable, class TPromise = void>
-    concept has_member_co_await = requires(TAwaitable&& awaitable) {
-        { ((TAwaitable&&) awaitable).operator co_await() } -> awaiter<TPromise>;
+    template<class Awaitable, class Promise = void>
+    concept has_member_co_await = requires(Awaitable&& awaitable) {
+        { std::forward<Awaitable>(awaitable).operator co_await() } -> awaiter<Promise>;
     };
 
-    template<class TAwaitable, class TPromise = void>
-    concept has_global_co_await = requires(TAwaitable&& awaitable) {
-        { operator co_await((TAwaitable&&) awaitable) } -> awaiter<TPromise>;
+    template<class Awaitable, class Promise = void>
+    concept has_global_co_await = requires(Awaitable&& awaitable) {
+        { operator co_await(std::forward<Awaitable>(awaitable)) } -> awaiter<Promise>;
     };
 
-    template<class TAwaitable, class TPromise = void>
+    template<class Awaitable, class Promise = void>
     concept awaitable =
-        has_member_co_await<TAwaitable, TPromise> ||
-        has_global_co_await<TAwaitable, TPromise> ||
-        awaiter<TAwaitable, TPromise>;
+        has_member_co_await<Awaitable, Promise> ||
+        has_global_co_await<Awaitable, Promise> ||
+        awaiter<Awaitable, Promise>;
 
-    template<class TAwaitable>
-    decltype(auto) get_awaiter(TAwaitable&& awaitable) {
-        if constexpr (requires { ((TAwaitable&&) awaitable).operator co_await(); }) {
-            return ((TAwaitable&&) awaitable).operator co_await();
-        } else if constexpr (requires { operator co_await((TAwaitable&&) awaitable); }) {
-            return operator co_await((TAwaitable&&) awaitable);
+    template<class Awaitable>
+    decltype(auto) get_awaiter(Awaitable&& awaitable) {
+        if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
+            return std::forward<Awaitable>(awaitable).operator co_await();
+        } else if constexpr (requires { operator co_await(std::forward<Awaitable>(awaitable)); }) {
+            return operator co_await(std::forward<Awaitable>(awaitable));
         } else {
-            return ((TAwaitable&&) awaitable);
+            return std::forward<Awaitable>(awaitable);
         }
     }
 
-    template<class TAwaitable>
-    using awaitable_awaiter_t = std::remove_reference_t<decltype(get_awaiter(std::declval<TAwaitable>()))>;
-
-    template<class TAwaitable>
-    using await_result_t = decltype(get_awaiter(std::declval<TAwaitable>()).await_resume());
+    template<class Awaitable>
+    using await_result_t = decltype(get_awaiter(std::declval<Awaitable>()).await_resume());
 
 } // namespace coroactors::detail

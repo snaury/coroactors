@@ -15,9 +15,9 @@ namespace coroactors {
 
 namespace coroactors::detail {
 
-    template<class TCallback, class T>
-    concept is_with_continuation_callback = requires(TCallback&& callback, continuation<T> c) {
-        { ((TCallback&&) callback)(std::move(c)) } -> std::same_as<void>;
+    template<class Callback, class T>
+    concept is_with_continuation_callback = requires(Callback& callback) {
+        { std::forward<Callback>(callback)(std::declval<continuation<T>>()) } -> std::same_as<void>;
     };
 
     template<class T>
@@ -59,9 +59,9 @@ namespace coroactors::detail {
         }
 
     private:
-        struct TVoid {};
-        using TValue = std::conditional_t<std::is_void_v<T>, TVoid, T>;
-        std::variant<std::monostate, TValue, std::exception_ptr> result_;
+        struct Void {};
+        using Result = std::conditional_t<std::is_void_v<T>, Void, T>;
+        std::variant<std::monostate, Result, std::exception_ptr> result_;
         std::atomic<bool> initialized_{ false };
     };
 
@@ -135,12 +135,12 @@ namespace coroactors::detail {
         std::atomic<void*> continuation{ nullptr };
     };
 
-    template<class T, class TCallback>
+    template<class T, class Callback>
     class with_continuation_awaiter
         : private continuation_result<T>
     {
     public:
-        with_continuation_awaiter(TCallback& callback) noexcept
+        with_continuation_awaiter(Callback& callback) noexcept
             : callback(callback)
         {}
 
@@ -163,7 +163,7 @@ namespace coroactors::detail {
             auto state = std::make_shared<continuation_state<T>>(
                 static_cast<continuation_result<T>*>(this));
             state_ = state;
-            std::forward<TCallback>(callback)(continuation<T>(state));
+            std::forward<Callback>(callback)(continuation<T>(state));
             // Avoid suspending when continuation has the result already
             return this->has_result();
         }
@@ -205,7 +205,7 @@ namespace coroactors::detail {
 
     private:
         std::weak_ptr<continuation_state<T>> state_;
-        TCallback& callback;
+        Callback& callback;
     };
 
 } // namespace coroactors::detail
@@ -217,7 +217,7 @@ namespace coroactors {
      */
     template<class T = void>
     class continuation {
-        template<class TResult, class TCallback>
+        template<class U, class Callback>
         friend class detail::with_continuation_awaiter;
 
         continuation(const std::shared_ptr<detail::continuation_state<T>>& state)
@@ -313,20 +313,20 @@ namespace coroactors {
      * awaiting coroutine might not suspend if the provided handle is resumed
      * before the callback returns.
      */
-    template<class T, class TCallback>
-    detail::with_continuation_awaiter<T, TCallback>
-    with_continuation(TCallback&& callback) noexcept
-        requires (detail::is_with_continuation_callback<TCallback, T>)
+    template<class T, class Callback>
+    detail::with_continuation_awaiter<T, Callback>
+    with_continuation(Callback&& callback) noexcept
+        requires (detail::is_with_continuation_callback<Callback, T>)
     {
-        return detail::with_continuation_awaiter<T, TCallback>(callback);
+        return detail::with_continuation_awaiter<T, Callback>(callback);
     }
 
-    template<class TCallback>
-    detail::with_continuation_awaiter<void, TCallback>
-    with_continuation(TCallback&& callback) noexcept
-        requires (detail::is_with_continuation_callback<TCallback, void>)
+    template<class Callback>
+    detail::with_continuation_awaiter<void, Callback>
+    with_continuation(Callback&& callback) noexcept
+        requires (detail::is_with_continuation_callback<Callback, void>)
     {
-        return detail::with_continuation_awaiter<void, TCallback>(callback);
+        return detail::with_continuation_awaiter<void, Callback>(callback);
     }
 
 } // namespace coroactors
