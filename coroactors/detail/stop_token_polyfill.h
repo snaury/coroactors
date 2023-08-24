@@ -9,6 +9,9 @@ namespace coroactors::detail {
      * A type erased callback
      */
     struct stop_state_callback {
+        using invoke_t = void (*)(stop_state_callback*) noexcept;
+        const invoke_t invoke;
+
         // A linked list of registered callbacks
         stop_state_callback* prev{ nullptr };
         stop_state_callback* next{ nullptr };
@@ -19,8 +22,9 @@ namespace coroactors::detail {
         // Pointer to flag signalling removal from the same thread
         bool* removed{ nullptr };
 
-        // Runs a type erased callback
-        virtual void run() noexcept = 0;
+        explicit stop_state_callback(invoke_t invoke)
+            : invoke(invoke)
+        {}
     };
 
     /**
@@ -63,7 +67,7 @@ namespace coroactors::detail {
                 if (current & FlagStopped) {
                     // Already stopped, run callback synchronously
                     // We are in the constructor, so no need to signal semaphore
-                    callback->run();
+                    callback->invoke(callback);
                     return false;
                 }
                 if (current < SourceCountIncrement) {
@@ -175,7 +179,7 @@ namespace coroactors::detail {
                 callback->removed = &removed;
                 unlock();
 
-                callback->run();
+                callback->invoke(callback);
 
                 // If removed == true callback was removed in the same thread,
                 // which happens in the destructor and it's unsafe to use.
@@ -594,20 +598,20 @@ namespace coroactors::detail {
         public:
             template<class C>
             explicit callback_t(C&& callback)
-                : callback_(std::forward<C>(callback))
+                : stop_state_callback(
+                    [](stop_state_callback* self) noexcept {
+                        std::forward<Callback>(static_cast<callback_t*>(self)->callback_)();
+                    })
+                , callback_(std::forward<C>(callback))
             {}
-
-            void run() noexcept {
-                callback_();
-            }
 
         private:
             Callback callback_;
         };
 
     private:
-        stop_state* state{ nullptr };
         callback_t callback_;
+        stop_state* state{ nullptr };
     };
 
     /**
