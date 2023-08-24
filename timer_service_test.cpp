@@ -1,11 +1,12 @@
 #include "timer_service.h"
 #include <coroactors/actor.h>
 #include <coroactors/detach_awaitable.h>
+#include <coroactors/detail/atomic_semaphore.h>
 
 using namespace coroactors;
 
 void run_sync(std::vector<actor<void>> actors) {
-    std::atomic_signed_lock_free waiting(actors.size());
+    detail::semaphore_atomic_t waiting(actors.size());
 
     for (auto& a : actors) {
         detach_awaitable(std::move(a), [&]{

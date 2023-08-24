@@ -1,3 +1,4 @@
+#include <coroactors/detail/atomic_semaphore.h>
 #include <coroactors/detail/mailbox.h>
 #include <benchmark/benchmark.h>
 #include <thread>
@@ -60,7 +61,7 @@ BENCHMARK(BM_PushPop_NoThreads);
 struct BM_PushPop : public benchmark::Fixture {
     struct TState {
         detail::mailbox<int> Mailbox;
-        std::atomic_signed_lock_free Semaphore{ 0 }; // initially locked
+        detail::semaphore_atomic_t Semaphore{ 0 }; // initially locked
         std::optional<std::thread> Consumer;
         std::atomic<size_t> WakeUps{ 0 };
     };

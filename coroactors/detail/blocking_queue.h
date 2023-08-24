@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/atomic_semaphore.h>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -9,7 +10,7 @@
 namespace coroactors::detail {
 
     struct TBlockingQueueWaiter {
-        using TAtomic = std::atomic_signed_lock_free;
+        using TAtomic = detail::semaphore_atomic_t;
         using TValue = TAtomic::value_type;
 
         TAtomic Semaphore{ 0 };

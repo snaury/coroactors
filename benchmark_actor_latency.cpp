@@ -406,7 +406,7 @@ private:
 template<class T>
     requires (!std::is_void_v<T>)
 std::vector<T> run_sync(std::vector<actor<T>> actors) {
-    std::atomic_signed_lock_free waiting(actors.size());
+    detail::semaphore_atomic_t waiting(actors.size());
     std::vector<T> results(actors.size());
 
     for (size_t i = 0; i < actors.size(); ++i) {
@@ -431,7 +431,7 @@ std::vector<T> run_sync(std::vector<actor<T>> actors) {
 }
 
 void run_sync(std::vector<actor<void>> actors) {
-    std::atomic_signed_lock_free waiting(actors.size());
+    detail::semaphore_atomic_t waiting(actors.size());
 
     for (auto& a : actors) {
         detach_awaitable(std::move(a), [&]{
