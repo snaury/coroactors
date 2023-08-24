@@ -96,7 +96,12 @@ namespace coroactors::detail {
     template<class T>
     class actor_result_handler_base {
     public:
-        result<T> result;
+        result<T>&& take_result() noexcept {
+            return std::move(result_);
+        }
+
+    protected:
+        result<T> result_;
     };
 
     template<class T>
@@ -106,7 +111,7 @@ namespace coroactors::detail {
         void return_value(Value&& value)
             requires (std::is_convertible_v<Value&&, T>)
         {
-            this->result.set_value(std::forward<Value>(value));
+            this->result_.set_value(std::forward<Value>(value));
         }
     };
 
@@ -114,7 +119,7 @@ namespace coroactors::detail {
     class actor_result_handler<void> : public actor_result_handler_base<void> {
     public:
         void return_void() noexcept {
-            this->result.set_value();
+            this->result_.set_value();
         }
     };
 
@@ -135,7 +140,7 @@ namespace coroactors::detail {
         }
 
         void unhandled_exception() noexcept {
-            this->result.set_exception(std::current_exception());
+            this->result_.set_exception(std::current_exception());
         }
 
         static auto initial_suspend() noexcept { return std::suspend_never{}; }
@@ -734,7 +739,7 @@ namespace coroactors::detail {
 
         std::add_rvalue_reference_t<T> await_resume() {
             suspended = false;
-            return std::move(handle.promise().result).take();
+            return handle.promise().take_result().take();
         }
 
     private:
@@ -786,7 +791,7 @@ namespace coroactors::detail {
 
         result<T>&& await_resume() {
             suspended = false;
-            return std::move(handle.promise().result);
+            return handle.promise().take_result();
         }
 
     private:

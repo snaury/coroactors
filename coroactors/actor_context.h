@@ -155,7 +155,7 @@ namespace coroactors {
         /**
          * Placeholder for the context of the current actor's caller (awaiter)
          */
-        static constexpr caller_context_t caller_context;
+        static constexpr caller_context_t caller_context{};
 
         /**
          * A placeholder type for `actor_context::current_context`
@@ -165,7 +165,7 @@ namespace coroactors {
         /**
          * Placeholder for the context of the current actor
          */
-        static constexpr current_context_t current_context;
+        static constexpr current_context_t current_context{};
 
         /**
          * A placeholder type for `actor_context::yield`
@@ -178,7 +178,7 @@ namespace coroactors {
          * Allows running other activies in the same actor context, and may also
          * switch to other actor contexts subject to scheduler preemption.
          */
-        static constexpr yield_t yield;
+        static constexpr yield_t yield{};
 
         /**
          * A placeholder type for `actor_context::preempt`
@@ -191,7 +191,7 @@ namespace coroactors {
          * Allows running other activities in other actor contexts, but no other
          * activities in the same actor context will run until it returns.
          */
-        static constexpr preempt_t preempt;
+        static constexpr preempt_t preempt{};
 
     private:
         std::shared_ptr<impl> impl_;
@@ -200,6 +200,6 @@ namespace coroactors {
     /**
      * A special empty actor context that does not isolate shared state
      */
-    static inline const actor_context no_actor_context;
+    static inline const actor_context no_actor_context{};
 
 } // namespace coroactors
