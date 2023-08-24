@@ -130,7 +130,7 @@ namespace coroactors::detail {
             }
         }
 
-        [[nodiscard]] actor<T> get_return_object() noexcept {
+        actor<T> get_return_object() noexcept {
             return actor<T>(actor_continuation<T>::from_promise(*this));
         }
 

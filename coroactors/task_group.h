@@ -77,7 +77,7 @@ namespace coroactors {
         /**
          * Implementation of task_group<T>::next()
          */
-        class next_awaiter_t {
+        class [[nodiscard]] next_awaiter_t {
         public:
             explicit next_awaiter_t(task_group& group) noexcept
                 : group(group)
@@ -113,7 +113,7 @@ namespace coroactors {
         /**
          * Implementation of task_group<T>::next_result()
          */
-        class next_result_awaiter_t {
+        class [[nodiscard]] next_result_awaiter_t {
         public:
             explicit next_result_awaiter_t(task_group& group) noexcept
                 : group(group)

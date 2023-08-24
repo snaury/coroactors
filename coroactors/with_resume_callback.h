@@ -9,7 +9,8 @@ namespace coroactors {
      * Callback may optionally return a coroutine handle that will run after callback returns.
      */
     template<class Callback>
-    std::coroutine_handle<> with_resume_callback(Callback&& callback)
+    [[nodiscard]] std::coroutine_handle<>
+    with_resume_callback(Callback&& callback)
         requires (
             detail::is_resume_callback_void<Callback> ||
             detail::is_resume_callback_handle<Callback>)

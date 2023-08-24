@@ -136,7 +136,7 @@ namespace coroactors::detail {
     };
 
     template<class T, class Callback>
-    class with_continuation_awaiter
+    class [[nodiscard]] with_continuation_awaiter
         : private continuation_result<T>
     {
     public:

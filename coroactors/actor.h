@@ -54,11 +54,11 @@ namespace coroactors {
             return bool(handle);
         }
 
-        [[nodiscard]] auto operator co_await() && noexcept {
+        auto operator co_await() && noexcept {
             return detail::actor_awaiter(std::exchange(handle, {}));
         }
 
-        [[nodiscard]] auto result() && noexcept {
+        auto result() && noexcept {
             return detail::actor_result_awaiter(std::exchange(handle, {}));
         }
 

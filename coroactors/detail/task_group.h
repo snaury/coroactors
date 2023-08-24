@@ -268,7 +268,7 @@ namespace coroactors::detail {
             }
         }
 
-        [[nodiscard]] task_group_coroutine<T> get_return_object() noexcept {
+        task_group_coroutine<T> get_return_object() noexcept {
             return task_group_coroutine<T>(task_group_handle<T>::from_promise(*this));
         }
 
@@ -305,7 +305,7 @@ namespace coroactors::detail {
     };
 
     template<class T>
-    class task_group_coroutine {
+    class [[nodiscard]] task_group_coroutine {
         friend class task_group_promise<T>;
 
         task_group_coroutine(task_group_handle<T> handle)
