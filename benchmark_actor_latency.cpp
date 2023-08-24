@@ -226,7 +226,10 @@ public:
             mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock l(Lock);
             MailboxLocked = true;
-            CanPop.notify_all();
+            if (Waiters > 0) {
+                // Wake a single waiter, others should daisy chain
+                CanPop.notify_one();
+            }
         }
     }
 
@@ -234,9 +237,15 @@ public:
         std::unique_lock l(Lock);
         for (;;) {
             while (!MailboxLocked) {
+                ++Waiters;
                 CanPop.wait(l);
+                --Waiters;
             }
             if (auto result = Mailbox.pop_optional()) {
+                if (Waiters > 0) {
+                    // Mailbox still locked, wake one more waiter
+                    CanPop.notify_one();
+                }
                 return std::move(*result);
             }
             // Mailbox was unlocked, now wait
@@ -248,6 +257,9 @@ public:
         std::unique_lock l(Lock);
         if (MailboxLocked) {
             if (auto result = Mailbox.pop_optional()) {
+                if (Waiters > 0) {
+                    CanPop.notify_one();
+                }
                 return std::move(*result);
             }
             MailboxLocked = false;
@@ -259,6 +271,7 @@ public:
     std::mutex Lock;
     std::condition_variable CanPop;
     detail::mailbox<T> Mailbox;
+    size_t Waiters = 0;
     bool MailboxLocked;
 };
 
