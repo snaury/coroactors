@@ -55,7 +55,7 @@ namespace coroactors {
          */
         std::coroutine_handle<> push(std::coroutine_handle<> c) const {
             assert(c && "Attempt to push a nullptr coroutine handle");
-            if (impl_->mailbox.emplace(c)) {
+            if (impl_->mailbox.push(c)) {
                 std::coroutine_handle<> k = impl_->mailbox.pop_default();
                 assert(k == c);
                 return k;

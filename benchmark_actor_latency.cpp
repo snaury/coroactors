@@ -86,19 +86,19 @@ template<class T>
 class TBlockingQueueWithAbslMutex {
 public:
     template<class... TArgs>
-    void Push(TArgs&&... args) {
+    void push(TArgs&&... args) {
         absl::MutexLock l(&Lock);
         Items.emplace_back(std::forward<TArgs>(args)...);
     }
 
-    T Pop() {
+    T pop() {
         absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::HasItems));
         T item(std::move(Items.front()));
         Items.pop_front();
         return item;
     }
 
-    std::optional<T> TryPop() {
+    std::optional<T> try_pop() {
         absl::MutexLock l(&Lock);
         if (!Items.empty()) {
             std::optional<T> item(std::move(Items.front()));
@@ -122,13 +122,13 @@ template<class T>
 class TBlockingQueueWithStdMutex {
 public:
     template<class... TArgs>
-    void Push(TArgs&&... args) {
+    void push(TArgs&&... args) {
         std::unique_lock l(Lock);
         Items.emplace_back(std::forward<TArgs>(args)...);
         NotEmpty.notify_one();
     }
 
-    T Pop() {
+    T pop() {
         std::unique_lock l(Lock);
         if (Items.empty()) {
             ++Waiters;
@@ -142,7 +142,7 @@ public:
         return item;
     }
 
-    std::optional<T> TryPop() {
+    std::optional<T> try_pop() {
         std::unique_lock l(Lock);
         if (!Items.empty()) {
             std::optional<T> item(std::move(Items.front()));
@@ -169,16 +169,16 @@ public:
     }
 
     template<class... TArgs>
-    void Push(TArgs&&... args) {
+    void push(TArgs&&... args) {
         // Most of the time this will be lockfree
-        if (Mailbox.emplace(std::forward<TArgs>(args)...)) {
+        if (Mailbox.push(std::forward<TArgs>(args)...)) {
             mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
             absl::MutexLock l(&Lock);
             MailboxLocked = true;
         }
     }
 
-    T Pop() {
+    T pop() {
         for (;;) {
             absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::CanPop));
             if (auto result = Mailbox.pop_optional()) {
@@ -189,7 +189,7 @@ public:
         }
     }
 
-    std::optional<T> TryPop() {
+    std::optional<T> try_pop() {
         absl::MutexLock l(&Lock);
         if (MailboxLocked) {
             if (auto result = Mailbox.pop_optional()) {
@@ -220,9 +220,9 @@ public:
     }
 
     template<class... TArgs>
-    void Push(TArgs&&... args) {
+    void push(TArgs&&... args) {
         // Most of the time this will be lockfree
-        if (Mailbox.emplace(std::forward<TArgs>(args)...)) {
+        if (Mailbox.push(std::forward<TArgs>(args)...)) {
             mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock l(Lock);
             MailboxLocked = true;
@@ -233,7 +233,7 @@ public:
         }
     }
 
-    T Pop() {
+    T pop() {
         std::unique_lock l(Lock);
         for (;;) {
             while (!MailboxLocked) {
@@ -253,7 +253,7 @@ public:
         }
     }
 
-    std::optional<T> TryPop() {
+    std::optional<T> try_pop() {
         std::unique_lock l(Lock);
         if (MailboxLocked) {
             if (auto result = Mailbox.pop_optional()) {
@@ -279,44 +279,44 @@ template<class T>
 class TBlockingQueue {
     struct IBlockingQueue {
         virtual ~IBlockingQueue() = default;
-        virtual void Push(T) = 0;
-        virtual T Pop() = 0;
-        virtual std::optional<T> TryPop() = 0;
+        virtual void push(T) = 0;
+        virtual T pop() = 0;
+        virtual std::optional<T> try_pop() = 0;
     };
 
 public:
     template<class TQueue>
-    void Reset() {
+    void emplace() {
         struct TProxy
             : private TQueue
             , public IBlockingQueue
         {
-            void Push(T item) override {
-                TQueue::Push(std::move(item));
+            void push(T item) override {
+                TQueue::push(std::move(item));
             }
 
-            T Pop() override {
-                return TQueue::Pop();
+            T pop() override {
+                return TQueue::pop();
             }
 
-            std::optional<T> TryPop() override {
-                return TQueue::TryPop();
+            std::optional<T> try_pop() override {
+                return TQueue::try_pop();
             }
         };
 
         Impl = std::make_unique<TProxy>();
     }
 
-    void Push(T item) {
-        Impl->Push(std::move(item));
+    void push(T item) {
+        Impl->push(std::move(item));
     }
 
-    T Pop() {
-        return Impl->Pop();
+    T pop() {
+        return Impl->pop();
     }
 
-    std::optional<T> TryPop() {
-        return Impl->TryPop();
+    std::optional<T> try_pop() {
+        return Impl->try_pop();
     }
 
 private:
@@ -340,23 +340,23 @@ public:
     {
         switch (queueType) {
             case ESchedulerQueue::LockFree: {
-                Queue.Reset<detail::TBlockingQueue<std::coroutine_handle<>>>();
+                Queue.emplace<detail::blocking_queue<std::coroutine_handle<>>>();
                 break;
             }
             case ESchedulerQueue::AbslMutex: {
-                Queue.Reset<TBlockingQueueWithAbslMutex<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithAbslMutex<std::coroutine_handle<>>>();
                 break;
             }
             case ESchedulerQueue::StdMutex: {
-                Queue.Reset<TBlockingQueueWithStdMutex<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithStdMutex<std::coroutine_handle<>>>();
                 break;
             }
             case ESchedulerQueue::AbslMailbox: {
-                Queue.Reset<TBlockingQueueWithAbslMailbox<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithAbslMailbox<std::coroutine_handle<>>>();
                 break;
             }
             case ESchedulerQueue::StdMailbox: {
-                Queue.Reset<TBlockingQueueWithStdMailbox<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithStdMailbox<std::coroutine_handle<>>>();
                 break;
             }
         }
@@ -371,19 +371,19 @@ public:
     ~TScheduler() {
         // Send a stop signal for every thread
         for (size_t i = 0; i < Threads.size(); ++i) {
-            Queue.Push(nullptr);
+            Queue.push(nullptr);
         }
         for (auto& thread : Threads) {
             thread.join();
         }
-        if (auto c = Queue.TryPop()) {
+        if (auto c = Queue.try_pop()) {
             assert(false && "Unexpected scheduler shutdown with non-empty queue");
         }
     }
 
     void schedule(std::coroutine_handle<> c) override {
         assert(c && "Cannot schedule a null continuation");
-        Queue.Push(c);
+        Queue.push(c);
     }
 
     bool preempt() const override {
@@ -399,7 +399,7 @@ private:
         actor_scheduler::set_current_ptr(this);
         TTime deadline{};
         thread_deadline = &deadline;
-        while (auto c = Queue.Pop()) {
+        while (auto c = Queue.pop()) {
             deadline = TClock::now() + PreemptUs;
             c.resume();
         }

@@ -5,7 +5,7 @@
 using namespace coroactors;
 
 struct BM_BlockingQueue : public benchmark::Fixture {
-    std::optional<detail::TBlockingQueue<int>> Queue;
+    std::optional<detail::blocking_queue<int>> Queue;
 
     void SetUp(const benchmark::State& state) {
         if (state.thread_index() == 0) {
@@ -30,16 +30,16 @@ BENCHMARK_DEFINE_F(BM_BlockingQueue, MPSC)(benchmark::State& state) {
         }
         for (auto _ : state) {
             if (pushLocal) {
-                Queue->Push(++last);
+                Queue->push(++last);
             }
             for (size_t i = 0; i < producers; ++i) {
-                Queue->Pop();
+                Queue->pop();
             }
         }
         state.SetItemsProcessed(state.iterations() * producers);
     } else {
         for (auto _ : state) {
-            Queue->Push(++last);
+            Queue->push(++last);
         }
     }
 }
@@ -51,13 +51,13 @@ BENCHMARK_REGISTER_F(BM_BlockingQueue, MPSC)
 BENCHMARK_DEFINE_F(BM_BlockingQueue, MPMC)(benchmark::State& state) {
     if (state.thread_index() % 2 == 0) {
         for (auto _ : state) {
-            Queue->Pop();
+            Queue->pop();
         }
         state.SetItemsProcessed(state.iterations());
     } else {
         int last = 0;
         for (auto _ : state) {
-            Queue->Push(++last);
+            Queue->push(++last);
         }
     }
 }

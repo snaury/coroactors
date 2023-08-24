@@ -46,7 +46,7 @@ namespace coroactors::detail {
 
     public:
         /**
-         * Emplaces a new item to this mailbox
+         * Pushes a new item to this mailbox
          *
          * Thread-safe and lock-free (wait-free except for allocation when a
          * new node and item are constructed), may be performed by any thread.
@@ -58,7 +58,7 @@ namespace coroactors::detail {
          * schedule it for processing.
          */
         template<class... TArgs>
-        bool emplace(TArgs&&... args) {
+        bool push(TArgs&&... args) {
             // Constructs a new item, it is the only point that may throw on push
             node* next = new node(std::forward<TArgs>(args)...);
             // Note: acquire/release synchronizes with another push

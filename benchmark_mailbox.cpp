@@ -9,9 +9,9 @@ static void TestBasics() {
     int item;
     detail::mailbox<int> mailbox;
     assert(mailbox.peek() == nullptr);
-    bool push1 = mailbox.emplace(1);
+    bool push1 = mailbox.push(1);
     assert(push1 == false);
-    bool push2 = mailbox.emplace(2);
+    bool push2 = mailbox.push(2);
     assert(push2 == false);
     item = mailbox.pop_default();
     assert(item == 1);
@@ -19,7 +19,7 @@ static void TestBasics() {
     assert(item == 2);
     item = mailbox.pop_default();
     assert(item == 0);
-    bool push3 = mailbox.emplace(3);
+    bool push3 = mailbox.push(3);
     assert(push3 == true);
     const int* current = mailbox.peek();
     assert(current && *current == 3);
@@ -36,7 +36,7 @@ static void BM_Push(benchmark::State& state) {
     benchmark::DoNotOptimize(mailbox);
     int last = 0;
     for (auto _ : state) {
-        mailbox.emplace(++last);
+        mailbox.push(++last);
     }
     state.SetItemsProcessed(state.iterations());
 }
@@ -48,7 +48,7 @@ static void BM_PushPop_NoThreads(benchmark::State& state) {
     benchmark::DoNotOptimize(mailbox);
     int last = 0;
     for (auto _ : state) {
-        mailbox.emplace(++last);
+        mailbox.push(++last);
         int value = mailbox.pop_default();
         assert(value == last);
         benchmark::DoNotOptimize(value);
@@ -104,7 +104,7 @@ struct BM_PushPop : public benchmark::Fixture {
     }
 
     void Push(int value) {
-        if (State->Mailbox.emplace(value)) {
+        if (State->Mailbox.push(value)) {
             WakeConsumer();
         }
     }
