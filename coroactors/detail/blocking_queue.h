@@ -9,77 +9,22 @@
 
 namespace coroactors::detail {
 
-    struct TBlockingQueueWaiter {
-        using TAtomic = detail::semaphore_atomic_t;
-        using TValue = TAtomic::value_type;
+    struct blocking_queue_waiter : protected sync_semaphore {
+        blocking_queue_waiter* next{ nullptr };
 
-        TAtomic Semaphore{ 0 };
-        TBlockingQueueWaiter* Next = nullptr;
-
-        void Wait() noexcept {
-            // Fast path: assume Wake was called already
-            TValue current = 2;
-            if (Semaphore.compare_exchange_strong(current, 0, std::memory_order_acquire)) {
-                return;
-            }
-
-            // Fast path: spin assuming Wake will be called very soon
-            for (int i = 0; i < 64; ++i) {
-                while (current >= 2) {
-                    if (Semaphore.compare_exchange_weak(current, current - 2, std::memory_order_acquire)) {
-                        return;
-                    }
-                }
-                current = Semaphore.load(std::memory_order_relaxed);
-            }
-
-            // Spin for 64µs, yielding thread after 4µs
-            auto start = std::chrono::high_resolution_clock::now();
-            for (;;) {
-                while (current >= 2) {
-                    if (Semaphore.compare_exchange_weak(current, current - 2, std::memory_order_acquire)) {
-                        return;
-                    }
-                }
-                std::chrono::nanoseconds elapsed = std::chrono::high_resolution_clock::now() - start;
-                if (elapsed >= std::chrono::microseconds(64)) {
-                    break;
-                }
-                if (elapsed >= std::chrono::microseconds(4)) {
-                    std::this_thread::yield();
-                }
-                current = Semaphore.load(std::memory_order_relaxed);
-            }
-
-            // Set the wait flag, asking Wake to call notify_one
-            if (!(current & 1)) {
-                [[likely]]
-                current = Semaphore.fetch_or(1, std::memory_order_relaxed) | 1;
-            } else {
-                assert(false && "Wait semaphore has an unexpected wait flag already set");
-            }
-
-            // Slow path
-            for (;;) {
-                while (current >= 2) {
-                    if (Semaphore.compare_exchange_weak(current, current - 3, std::memory_order_acquire)) {
-                        return;
-                    }
-                }
-                Semaphore.wait(current, std::memory_order_relaxed);
-                current = Semaphore.load(std::memory_order_relaxed);
-            }
+        static blocking_queue_waiter* current() noexcept {
+            static thread_local blocking_queue_waiter per_thread{};
+            return &per_thread;
         }
 
-        void Wake() noexcept {
-            TValue current = Semaphore.fetch_add(2, std::memory_order_release);
-            if (current & 1) {
-                Semaphore.notify_one();
-            }
+        void notify() noexcept {
+            sync_semaphore::release();
+        }
+
+        void wait() noexcept {
+            sync_semaphore::acquire();
         }
     };
-
-    inline thread_local TBlockingQueueWaiter PerThreadBlockingQueueWaiter;
 
     /**
      * A multiple producers multiple consumers blocking queue
@@ -96,13 +41,11 @@ namespace coroactors::detail {
             {}
         };
 
-        using TBlockingQueueWaiter = detail::TBlockingQueueWaiter;
-
         struct TUnlockTaken {
             TBlockingQueue* Self;
             TNode* Next;
-            TBlockingQueueWaiter* Pending;
-            TBlockingQueueWaiter* PendingLast;
+            blocking_queue_waiter* Pending;
+            blocking_queue_waiter* PendingLast;
 
             ~TUnlockTaken() noexcept {
                 Self->UnlockTaken(Next, Pending, PendingLast);
@@ -147,7 +90,7 @@ namespace coroactors::detail {
             // Note: release synchronizes with Pop, acquire synchronizes with Pop installing a waiter
             void* maybeWaiter = prev->Next.exchange(node, std::memory_order_acq_rel);
             if (IsWaiter(maybeWaiter)) {
-                AsWaiter(maybeWaiter)->Wake();
+                AsWaiter(maybeWaiter)->notify();
             } else {
                 assert(maybeWaiter == nullptr);
             }
@@ -158,8 +101,8 @@ namespace coroactors::detail {
          */
         T Pop() {
             // Linked list of waiters behind us
-            TBlockingQueueWaiter* pending = nullptr;
-            TBlockingQueueWaiter* pendingLast = nullptr;
+            blocking_queue_waiter* pending = nullptr;
+            blocking_queue_waiter* pendingLast = nullptr;
 
             int spinCount = 0;
             std::chrono::high_resolution_clock::time_point spinStart;
@@ -187,13 +130,13 @@ namespace coroactors::detail {
                 return false;
             };
 
-            // Prefer relaxed loads to avoid stealing cache line unnecessarily
+            // Prefer loads to avoid stealing cache line unnecessarily
             void* headValue = Head.load(std::memory_order_relaxed);
 
             for (;;) {
                 // We want spin for some time and wait for head to unlock
                 if ((!headValue || IsWaiter(headValue)) && shouldSpin()) {
-                    void* updated = Head.load(std::memory_order_relaxed);
+                    void* updated = Head.load(std::memory_order_acquire);
                     if (headValue != updated) {
                         headValue = updated;
                         spinCount = 0;
@@ -239,12 +182,12 @@ namespace coroactors::detail {
                         // waiters in any way due to races with Push here: the
                         // waiters list may have been removed already and in the
                         // process of waking up.
-                        TBlockingQueueWaiter* local = &detail::PerThreadBlockingQueueWaiter;
+                        blocking_queue_waiter* local = blocking_queue_waiter::current();
                         if (pending) {
-                            local->Next = pending;
-                            pendingLast->Next = AsWaiter(nextValue);
+                            local->next = pending;
+                            pendingLast->next = AsWaiter(nextValue);
                         } else {
-                            local->Next = AsWaiter(nextValue);
+                            local->next = AsWaiter(nextValue);
                         }
 
                         // Note: acquire synchronizes with Push, release synchronizes with Push consuming the waiter
@@ -257,21 +200,21 @@ namespace coroactors::detail {
                             pendingLast = pending ? Last(pending) : nullptr;
 
                             // Wait until someone wakes us up
-                            local->Wait();
+                            local->wait();
 
                             // A different thread may have added more waiters behind
                             // us, all of them have lower priority than pending list
                             // acquired while unlocking.
-                            if (local->Next) {
-                                TBlockingQueueWaiter* last = Last(local->Next);
+                            if (local->next) {
+                                blocking_queue_waiter* last = Last(local->next);
                                 if (pending) {
-                                    pendingLast->Next = local->Next;
+                                    pendingLast->next = local->next;
                                     pendingLast = last;
                                 } else {
-                                    pending = local->Next;
+                                    pending = local->next;
                                     pendingLast = last;
                                 }
-                                local->Next = nullptr;
+                                local->next = nullptr;
                             }
 
                             // Restart by trying to lock the head
@@ -285,9 +228,9 @@ namespace coroactors::detail {
 
                         // Remove links to consumed waiter list tail
                         if (pending) {
-                            pendingLast->Next = nullptr;
+                            pendingLast->next = nullptr;
                         }
-                        local->Next = nullptr;
+                        local->next = nullptr;
                     }
 
                     // Restart by trying to lock the head
@@ -297,10 +240,10 @@ namespace coroactors::detail {
                 // Queue is currently locked, but we may have removed some waiters
                 // These are fresh and will be added at the front of pending
                 if (headValue) {
-                    TBlockingQueueWaiter* fresh = AsWaiter(headValue);
-                    TBlockingQueueWaiter* last = Last(fresh);
+                    blocking_queue_waiter* fresh = AsWaiter(headValue);
+                    blocking_queue_waiter* last = Last(fresh);
                     if (pending) {
-                        last->Next = pending;
+                        last->next = pending;
                     } else {
                         pendingLast = last;
                     }
@@ -311,22 +254,22 @@ namespace coroactors::detail {
                 // Install ourselves as a new lock waiter, note however that we
                 // will only wake up when there is at least one item in the queue,
                 // and then we might start racing to lock and grab it.
-                TBlockingQueueWaiter* local = &detail::PerThreadBlockingQueueWaiter;
+                blocking_queue_waiter* local = blocking_queue_waiter::current();
                 if (Head.compare_exchange_strong(headValue, EncodeWaiter(local), std::memory_order_release)) {
                     // Wait until someone wakes us up
-                    local->Wait();
+                    local->wait();
 
                     // A different thread may have added more waiters behind us,
                     // all of them have higher priority than our pending list.
-                    if (local->Next) {
-                        TBlockingQueueWaiter* last = Last(local->Next);
+                    if (local->next) {
+                        blocking_queue_waiter* last = Last(local->next);
                         if (pending) {
-                            last->Next = pending;
+                            last->next = pending;
                         } else {
                             pendingLast = last;
                         }
-                        pending = local->Next;
-                        local->Next = nullptr;
+                        pending = local->next;
+                        local->next = nullptr;
                     }
 
                     headValue = Head.load(std::memory_order_relaxed);
@@ -342,8 +285,8 @@ namespace coroactors::detail {
          */
         std::optional<T> TryPop() {
             // Linked list of waiters behind us
-            TBlockingQueueWaiter* pending = nullptr;
-            TBlockingQueueWaiter* pendingLast = nullptr;
+            blocking_queue_waiter* pending = nullptr;
+            blocking_queue_waiter* pendingLast = nullptr;
 
             void* headValue = Head.load(std::memory_order_acquire);
             while (headValue && !IsWaiter(headValue)) {
@@ -385,7 +328,7 @@ namespace coroactors::detail {
          * technically wait-free, because retries only happen when more threads
          * install their waiters, and the number of threads is finite.
          */
-        void UnlockTaken(TNode* head, TBlockingQueueWaiter* waiter, TBlockingQueueWaiter* last) noexcept {
+        void UnlockTaken(TNode* head, blocking_queue_waiter* waiter, blocking_queue_waiter* last) noexcept {
             for (;;) {
                 while (!waiter) {
                     void* headValue = nullptr;
@@ -420,22 +363,22 @@ namespace coroactors::detail {
                             // More waiters have been installed, remove them and prepend to the list
                             headValue = Head.exchange(nullptr, std::memory_order_acquire);
                             if (headValue && IsWaiter(headValue)) {
-                                TBlockingQueueWaiter* fresh = AsWaiter(headValue);
-                                Last(fresh)->Next = waiter;
+                                blocking_queue_waiter* fresh = AsWaiter(headValue);
+                                Last(fresh)->next = waiter;
                                 waiter = fresh;
                             } else {
                                 // Lost the race: another thread grabbed waiters
                                 assert(!headValue);
                             }
                         }
-                        waiter->Wake();
+                        waiter->notify();
                         return;
                     }
 
                     // Try installing our waiter list at the next node, queueing
                     // existing waiter list behind.
                     if (nextValue) {
-                        last->Next = AsWaiter(nextValue);
+                        last->next = AsWaiter(nextValue);
                     }
 
                     // Note: acquire synchronizes with Push, release synchronizes with Push consuming the waiter
@@ -450,7 +393,7 @@ namespace coroactors::detail {
                     assert(nextValue && !IsWaiter(nextValue));
 
                     // Remove link to consumed waiter list tail
-                    last->Next = nullptr;
+                    last->next = nullptr;
                 }
             }
         }
@@ -458,7 +401,7 @@ namespace coroactors::detail {
         /**
          * Tries unlocking while there is no next item available
          */
-        bool TryUnlockNoItem(TNode* head, void*& nextValue, TBlockingQueueWaiter*& waiter, TBlockingQueueWaiter*& last) {
+        bool TryUnlockNoItem(TNode* head, void*& nextValue, blocking_queue_waiter*& waiter, blocking_queue_waiter*& last) {
             for (;;) {
                 while (!waiter) {
                     void* headValue = nullptr;
@@ -483,7 +426,7 @@ namespace coroactors::detail {
                 // existing waiter list behind.
                 if (nextValue) {
                     assert(IsWaiter(nextValue));
-                    last->Next = AsWaiter(nextValue);
+                    last->next = AsWaiter(nextValue);
                 }
 
                 // Note: acquire synchronizes with Push, release synchronizes with Push consuming the waiter
@@ -493,7 +436,7 @@ namespace coroactors::detail {
                     assert(nextValue && !IsWaiter(nextValue));
 
                     // Remove link to consumed waiter list tail
-                    last->Next = nullptr;
+                    last->next = nullptr;
                     return false;
                 }
 
@@ -506,7 +449,7 @@ namespace coroactors::detail {
          * Unlocks after installing a waiter, setting Head to the new head.
          * Returns existing waiter list queued for locking the queue.
          */
-        TBlockingQueueWaiter* UnlockWaiting(TNode* head) noexcept {
+        blocking_queue_waiter* UnlockWaiting(TNode* head) noexcept {
             void* headValue = Head.exchange(head, std::memory_order_acq_rel);
             if (headValue) {
                 assert(IsWaiter(headValue));
@@ -525,17 +468,17 @@ namespace coroactors::detail {
             return reinterpret_cast<TNode*>(p);
         }
 
-        static TBlockingQueueWaiter* AsWaiter(void* p) noexcept {
-            return reinterpret_cast<TBlockingQueueWaiter*>(reinterpret_cast<uintptr_t>(p) & WaiterMask);
+        static blocking_queue_waiter* AsWaiter(void* p) noexcept {
+            return reinterpret_cast<blocking_queue_waiter*>(reinterpret_cast<uintptr_t>(p) & WaiterMask);
         }
 
-        static void* EncodeWaiter(TBlockingQueueWaiter* waiter) noexcept {
+        static void* EncodeWaiter(blocking_queue_waiter* waiter) noexcept {
             return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(waiter) | WaiterMark);
         }
 
-        static TBlockingQueueWaiter* Last(TBlockingQueueWaiter* waiter) noexcept {
-            while (waiter->Next) {
-                waiter = waiter->Next;
+        static blocking_queue_waiter* Last(blocking_queue_waiter* waiter) noexcept {
+            while (waiter->next) {
+                waiter = waiter->next;
             }
             return waiter;
         }

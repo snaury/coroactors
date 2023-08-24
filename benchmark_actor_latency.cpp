@@ -417,49 +417,33 @@ private:
 template<class T>
     requires (!std::is_void_v<T>)
 std::vector<T> run_sync(std::vector<actor<T>> actors) {
-    detail::semaphore_atomic_t waiting(actors.size());
+    detail::sync_wait_group wg(actors.size());
     std::vector<T> results(actors.size());
 
     for (size_t i = 0; i < actors.size(); ++i) {
-        detach_awaitable(std::move(actors[i]), [&waiting, &results, i](T&& result){
+        detach_awaitable(std::move(actors[i]), [&wg, &results, i](T&& result){
             results[i] = std::move(result);
-            if (0 == --waiting) {
-                waiting.notify_one();
-            }
+            wg.done();
         });
     }
     actors.clear();
 
-    for (;;) {
-        size_t value = waiting.load();
-        if (value == 0) {
-            break;
-        }
-        waiting.wait(value);
-    }
+    wg.wait();
 
     return results;
 }
 
 void run_sync(std::vector<actor<void>> actors) {
-    detail::semaphore_atomic_t waiting(actors.size());
+    detail::sync_wait_group wg(actors.size());
 
     for (auto& a : actors) {
         detach_awaitable(std::move(a), [&]{
-            if (0 == --waiting) {
-                waiting.notify_one();
-            }
+            wg.done();
         });
     }
     actors.clear();
 
-    for (;;) {
-        size_t value = waiting.load();
-        if (value == 0) {
-            break;
-        }
-        waiting.wait(value);
-    }
+    wg.wait();
 }
 
 template<class T>

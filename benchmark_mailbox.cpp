@@ -61,7 +61,7 @@ BENCHMARK(BM_PushPop_NoThreads);
 struct BM_PushPop : public benchmark::Fixture {
     struct TState {
         detail::mailbox<int> Mailbox;
-        detail::semaphore_atomic_t Semaphore{ 0 }; // initially locked
+        detail::sync_semaphore Semaphore{ 0 }; // initially locked
         std::optional<std::thread> Consumer;
         std::atomic<size_t> WakeUps{ 0 };
     };
@@ -85,11 +85,7 @@ struct BM_PushPop : public benchmark::Fixture {
     }
 
     void WaitMailbox() {
-        while (State->Semaphore.load() == 0) {
-            // wait for signal
-            State->Semaphore.wait(0);
-        }
-        --State->Semaphore;
+        State->Semaphore.acquire();
     }
 
     void RunConsumer(size_t threads) {
@@ -115,8 +111,7 @@ struct BM_PushPop : public benchmark::Fixture {
 
     void WakeConsumer() {
         ++State->WakeUps;
-        ++State->Semaphore;
-        State->Semaphore.notify_one();
+        State->Semaphore.release();
     }
 };
 

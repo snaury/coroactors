@@ -6,24 +6,16 @@
 using namespace coroactors;
 
 void run_sync(std::vector<actor<void>> actors) {
-    detail::semaphore_atomic_t waiting(actors.size());
+    detail::sync_wait_group wg(actors.size());
 
     for (auto& a : actors) {
         detach_awaitable(std::move(a), [&]{
-            if (0 == --waiting) {
-                waiting.notify_one();
-            }
+            wg.done();
         });
     }
     actors.clear();
 
-    for (;;) {
-        size_t value = waiting.load();
-        if (value == 0) {
-            break;
-        }
-        waiting.wait(value);
-    }
+    wg.wait();
 }
 
 void run_sync(actor<void> a) {
