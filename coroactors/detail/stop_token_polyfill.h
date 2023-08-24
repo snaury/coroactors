@@ -544,16 +544,16 @@ namespace coroactors::detail {
      * Polyfill for `std::stop_callback`
      */
     template<class Callback>
-    class stop_callback final : private stop_state_callback {
+    class stop_callback {
     public:
         using callback_type = Callback;
 
         template<class C>
         explicit stop_callback(const stop_token& token, C&& callback)
-            noexcept (std::is_nothrow_constructible_v<Callback, C>)
+            noexcept(std::is_nothrow_constructible_v<Callback, C>)
             : callback_(std::forward<C>(callback))
         {
-            if (token.state && token.state->add_callback(this)) {
+            if (token.state && token.state->add_callback(&callback_)) {
                 state = token.state;
                 state->ref();
             }
@@ -561,11 +561,11 @@ namespace coroactors::detail {
 
         template<class C>
         explicit stop_callback(stop_token&& token, C&& callback)
-            noexcept (std::is_nothrow_constructible_v<Callback, C>)
+            noexcept(std::is_nothrow_constructible_v<Callback, C>)
             : callback_(std::forward<C>(callback))
         {
             if (token.state) {
-                if (token.state->add_callback(this)) {
+                if (token.state->add_callback(&callback_)) {
                     state = token.state;
                     token.state = nullptr;
                 } else {
@@ -577,7 +577,8 @@ namespace coroactors::detail {
 
         ~stop_callback() {
             if (state) {
-                state->remove_callback(this);
+                state->remove_callback(&callback_);
+                state->unref();
                 state = nullptr;
             }
         }
@@ -589,13 +590,24 @@ namespace coroactors::detail {
         stop_callback& operator=(stop_callback&&) = delete;
 
     private:
-        void run() noexcept final {
-            callback_();
-        }
+        class callback_t final : public stop_state_callback {
+        public:
+            template<class C>
+            explicit callback_t(C&& callback)
+                : callback_(std::forward<C>(callback))
+            {}
+
+            void run() noexcept {
+                callback_();
+            }
+
+        private:
+            Callback callback_;
+        };
 
     private:
         stop_state* state{ nullptr };
-        Callback callback_;
+        callback_t callback_;
     };
 
     /**
