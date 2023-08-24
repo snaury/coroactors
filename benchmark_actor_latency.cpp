@@ -6,6 +6,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
 
 using namespace coroactors;
 
@@ -123,9 +125,7 @@ public:
     void Push(TArgs&&... args) {
         std::unique_lock l(Lock);
         Items.emplace_back(std::forward<TArgs>(args)...);
-        // if (Waiters > 0) {
-            NotEmpty.notify_one();
-        // }
+        NotEmpty.notify_one();
     }
 
     T Pop() {
@@ -224,10 +224,8 @@ public:
         // Most of the time this will be lockfree
         if (Mailbox.emplace(std::forward<TArgs>(args)...)) {
             mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
-            {
-                std::unique_lock l(Lock);
-                MailboxLocked = true;
-            }
+            std::unique_lock l(Lock);
+            MailboxLocked = true;
             CanPop.notify_all();
         }
     }

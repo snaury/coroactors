@@ -217,3 +217,10 @@ static void BM_Normal_Call_Service(benchmark::State& state) {
 }
 
 BENCHMARK(BM_Normal_Call_Service);
+
+int main(int argc, char** argv) {
+    benchmark::Initialize(&argc, argv);
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}
