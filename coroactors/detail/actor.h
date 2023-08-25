@@ -426,6 +426,8 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::current_stop_token_t) {
+            check_context_initialized();
+
             return current_stop_token_awaiter_t{ token };
         }
 
