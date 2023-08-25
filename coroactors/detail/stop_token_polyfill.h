@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/detail/atomic_semaphore.h>
+#include <coroactors/detail/intrusive_ptr.h>
 #include <atomic>
 #include <thread>
 
@@ -36,14 +37,12 @@ namespace coroactors::detail {
         stop_state() noexcept = default;
 
     public:
-        void ref() noexcept {
+        void add_ref() noexcept {
             refcount.fetch_add(1, std::memory_order_relaxed);
         }
 
-        void unref() noexcept {
-            if (1 == refcount.fetch_sub(1, std::memory_order_acq_rel)) {
-                delete this;
-            }
+        size_t release_ref() noexcept {
+            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
         void add_source() noexcept {
@@ -352,70 +351,17 @@ namespace coroactors::detail {
         template<class Callback>
         friend class stop_callback;
 
-        explicit stop_token(stop_state* state)
+        explicit stop_token(const intrusive_ptr<stop_state>& state) noexcept
             : state(state)
-        {
-            if (state) {
-                state->ref();
-            }
-        }
+        {}
 
     public:
         stop_token() noexcept
             : state(nullptr)
         {}
 
-        stop_token(const stop_token& rhs) noexcept
-            : state(rhs.state)
-        {
-            if (state) {
-                state->ref();
-            }
-        }
-
-        stop_token(stop_token&& rhs) noexcept
-            : state(rhs.state)
-        {
-            rhs.state = nullptr;
-        }
-
-        ~stop_token() {
-            if (state) {
-                state->unref();
-                state = nullptr;
-            }
-        }
-
-        stop_token& operator=(const stop_token& rhs) noexcept {
-            if (this != &rhs) {
-                stop_state* prev = state;
-                state = rhs.state;
-                if (state) {
-                    state->ref();
-                }
-                if (prev) {
-                    prev->unref();
-                }
-            }
-            return *this;
-        }
-
-        stop_token& operator=(stop_token&& rhs) noexcept {
-            if (this != &rhs) {
-                stop_state* prev = state;
-                state = rhs.state;
-                rhs.state = nullptr;
-                if (prev) {
-                    prev->unref();
-                }
-            }
-            return *this;
-        }
-
         void swap(stop_token& rhs) noexcept {
-            stop_state* tmp = state;
-            state = rhs.state;
-            rhs.state = tmp;
+            state.swap(rhs.state);
         }
 
         bool stop_requested() const noexcept {
@@ -431,13 +377,11 @@ namespace coroactors::detail {
         }
 
         friend void swap(stop_token& a, stop_token& b) noexcept {
-            stop_state* tmp = a.state;
-            a.state = b.state;
-            b.state = tmp;
+            a.state.swap(b.state);
         }
 
     private:
-        stop_state* state;
+        intrusive_ptr<stop_state> state;
     };
 
     /**
@@ -448,7 +392,6 @@ namespace coroactors::detail {
         stop_source()
             : state(new stop_state)
         {
-            state->ref();
             state->add_source();
         }
 
@@ -456,40 +399,33 @@ namespace coroactors::detail {
             : state(nullptr)
         {}
 
-        stop_source(const stop_source& rhs) noexcept
+        stop_source(const stop_source& rhs)
             : state(rhs.state)
         {
             if (state) {
-                state->ref();
                 state->add_source();
             }
         }
 
-        stop_source(stop_source&& rhs) noexcept
-            : state(rhs.state)
-        {
-            rhs.state = nullptr;
-        }
+        stop_source(stop_source&& rhs)
+            : state(std::move(rhs.state))
+        {}
 
         ~stop_source() {
             if (state) {
                 state->remove_source();
-                state->unref();
-                state = nullptr;
             }
         }
 
         stop_source& operator=(const stop_source& rhs) noexcept {
             if (this != &rhs) {
-                stop_state* prev = state;
+                intrusive_ptr<stop_state> prev(std::move(state));
                 state = rhs.state;
                 if (state) {
-                    state->ref();
                     state->add_source();
                 }
                 if (prev) {
                     prev->remove_source();
-                    prev->unref();
                 }
             }
             return *this;
@@ -497,12 +433,10 @@ namespace coroactors::detail {
 
         stop_source& operator=(stop_source&& rhs) noexcept {
             if (this != &rhs) {
-                stop_state* prev = state;
-                state = rhs.state;
-                rhs.state = nullptr;
+                intrusive_ptr<stop_state> prev(std::move(state));
+                state = std::move(rhs.state);
                 if (prev) {
                     prev->remove_source();
-                    prev->unref();
                 }
             }
             return *this;
@@ -513,9 +447,7 @@ namespace coroactors::detail {
         }
 
         void swap(stop_source& rhs) noexcept {
-            stop_state* tmp = state;
-            state = rhs.state;
-            rhs.state = tmp;
+            state.swap(rhs.state);
         }
 
         [[nodiscard]] stop_token get_token() const noexcept {
@@ -535,13 +467,11 @@ namespace coroactors::detail {
         }
 
         friend void swap(stop_source& a, stop_source& b) noexcept {
-            stop_state* tmp = a.state;
-            a.state = b.state;
-            b.state = tmp;
+            a.state.swap(b.state);
         }
 
     private:
-        stop_state* state;
+        intrusive_ptr<stop_state> state;
     };
 
     /**
@@ -559,7 +489,6 @@ namespace coroactors::detail {
         {
             if (token.state && token.state->add_callback(&callback_)) {
                 state = token.state;
-                state->ref();
             }
         }
 
@@ -570,11 +499,9 @@ namespace coroactors::detail {
         {
             if (token.state) {
                 if (token.state->add_callback(&callback_)) {
-                    state = token.state;
-                    token.state = nullptr;
+                    state = std::move(token.state);
                 } else {
-                    token.state->unref();
-                    token.state = nullptr;
+                    token.state.reset();
                 }
             }
         }
@@ -582,8 +509,6 @@ namespace coroactors::detail {
         ~stop_callback() {
             if (state) {
                 state->remove_callback(&callback_);
-                state->unref();
-                state = nullptr;
             }
         }
 
@@ -611,7 +536,7 @@ namespace coroactors::detail {
 
     private:
         callback_t callback_;
-        stop_state* state{ nullptr };
+        intrusive_ptr<stop_state> state;
     };
 
     /**

@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/mailbox.h>
 #include <cassert>
 #include <coroutine>
@@ -9,6 +10,7 @@ namespace coroactors {
 
     class actor_context {
         struct impl {
+            std::atomic<size_t> refcount{ 0 };
             actor_scheduler& scheduler;
             detail::mailbox<std::coroutine_handle<>> mailbox;
 
@@ -20,13 +22,21 @@ namespace coroactors {
                     assert(false && "Unexpected failure to unlock the mailbox");
                 }
             }
+
+            void add_ref() noexcept {
+                refcount.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            size_t release_ref() noexcept {
+                return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            }
         };
 
     public:
         actor_context() noexcept = default;
 
         actor_context(actor_scheduler& s)
-            : impl_(std::make_shared<impl>(s))
+            : impl_(new impl(s))
         {}
 
         explicit operator bool() const {
@@ -204,7 +214,7 @@ namespace coroactors {
         static constexpr current_stop_token_t current_stop_token{};
 
     private:
-        std::shared_ptr<impl> impl_;
+        detail::intrusive_ptr<impl> impl_;
     };
 
     /**

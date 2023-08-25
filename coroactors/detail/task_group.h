@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/result.h>
 #include <atomic>
 #include <cassert>
@@ -52,7 +53,7 @@ namespace coroactors::detail {
     /**
      * A sink where ready results are pushed and awaited
      *
-     * This class is shared with a shared_ptr
+     * This class is shared with a intrusive_ptr
      */
     template<class T>
     class task_group_sink {
@@ -64,6 +65,14 @@ namespace coroactors::detail {
 
         ~task_group_sink() noexcept {
             detach();
+        }
+
+        void add_ref() noexcept {
+            refcount.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        size_t release_ref() noexcept {
+            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
         /**
@@ -206,6 +215,8 @@ namespace coroactors::detail {
         // Signals task group is detached and new results will not be consumed
         static constexpr uintptr_t MarkerDetached = 2;
 
+        // A reference count for intrusive_ptr
+        std::atomic<size_t> refcount{ 0 };
         // A linked list of ready results (last result first) or a marker
         std::atomic<void*> last_ready{ nullptr };
         // A linked list of ready results removed from the atomic head
@@ -292,7 +303,7 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return final_suspend_t{}; }
 
-        void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
+        void start(const intrusive_ptr<task_group_sink<T>>& sink, size_t index) {
             this->result_->index = index;
             sink_ = sink;
             running = true;
@@ -300,7 +311,7 @@ namespace coroactors::detail {
         }
 
     private:
-        std::shared_ptr<task_group_sink<T>> sink_;
+        intrusive_ptr<task_group_sink<T>> sink_;
         bool running = false;
     };
 
@@ -315,7 +326,7 @@ namespace coroactors::detail {
     public:
         using promise_type = task_group_promise<T>;
 
-        void start(const std::shared_ptr<task_group_sink<T>>& sink, size_t index) {
+        void start(const intrusive_ptr<task_group_sink<T>>& sink, size_t index) {
             handle.promise().start(sink, index);
         }
 

@@ -85,11 +85,13 @@ TEST(StopTokenTest, StopSourceAndTokenOps) {
 
     // move assign to empty
     a = sempty;
+    EXPECT_TRUE(a == sempty);
     a = std::move(amove);
     EXPECT_TRUE(a == acopy);
     EXPECT_TRUE(amove == sempty);
     // same for stop_token
     at = tempty;
+    EXPECT_TRUE(at == tempty);
     at = std::move(atmove);
     EXPECT_TRUE(at == atcopy);
     EXPECT_TRUE(atmove == tempty);

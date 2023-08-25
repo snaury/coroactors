@@ -147,7 +147,7 @@ namespace coroactors {
         }
 
     private:
-        std::shared_ptr<detail::task_group_sink<T>> sink_ = std::make_shared<detail::task_group_sink<T>>();
+        detail::intrusive_ptr<detail::task_group_sink<T>> sink_{ new detail::task_group_sink<T> };
         size_t count_ = 0;
         size_t left_ = 0;
     };
