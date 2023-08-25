@@ -1,6 +1,8 @@
 #pragma once
+#include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/result.h>
+#include <coroactors/stop_token.h>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -303,15 +305,67 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return final_suspend_t{}; }
 
-        void start(const intrusive_ptr<task_group_sink<T>>& sink, size_t index) {
+        void start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token, size_t index) {
             this->result_->index = index;
             sink_ = sink;
+            token_ = std::move(token);
             running = true;
             task_group_handle<T>::from_promise(*this).resume();
         }
 
+        template<awaitable_with_stop_token_propagation Awaitable>
+        class pass_stop_token_awaiter {
+            using Awaiter = awaiter_transform_type_t<Awaitable>;
+
+        public:
+            pass_stop_token_awaiter(Awaitable&& awaitable, task_group_promise& self)
+                : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
+                , self(self)
+            {}
+
+            pass_stop_token_awaiter(const pass_stop_token_awaiter&) = delete;
+            pass_stop_token_awaiter& operator=(const pass_stop_token_awaiter&) = delete;
+
+            bool await_ready()
+                noexcept(has_noexcept_await_ready_stop_token<Awaiter>)
+            {
+                // Note: our coroutine awaits exactly once, so token is moved
+                return awaiter.await_ready(std::move(self.token_));
+            }
+
+            template<class Promise>
+            __attribute__((__noinline__))
+            decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
+                noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
+                requires has_await_suspend<Awaiter, Promise>
+            {
+                return awaiter.await_suspend(c);
+            }
+
+            decltype(auto) await_resume()
+                noexcept(has_noexcept_await_resume<Awaiter>)
+            {
+                return awaiter.await_resume();
+            }
+
+        private:
+            Awaiter awaiter;
+            task_group_promise& self;
+        };
+
+        template<awaitable_with_stop_token_propagation Awaitable>
+        auto await_transform(Awaitable&& awaitable) noexcept {
+            return pass_stop_token_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
+        }
+
+        template<awaitable Awaitable>
+        Awaitable&& await_transform(Awaitable&& awaitable) noexcept {
+            return std::forward<Awaitable>(awaitable);
+        }
+
     private:
         intrusive_ptr<task_group_sink<T>> sink_;
+        stop_token token_;
         bool running = false;
     };
 
@@ -326,8 +380,8 @@ namespace coroactors::detail {
     public:
         using promise_type = task_group_promise<T>;
 
-        void start(const intrusive_ptr<task_group_sink<T>>& sink, size_t index) {
-            handle.promise().start(sink, index);
+        void start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token, size_t index) {
+            handle.promise().start(sink, std::move(token), index);
         }
 
     private:

@@ -340,7 +340,7 @@ namespace coroactors::detail {
 
             bool await_ready() noexcept { return true; }
             bool await_suspend(std::coroutine_handle<>) noexcept { return false; }
-            const actor_context& await_resume() noexcept { return context; }
+            [[nodiscard]] const actor_context& await_resume() noexcept { return context; }
         };
 
         auto await_transform(actor_context::caller_context_t) {
@@ -422,7 +422,7 @@ namespace coroactors::detail {
 
             bool await_ready() noexcept { return true; }
             bool await_suspend(actor_continuation<T>) noexcept { return false; }
-            const stop_token& await_resume() noexcept { return token; }
+            [[nodiscard]] const stop_token& await_resume() noexcept { return token; }
         };
 
         auto await_transform(actor_context::current_stop_token_t) {
@@ -503,9 +503,9 @@ namespace coroactors::detail {
         template<awaitable Awaitable>
         class same_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
-            using Awaiter = decltype(get_awaiter(std::declval<Awaitable&&>()));
+            using Awaiter = awaiter_transform_type_t<Awaitable>;
             // Note: Result may be a reference type
-            using Result = decltype(std::declval<Awaiter&>().await_resume());
+            using Result = awaiter_result_t<Awaiter>;
 
         public:
             // Note: if operator co_await returns a value we will construct it
@@ -593,9 +593,9 @@ namespace coroactors::detail {
         template<awaitable Awaitable>
         class change_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
-            using Awaiter = decltype(get_awaiter(std::declval<Awaitable&&>()));
+            using Awaiter = awaiter_transform_type_t<Awaitable>;
             // Note: Result may be a reference type
-            using Result = decltype(std::declval<Awaiter&>().await_resume());
+            using Result = awaiter_result_t<Awaiter>;
 
         public:
             // Note: if operator co_await returns a value we will construct it
@@ -704,7 +704,8 @@ namespace coroactors::detail {
 
         template<class Awaitable>
         class actor_passthru_awaiter {
-            using Awaiter = decltype(get_awaiter(std::declval<Awaitable>()));
+            using Awaiter = awaiter_transform_type_t<Awaitable>;
+            using Result = awaiter_result_t<Awaiter>;
 
         public:
             actor_passthru_awaiter(Awaitable&& awaitable, actor_promise& self)
@@ -719,13 +720,15 @@ namespace coroactors::detail {
             }
 
             template<class Promise>
+            __attribute__((__noinline__))
             decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
                 noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
+                requires has_await_suspend<Awaiter, Promise>
             {
                 return awaiter.await_suspend(c);
             }
 
-            decltype(auto) await_resume()
+            Result await_resume()
                 noexcept(has_noexcept_await_resume<Awaiter>)
             {
                 return awaiter.await_resume();
@@ -794,7 +797,7 @@ namespace coroactors::detail {
 
         bool await_ready(const stop_token& token) noexcept {
             handle.promise().set_stop_token(token);
-            return await_ready();
+            return handle.promise().ready();
         }
 
         bool await_ready() noexcept {
@@ -851,7 +854,7 @@ namespace coroactors::detail {
 
         bool await_ready(const stop_token& token) noexcept {
             handle.promise().set_stop_token(token);
-            return await_ready();
+            return handle.promise().ready();
         }
 
         bool await_ready() noexcept {

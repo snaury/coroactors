@@ -34,7 +34,7 @@ namespace coroactors::detail {
      */
     template<class Awaiter>
     concept has_await_ready_stop_token = requires(Awaiter& awaiter, const stop_token& token) {
-        { awaiter.await_ready(token) } -> std::same_as<bool>;
+        awaiter.await_ready(token) ? 1 : 0;
     };
 
     /**
@@ -42,24 +42,33 @@ namespace coroactors::detail {
      */
     template<class Awaiter>
     concept has_noexcept_await_ready_stop_token = requires(Awaiter& awaiter, const stop_token& token) {
-        { awaiter.await_ready(token) } noexcept;
+        { awaiter.await_ready(token) ? 1 : 0 } noexcept;
     };
 
     template<class Awaitable>
-    concept awaitable_with_stop_token_propagation = awaitable<Awaitable> &&
-        has_await_ready_stop_token<decltype(get_awaiter(std::declval<Awaitable>()))>;
+    concept awaitable_with_stop_token_propagation =
+        awaitable<Awaitable> &&
+        has_await_ready_stop_token<awaiter_safe_type_t<Awaitable>>;
 
     /**
      * Awaiter that overrides stop token of an awaitable
      */
     template<awaitable_with_stop_token_propagation Awaitable>
     class with_stop_token_awaiter {
-        using Awaiter = decltype(get_awaiter(std::declval<Awaitable>()));
+        using Awaiter = awaiter_safe_type_t<Awaitable>;
 
     public:
         with_stop_token_awaiter(Awaitable&& awaitable, const stop_token& token)
             : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
             , token(token)
+        {}
+
+        with_stop_token_awaiter(const with_stop_token_awaiter&) = delete;
+        with_stop_token_awaiter& operator=(const with_stop_token_awaiter&) = delete;
+
+        with_stop_token_awaiter(with_stop_token_awaiter&& rhs)
+            : awaiter(std::move(rhs.awaiter))
+            , token(rhs.token)
         {}
 
         bool await_ready()
@@ -69,8 +78,10 @@ namespace coroactors::detail {
         }
 
         template<class Promise>
+        __attribute__((__noinline__))
         decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
             noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
+            requires has_await_suspend<Awaiter, Promise>
         {
             return awaiter.await_suspend(c);
         }

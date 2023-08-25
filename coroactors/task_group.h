@@ -25,6 +25,7 @@ namespace coroactors {
 
         task_group(task_group&& rhs)
             : sink_(std::move(rhs.sink_))
+            , source_(std::move(rhs.source_))
             , count_(rhs.count_)
             , left_(rhs.left_)
         {
@@ -36,6 +37,7 @@ namespace coroactors {
         ~task_group() {
             if (sink_) {
                 sink_->detach();
+                source_.request_stop();
             }
         }
 
@@ -47,7 +49,7 @@ namespace coroactors {
             assert(sink_);
             size_t index = count_++;
             auto coro = detail::make_task_group_coroutine<T>(std::forward<Awaitable>(awaitable));
-            coro.start(sink_, index);
+            coro.start(sink_, source_.get_token(), index);
             ++left_;
             return index;
         }
@@ -146,8 +148,16 @@ namespace coroactors {
             return next_result_awaiter_t{ *this };
         }
 
+        /**
+         * Requests all added tasks to stop
+         */
+        void request_stop() noexcept {
+            source_.request_stop();
+        }
+
     private:
         detail::intrusive_ptr<detail::task_group_sink<T>> sink_{ new detail::task_group_sink<T> };
+        stop_source source_;
         size_t count_ = 0;
         size_t left_ = 0;
     };
