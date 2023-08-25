@@ -27,7 +27,7 @@ namespace coroactors::detail {
         continuation_result() = default;
 
         template<class... TArgs>
-        void set_result(TArgs&&... args) {
+        void set_value(TArgs&&... args) {
             result_.template emplace<1>(std::forward<TArgs>(args)...);
             initialized_.store(true, std::memory_order_release);
         }
@@ -38,11 +38,20 @@ namespace coroactors::detail {
         }
 
         bool has_result() const noexcept {
-            return initialized_.load(std::memory_order_acquire) == true;
+            // Note: this is relaxed because it is only an observer of whether
+            // set_value/set_exception was called before the last shared_ptr
+            // reference was dropped. It's important however that it's not
+            // stale when weak_ptr::lock returns nullptr, otherwise we may
+            // decide set_value/set_exception have never been called. Now to
+            // guarantee safe destruction refcount decrements usually have
+            // memory_order_acq_rel, so the store to initialized_ must have
+            // happened before weak_ptr::lock returns nullptr, and thus no
+            // stale value should ever be observed.
+            return initialized_.load(std::memory_order_relaxed) == true;
         }
 
-        std::add_rvalue_reference_t<T> take_result() {
-            // This synchronizes with release in set_result/set_exception
+        std::add_rvalue_reference_t<T> take_value() {
+            // This synchronizes with release in set_value/set_exception
             if (initialized_.load(std::memory_order_acquire)) {
                 switch (result_.index()) {
                 case 1:
@@ -55,8 +64,7 @@ namespace coroactors::detail {
                     std::rethrow_exception(std::get<2>(std::move(result_)));
                 }
             }
-            assert(false && "Unexpected state in take_result");
-            throw std::logic_error("unexpected state in take_result");
+            throw std::logic_error("unexpected state in take_value");
         }
 
     private:
@@ -98,8 +106,8 @@ namespace coroactors::detail {
         }
 
         template<class... TArgs>
-        void set_result(TArgs&&... args) {
-            result->set_result(std::forward<TArgs>(args)...);
+        void set_value(TArgs&&... args) {
+            result->set_value(std::forward<TArgs>(args)...);
         }
 
         void set_exception(std::exception_ptr&& e) noexcept {
@@ -207,7 +215,7 @@ namespace coroactors::detail {
 
         T await_resume() {
             state_.reset();
-            return this->take_result();
+            return this->take_value();
         }
 
     private:

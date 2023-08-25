@@ -102,7 +102,8 @@ namespace coroactors::detail {
                     continuation = {};
                 } else {
                     // Destroy current linked list of results
-                    std::unique_ptr<task_group_result_node<T>> head(reinterpret_cast<task_group_result_node<T>*>(headValue));
+                    std::unique_ptr<task_group_result_node<T>> head(
+                        reinterpret_cast<task_group_result_node<T>*>(headValue));
                 }
             }
             // Eagerly destroy ready queue to free unnecessary memory
@@ -114,6 +115,10 @@ namespace coroactors::detail {
          * run next (e.g. an awaiter continuation installed before)
          */
         std::coroutine_handle<> push(std::unique_ptr<task_group_result_node<T>>&& result) noexcept {
+            // Note: we don't need acquire here to synchronize with another
+            // push. This is because we don't touch anything stored inside that
+            // pointer ourselves, and publishing a new head is part of a releas
+            // sequence.
             void* headValue = last_ready.load(std::memory_order_relaxed);
             for (;;) {
                 if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) {

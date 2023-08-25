@@ -69,8 +69,6 @@ namespace coroactors::detail {
             return marker == reinterpret_cast<node*>(MarkerUnlocked);
         }
 
-
-
         /**
          * Removes the next item from a locked mailbox
          *

@@ -34,7 +34,7 @@ namespace coroactors {
         std::coroutine_handle<> release_with_result(TArgs&&... args)
             noexcept(std::is_void_v<T>)
         {
-            state->set_result(std::forward<TArgs>(args)...);
+            state->set_value(std::forward<TArgs>(args)...);
             if (auto c = state->finish()) {
                 return c;
             } else {
@@ -65,7 +65,7 @@ namespace coroactors {
         bool resume(TArgs&&... args)
             noexcept(std::is_void_v<T>)
         {
-            state->set_result(std::forward<TArgs>(args)...);
+            state->set_value(std::forward<TArgs>(args)...);
             if (auto c = state->finish()) {
                 c.resume();
                 return true;
