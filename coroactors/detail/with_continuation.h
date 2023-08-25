@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/stop_token.h>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -68,8 +69,9 @@ namespace coroactors::detail {
     template<class T>
     class continuation_state {
     public:
-        continuation_state(continuation_result<T>* result) noexcept
+        continuation_state(continuation_result<T>* result, stop_token&& token) noexcept
             : result(result)
+            , token(std::move(token))
         {}
 
         ~continuation_state() noexcept {
@@ -126,6 +128,10 @@ namespace coroactors::detail {
             continuation.store(nullptr, std::memory_order_release);
         }
 
+        const stop_token& get_stop_token() const noexcept {
+            return token;
+        }
+
     private:
         static constexpr uintptr_t MarkerFinished = 1;
         static constexpr uintptr_t MarkerDestroyed = 2;
@@ -133,6 +139,7 @@ namespace coroactors::detail {
     private:
         continuation_result<T>* const result;
         std::atomic<void*> continuation{ nullptr };
+        stop_token token;
     };
 
     template<class T, class Callback>
@@ -159,9 +166,9 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready() noexcept {
+        bool await_ready(stop_token token = {}) noexcept {
             auto state = std::make_shared<continuation_state<T>>(
-                static_cast<continuation_result<T>*>(this));
+                static_cast<continuation_result<T>*>(this), std::move(token));
             state_ = state;
             std::forward<Callback>(callback)(continuation<T>(state));
             // Avoid suspending when continuation has the result already

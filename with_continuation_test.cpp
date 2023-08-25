@@ -543,3 +543,33 @@ TEST(WithContinuationTest, DestroyBottomUp) {
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(refs, 0);
 }
+
+TEST(WithContinuationTest, StopToken) {
+    int stage = 0;
+    int refs = 0;
+    bool finished = false;
+
+    stop_source source;
+    continuation<> suspended;
+
+    detach_awaitable(
+        with_stop_token(
+            actor_wrapper(
+                actor_with_continuation(no_actor_context, &stage,
+                    [&](continuation<> c) {
+                        suspended = c;
+                    }),
+                &refs),
+            source.get_token()),
+        [&]{
+            finished = true;
+        });
+
+    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(refs, 1);
+    ASSERT_TRUE(suspended);
+    EXPECT_TRUE(suspended.get_stop_token().stop_possible());
+    EXPECT_FALSE(suspended.get_stop_token().stop_requested());
+    source.request_stop();
+    EXPECT_TRUE(suspended.get_stop_token().stop_requested());
+}

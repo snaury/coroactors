@@ -1,5 +1,6 @@
 #pragma once
 #include <concepts>
+#include <coroutine>
 
 namespace coroactors::detail {
 

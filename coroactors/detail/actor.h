@@ -194,10 +194,7 @@ namespace coroactors::detail {
         }
 
         void set_stop_token(const stop_token& t) noexcept {
-            if (!token_override) {
-                token = t;
-                token_override = true;
-            }
+            token = t;
         }
 
         template<class U>
@@ -516,24 +513,30 @@ namespace coroactors::detail {
             // to that. This should be safe because it's all part of the same
             // co_await expression and we have the same lifetime as the
             // awaitable.
-            same_context_wrapped_awaiter(Awaitable&& awaitable)
+            same_context_wrapped_awaiter(Awaitable&& awaitable, actor_promise& self)
                 : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
+                , self(self)
             {}
 
             same_context_wrapped_awaiter(const same_context_wrapped_awaiter&) = delete;
             same_context_wrapped_awaiter& operator=(const same_context_wrapped_awaiter&) = delete;
 
             bool await_ready()
-                noexcept(has_noexcept_await_ready<Awaiter>)
+                noexcept(has_await_ready_stop_token<Awaiter>
+                    ? has_noexcept_await_ready_stop_token<Awaiter>
+                    : has_noexcept_await_ready<Awaiter>)
             {
-                return awaiter.await_ready();
+                if constexpr (has_await_ready_stop_token<Awaiter>) {
+                    return awaiter.await_ready(self.get_stop_token());
+                } else {
+                    return awaiter.await_ready();
+                }
             }
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 noexcept(has_noexcept_await_suspend<Awaiter>)
             {
-                auto& self = c.promise();
                 std::coroutine_handle<> k = wrap_restore_context(self.context, c);
                 // Note: we still have context locked, but after the call to
                 // Awaiter's await_suspend our frame may be destroyed and we
@@ -573,6 +576,7 @@ namespace coroactors::detail {
 
         private:
             Awaiter awaiter;
+            actor_promise& self;
         };
 
         // Note: it's awaitable and not awaitable<actor_promise<T>>
@@ -583,7 +587,7 @@ namespace coroactors::detail {
         {
             check_context_initialized();
 
-            return same_context_wrapped_awaiter<Awaitable>(std::forward<Awaitable>(awaitable));
+            return same_context_wrapped_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
         template<awaitable Awaitable>
@@ -599,26 +603,32 @@ namespace coroactors::detail {
             // to that. This should be safe because it's all part of the same
             // co_await expression and we have the same lifetime as the
             // awaitable.
-            change_context_wrapped_awaiter(Awaitable&& awaitable, const actor_context& new_context, bool same_context)
+            change_context_wrapped_awaiter(Awaitable&& awaitable, const actor_context& new_context, actor_promise& self)
                 : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
                 , new_context(new_context)
-                , same_context(same_context)
+                , self(self)
             {}
 
             change_context_wrapped_awaiter(const change_context_wrapped_awaiter&) = delete;
             change_context_wrapped_awaiter& operator=(const change_context_wrapped_awaiter&) = delete;
 
             bool await_ready()
-                noexcept(has_noexcept_await_ready<Awaiter>)
+                noexcept(has_await_ready_stop_token<Awaiter>
+                    ? has_noexcept_await_ready_stop_token<Awaiter>
+                    : has_noexcept_await_ready<Awaiter>)
             {
-                return (ready = awaiter.await_ready()) && same_context;
+                if constexpr (has_await_ready_stop_token<Awaiter>) {
+                    ready = awaiter.await_ready(self.get_stop_token());
+                } else {
+                    ready = awaiter.await_ready();
+                }
+                return ready && new_context == self.context;
             }
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 noexcept(has_noexcept_await_suspend<Awaiter>)
             {
-                auto& self = c.promise();
                 std::coroutine_handle<> k = wrap_restore_context(new_context, c);
                 if (ready) {
                     // Awaiter's await_ready returned true, we just need to change context
@@ -668,7 +678,7 @@ namespace coroactors::detail {
         private:
             Awaiter awaiter;
             const actor_context& new_context;
-            const bool same_context;
+            actor_promise& self;
             bool ready = false;
         };
 
@@ -676,42 +686,63 @@ namespace coroactors::detail {
         auto await_transform(actor_context::bind_awaitable_t<Awaitable> bound) {
             check_context_initialized();
 
-            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
-                coroactors_propagate_stop_token(bound.awaitable, token);
-            }
-
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 bound.context,
-                bound.context == context);
+                *this);
         }
 
         template<awaitable Awaitable>
         auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
             check_context_initialized();
 
-            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
-                coroactors_propagate_stop_token(bound.awaitable, token);
-            }
-
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 continuation_context,
-                continuation_context == context);
+                *this);
         }
 
-        // Awaitables marked with is_actor_passthru_awaitable claim to support
-        // context switches directly, and those are not transformed.
-        template<actor_passthru_awaitable<T> Awaitable>
-        Awaitable&& await_transform(Awaitable&& awaitable) {
-            check_context_initialized();
+        template<class Awaitable>
+        class actor_passthru_awaiter {
+            using Awaiter = decltype(get_awaiter(std::declval<Awaitable>()));
 
-            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
-                coroactors_propagate_stop_token(awaitable, token);
+        public:
+            actor_passthru_awaiter(Awaitable&& awaitable, actor_promise& self)
+                : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
+                , self(self)
+            {}
+
+            bool await_ready()
+                requires (has_await_ready_stop_token<Awaiter>)
+            {
+                return awaiter.await_ready(self.get_stop_token());
             }
 
-            // This awaitable is marked to support context switches directly
-            return (Awaitable&&) awaitable;
+            template<class Promise>
+            decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
+                noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
+            {
+                return awaiter.await_suspend(c);
+            }
+
+            decltype(auto) await_resume()
+                noexcept(has_noexcept_await_resume<Awaiter>)
+            {
+                return awaiter.await_resume();
+            }
+
+        private:
+            Awaiter awaiter;
+            actor_promise& self;
+        };
+
+        // Awaitables marked with is_actor_passthru_awaitable claim to support
+        // context switches directly and support stop token propagation.
+        template<actor_passthru_awaitable<T> Awaitable>
+        auto await_transform(Awaitable&& awaitable) {
+            check_context_initialized();
+
+            return actor_passthru_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
         const actor_context& get_context() const {
@@ -727,7 +758,6 @@ namespace coroactors::detail {
         actor_context context;
         std::coroutine_handle<> continuation;
         actor_context continuation_context;
-        bool token_override = false;
         bool context_initialized = false;
         bool context_inherited = false;
         bool finished = false;
@@ -762,6 +792,11 @@ namespace coroactors::detail {
             }
         }
 
+        bool await_ready(const stop_token& token) noexcept {
+            handle.promise().set_stop_token(token);
+            return await_ready();
+        }
+
         bool await_ready() noexcept {
             return handle.promise().ready();
         }
@@ -778,10 +813,6 @@ namespace coroactors::detail {
         std::add_rvalue_reference_t<T> await_resume() {
             suspended = false;
             return handle.promise().take_result().take();
-        }
-
-        friend void coroactors_propagate_stop_token(actor_awaiter& a, const stop_token& token) {
-            a.handle.promise().set_stop_token(token);
         }
 
     private:
@@ -818,6 +849,11 @@ namespace coroactors::detail {
             }
         }
 
+        bool await_ready(const stop_token& token) noexcept {
+            handle.promise().set_stop_token(token);
+            return await_ready();
+        }
+
         bool await_ready() noexcept {
             return handle.promise().ready();
         }
@@ -834,10 +870,6 @@ namespace coroactors::detail {
         result<T>&& await_resume() {
             suspended = false;
             return handle.promise().take_result();
-        }
-
-        friend void coroactors_propagate_stop_token(actor_result_awaiter& a, const stop_token& token) {
-            a.handle.promise().set_stop_token(token);
         }
 
     private:

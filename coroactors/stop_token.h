@@ -1,28 +1,5 @@
 #pragma once
-
-#ifndef coroactors_use_std_stop_token
-#if __has_include(<stop_token>)
-#define coroactors_use_std_stop_token 1
-#else
-#define coroactors_use_std_stop_token 0
-#endif
-#endif
-
-#if coroactors_use_std_stop_token
-#include <stop_token>
-
-namespace coroactors {
-
-    using std::nostopstate_t;
-    using std::nostopstate;
-
-    using std::stop_token;
-    using std::stop_source;
-    using std::stop_callback;
-
-} // namespace coroactors
-#else
-#include <coroactors/detail/stop_token_polyfill.h>
+#include <coroactors/detail/stop_token.h>
 
 namespace coroactors {
 
@@ -33,31 +10,12 @@ namespace coroactors {
     using detail::stop_source;
     using detail::stop_callback;
 
-} // namespace coroactors
-#endif
-
-namespace coroactors {
-
     /**
-     * Check whether cancellation propagation customization is available
+     * Wraps awaitable with the specified stop token override
      */
-    template<class Awaitable>
-    concept has_coroactors_propagate_stop_token = requires(Awaitable& awaitable, const stop_token& token) {
-        /**
-         * An ADL customization point for propagating cancellation
-         */
-        coroactors_propagate_stop_token(awaitable, token);
-    };
-
-    /**
-     * Returns an awaitable that has the specified stop token propagated
-     */
-    template<class Awaitable>
-    Awaitable&& with_stop_token(const stop_token& token, Awaitable&& awaitable)
-        requires (has_coroactors_propagate_stop_token<Awaitable>)
-    {
-        coroactors_propagate_stop_token(awaitable, token);
-        return std::forward<Awaitable>(awaitable);
+    template<detail::awaitable_with_stop_token_propagation Awaitable>
+    auto with_stop_token(Awaitable&& awaitable, const stop_token& token) {
+        return detail::with_stop_token_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), token);
     }
 
 } // namespace coroactors
