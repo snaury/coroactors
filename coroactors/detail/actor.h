@@ -2,6 +2,7 @@
 #include <coroactors/actor_context.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/result.h>
+#include <coroactors/stop_token.h>
 #include <coroactors/with_resume_callback.h>
 #include <cassert>
 #include <type_traits>
@@ -187,6 +188,17 @@ namespace coroactors::detail {
         };
 
         static auto final_suspend() noexcept { return final_suspend_t{}; }
+
+        const stop_token& get_stop_token() const noexcept {
+            return token;
+        }
+
+        void set_stop_token(const stop_token& t) noexcept {
+            if (!token_override) {
+                token = t;
+                token_override = true;
+            }
+        }
 
         template<class U>
         void set_continuation(actor_continuation<U> c) noexcept {
@@ -406,6 +418,18 @@ namespace coroactors::detail {
             check_context_initialized();
 
             return preempt_context_awaiter_t{};
+        }
+
+        struct current_stop_token_awaiter_t {
+            const stop_token& token;
+
+            bool await_ready() noexcept { return true; }
+            bool await_suspend(actor_continuation<T>) noexcept { return false; }
+            const stop_token& await_resume() noexcept { return token; }
+        };
+
+        auto await_transform(actor_context::current_stop_token_t) {
+            return current_stop_token_awaiter_t{ token };
         }
 
         struct restore_context_callback {
@@ -652,6 +676,10 @@ namespace coroactors::detail {
         auto await_transform(actor_context::bind_awaitable_t<Awaitable> bound) {
             check_context_initialized();
 
+            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
+                coroactors_propagate_stop_token(bound.awaitable, token);
+            }
+
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 bound.context,
@@ -661,6 +689,10 @@ namespace coroactors::detail {
         template<awaitable Awaitable>
         auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
             check_context_initialized();
+
+            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
+                coroactors_propagate_stop_token(bound.awaitable, token);
+            }
 
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
@@ -673,6 +705,10 @@ namespace coroactors::detail {
         template<actor_passthru_awaitable<T> Awaitable>
         Awaitable&& await_transform(Awaitable&& awaitable) {
             check_context_initialized();
+
+            if constexpr (has_coroactors_propagate_stop_token<Awaitable>) {
+                coroactors_propagate_stop_token(awaitable, token);
+            }
 
             // This awaitable is marked to support context switches directly
             return (Awaitable&&) awaitable;
@@ -687,9 +723,11 @@ namespace coroactors::detail {
         }
 
     private:
+        stop_token token;
         actor_context context;
         std::coroutine_handle<> continuation;
         actor_context continuation_context;
+        bool token_override = false;
         bool context_initialized = false;
         bool context_inherited = false;
         bool finished = false;
@@ -742,6 +780,10 @@ namespace coroactors::detail {
             return handle.promise().take_result().take();
         }
 
+        friend void coroactors_propagate_stop_token(actor_awaiter& a, const stop_token& token) {
+            a.handle.promise().set_stop_token(token);
+        }
+
     private:
         actor_continuation<T> handle;
         bool suspended = false;
@@ -792,6 +834,10 @@ namespace coroactors::detail {
         result<T>&& await_resume() {
             suspended = false;
             return handle.promise().take_result();
+        }
+
+        friend void coroactors_propagate_stop_token(actor_result_awaiter& a, const stop_token& token) {
+            a.handle.promise().set_stop_token(token);
         }
 
     private:

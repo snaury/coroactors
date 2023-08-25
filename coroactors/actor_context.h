@@ -193,6 +193,16 @@ namespace coroactors {
          */
         static constexpr preempt_t preempt{};
 
+        /**
+         * A placeholder type for `actor_context::current_stop_token`
+         */
+        struct current_stop_token_t {};
+
+        /**
+         * Returns a stop token associated with the current actor
+         */
+        static constexpr current_stop_token_t current_stop_token{};
+
     private:
         std::shared_ptr<impl> impl_;
     };

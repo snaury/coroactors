@@ -68,6 +68,10 @@ namespace coroactors {
             return p.detach();
         }
 
+        friend void coroactors_propagate_stop_token(actor<T>& a, const stop_token& token) {
+            a.handle.promise().set_stop_token(token);
+        }
+
     private:
         detail::actor_continuation<T> handle;
     };
