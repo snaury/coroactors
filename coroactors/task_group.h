@@ -98,7 +98,7 @@ namespace coroactors {
 
             T await_resume() {
                 auto result = group.sink_->await_resume();
-                return std::move(*result).take();
+                return std::move(*result).take_value();
             }
 
         private:

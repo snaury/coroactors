@@ -21,7 +21,6 @@ namespace coroactors {
         {}
 
     public:
-        using is_actor_passthru_awaitable = void;
         using promise_type = detail::actor_promise<T>;
         using result_type = detail::result<T>;
         using value_type = T;
@@ -55,11 +54,11 @@ namespace coroactors {
         }
 
         auto operator co_await() && noexcept {
-            return detail::actor_awaiter(std::exchange(handle, {}));
+            return detail::actor_awaiter<T>(std::exchange(handle, {}));
         }
 
         auto result() && noexcept {
-            return detail::actor_result_awaiter(std::exchange(handle, {}));
+            return detail::actor_result_awaiter<T>(std::exchange(handle, {}));
         }
 
         void detach() && noexcept {
@@ -71,5 +70,9 @@ namespace coroactors {
     private:
         detail::actor_continuation<T> handle;
     };
+
+    static_assert(std::is_same_v<
+        detail::awaitable_unwrap_awaiter_type<actor<int>, detail::actor_promise<int>>,
+        detail::actor_awaiter<int>>);
 
 } // namespace coroactors

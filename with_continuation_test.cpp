@@ -48,7 +48,7 @@ struct with_suspend_hook {
 
 template<detail::awaitable Awaitable>
 class autostart_inspect {
-    using Awaiter = decltype(detail::get_awaiter(std::declval<Awaitable&&>()));
+    using Awaiter = detail::awaiter_transform_type_t<Awaitable>;
 
 public:
     autostart_inspect(Awaitable&& awaitable)

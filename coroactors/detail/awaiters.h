@@ -81,12 +81,16 @@ namespace coroactors::detail {
     };
 
     template<class Awaitable, class Promise = void>
-    concept awaitable =
+    concept has_co_await =
         has_member_co_await<Awaitable, Promise> ||
-        has_global_co_await<Awaitable, Promise> ||
+        has_global_co_await<Awaitable, Promise>;
+
+    template<class Awaitable, class Promise = void>
+    concept awaitable =
+        has_co_await<Awaitable, Promise> ||
         awaiter<Awaitable, Promise>;
 
-    template<awaitable Awaitable>
+    template<class Awaitable>
     inline decltype(auto) get_awaiter(Awaitable&& awaitable) {
         if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
             return std::forward<Awaitable>(awaitable).operator co_await();
@@ -104,7 +108,8 @@ namespace coroactors::detail {
      * awaitable and a transformed awaiter have the same lifetime. Similar to
      * having an `Awaiter&&` deduced argument in a wrapper function.
      */
-    template<awaitable Awaitable>
+    template<class Awaitable, class Promise = void>
+        requires awaitable<Awaitable, Promise>
     using awaiter_transform_type_t = decltype(get_awaiter(std::declval<Awaitable&&>()));
 
     /**
@@ -115,19 +120,52 @@ namespace coroactors::detail {
      * awaitable may be destroyed before the result finished awaiting. Similar
      * to having an `Awaiter` deduced argument in a wrapper function.
      */
-    template<awaitable Awaitable>
-    using awaiter_safe_type_t = remove_rvalue_reference_t<awaiter_transform_type_t<Awaitable>>;
+    template<class Awaitable, class Promise = void>
+        requires awaitable<Awaitable, Promise>
+    using awaiter_safe_type_t = remove_rvalue_reference_t<awaiter_transform_type_t<Awaitable, Promise>>;
 
     /**
      * The result type returned from an awaiter (not awaitable)
      */
-    template<awaiter Awaiter>
+    template<class Awaiter, class Promise = void>
+        requires awaiter<Awaiter, Promise>
     using awaiter_result_t = decltype(std::declval<Awaiter&>().await_resume());
 
     /**
      * The result type returned from an awaiter (i.e. what co_await returns)
      */
-    template<awaitable Awaitable>
+    template<class Awaitable, class Promise = void>
+        requires awaitable<Awaitable, Promise>
     using await_result_t = awaiter_result_t<awaiter_transform_type_t<Awaitable>>;
+
+    /**
+     * Concept for awaiters that have a wrapped_awaiter_type typedef defined
+     */
+    template<class Awaiter>
+    concept has_wrapped_awaiter_type = requires {
+        typename Awaiter::wrapped_awaiter_type;
+    };
+
+    template<class Awaiter>
+    struct awaiter_wrapped_awaiter_type_impl {
+        using type = Awaiter;
+    };
+
+    template<has_wrapped_awaiter_type Awaiter>
+    struct awaiter_wrapped_awaiter_type_impl<Awaiter> {
+        using type = typename Awaiter::wrapped_awaiter_type;
+    };
+
+    template<class Awaiter>
+    using awaiter_unwrap_awaiter_type =
+        typename awaiter_wrapped_awaiter_type_impl<Awaiter>::type;
+
+    template<class Awaitable, class Promise = void>
+        requires awaitable<Awaitable, Promise>
+    using awaitable_unwrap_awaiter_type = awaiter_unwrap_awaiter_type<
+        std::conditional_t<
+            has_co_await<Awaitable, Promise>,
+            awaiter_safe_type_t<Awaitable, Promise>,
+            Awaitable>>;
 
 } // namespace coroactors::detail

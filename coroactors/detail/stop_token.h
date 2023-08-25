@@ -58,6 +58,8 @@ namespace coroactors::detail {
         using Awaiter = awaiter_safe_type_t<Awaitable>;
 
     public:
+        using wrapped_awaiter_type = awaiter_unwrap_awaiter_type<Awaiter>;
+
         with_stop_token_awaiter(Awaitable&& awaitable, const stop_token& token)
             : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
             , token(token)

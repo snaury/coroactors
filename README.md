@@ -67,7 +67,7 @@ public:
     }
 
 private:
-    actor_context context();
+    actor_context context;
     std::unordered_map<std::string, std::string> cache;
 }
 ```
@@ -89,3 +89,72 @@ Coroutine handle destruction in C++ is tricky. It seems to be common to have cor
 Actors support top-down destruction instead. When some service is holding on to a continuation (coroutine handle), but cannot resume it for some reason (e.g. there is no way to generate an error), it can be destroyed instead. When that happens the stack of the innermost coroutine is unwound, and its promise type (e.g. `actor_promise<T>`) is destroyed. Promise detects when destructor is called with an active continuation (before coroutine finished), and also destroy it, which recursively unwinds the stack level above. Actor awaiter detects its destruction before resuming, and instead of destroying the awaited handle will try to unset its continuation instead (effectively detaching from the nested coroutine), which kinda supports both top-down and bottom-up frame cleanup. Eventually this will reach the bottom frame, destroying the full chain of awaiting frames.
 
 Unfortunate downside of this support is compilers having a hard time figuring out if nested coroutine frame is guaranteed to be destroyed before the parent, and turn off coroutine allocation elision as a result. This doesn't seem to really be a problem for actors though, since their context-related logic is already complex.
+
+## Cancellation support
+
+For cancellation actors use c++20 standard `std::stop_token`. Unfortunately in 2023 major stable operating systems (Ubuntu 22.04 and MacOS 13.5) don't ship with compilers implementing `<stop_token>`, so there's a polyfill implementation. In any case classes like `coroactors::stop_token` either point to either `std::stop_token` or a polyfill implementation when standard classes are unavailable.
+
+It's not clear what is the best way to pass stop tokens implicitly between coroutines. Libraries like folly opt into an ADL customization function, but it's very heavyweight, hard to use in custom wrapper awaiters, and the direction where awaiting entities call extra functions on awaiters feels wrong. Then std::executors propose a get_stop_token customization point via tag_invoke, which seems great when senders have the type of the receiver. But unfortunately it's not true for coroutines: you could maybe inspect a promise in `await_suspend`, but it bypasses (non-coroutine) wrappers, could be type erased (intentionally hidden in actors where it's wrapped for context switching) and by the time awaiting coroutine is suspending it may already be too late (a lot of logic may be happening in `await_ready`).
+
+For the time being I opted for a non-standard extension to awaiters where `await_ready` method optionally accepts a `const coroactors::stop_token&` argument, which is used for transparent stop token passing in all coroactors awaiters and coroutines. Ideally this should maybe be an abstract object (similar to a receiver in stdexec) which signifies an awaiting entity and may be transparently queried for various properties, including a stop token. Having the token available in `await_ready` is also more efficient, as you don't have to save it using some separate function/method and don't have to deal with the possibility of multiple conflicting calls.
+
+Finally to start some activity with a stop token you'd use `coroactors::with_stop_token` to wrap an awaitable (which must support stop token propagation) into a special awaiter that propagates the specified stop token. The caller's stop token will be ignored when this wrapped awaiter is `co_await`ed, so it can also be used to protect against unwanted cancellation.
+
+## Structured concurrency
+
+Having transparent cancellation enables structured concurrency, where actor may start multiple concurrent activities using a `coroactors::task_group<T>`, wait for all or some results, and have those activities cancelled when they no longer have any chance of being awaited. Instead of using task group directly however, it is recommented to use `coroactors::with_task_group` (again heavily inspired by Swift), which awaits on a lambda result, then cancels the task group, but also awaits all leftover tasks in the group, ignoring their results. This guarantees all unwanted tasks are actually cancelled and there are no runaway resource leaks.
+
+Example:
+
+```c++
+struct Request;
+struct Response;
+actor<Response> make_shard_request(int shard, const Request& request);
+
+class FastService {
+public:
+    // ...
+
+    struct FastResponse {
+        int shard;
+        Response response;
+    };
+
+    actor<FastResponse> make_request(const Request& request) {
+        co_await context();
+
+        // The template parameter specifies type of a single task result
+        // The co_await will return whatever result the lambda returns
+        co_return co_await with_task_group<Response>(
+            [&](task_group<Response>& group) -> actor<FastResponse> {
+                // We are guaranteed to run in the same context as the caller
+                // All actor functions must co_await context, so we do just that
+                co_await actor_context::caller_context();
+
+                // Spawn one task for each shard. Note: because of structured
+                // concurrency we are guaranteed not to return until all tasks
+                // are complete, so passing a const reference to the same
+                // object is safe.
+                for (int shard : shards) {
+                    group.add(make_shard_request(shard, request));
+                }
+
+                // Wait for the first packaged result, error handling omitted
+                auto result = co_await group.next_result();
+                assert(!result.has_exception());
+
+                // Every task gets a sequential index starting from zero
+                // We can use it to find which shard replied first
+                // When we return all other tasks are cancelled
+                co_return FastResponse{
+                    shards.at(result.index),
+                    result.take_value(),
+                };
+            });
+    }
+
+private:
+    const actor_context context;
+    const std::vector<int> shards;
+}
+```

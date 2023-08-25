@@ -50,7 +50,7 @@ namespace coroactors::detail {
             return result_.index() == 2;
         }
 
-        std::add_lvalue_reference_t<T> get() {
+        std::add_lvalue_reference_t<T> get_value() const {
             switch (result_.index()) {
                 case 1: {
                     if constexpr (std::is_void_v<T>) {
@@ -66,7 +66,7 @@ namespace coroactors::detail {
             throw result_error("result has neither value nor exception");
         }
 
-        std::add_rvalue_reference_t<T> take() && {
+        std::add_rvalue_reference_t<T> take_value() {
             switch (result_.index()) {
                 case 1: {
                     if constexpr (std::is_void_v<T>) {
@@ -83,10 +83,18 @@ namespace coroactors::detail {
         }
 
         std::exception_ptr get_exception() const {
+            if (result_.index() != 2) {
+                [[unlikely]];
+                throw result_error("result does not have an exception");
+            }
             return std::get<2>(result_);
         }
 
-        std::exception_ptr take_exception() && {
+        std::exception_ptr take_exception() {
+            if (result_.index() != 2) {
+                [[unlikely]];
+                throw result_error("result does not have an exception");
+            }
             return std::get<2>(std::move(result_));
         }
 

@@ -21,12 +21,20 @@ namespace coroactors::detail {
     class actor_promise;
 
     template<class T>
+    class actor_awaiter;
+
+    template<class T>
+    class actor_result_awaiter;
+
+    template<class T>
     using actor_continuation = std::coroutine_handle<actor_promise<T>>;
 
     template<class Awaitable, class T>
-    concept actor_passthru_awaitable = requires {
-        typename Awaitable::is_actor_passthru_awaitable;
-    } && awaitable<Awaitable, actor_promise<T>>;
+    concept actor_passthru_awaitable =
+        awaitable<Awaitable, actor_promise<T>> &&
+        requires {
+            typename awaitable_unwrap_awaiter_type<Awaitable, actor_promise<T>>::is_actor_passthru_awaiter;
+        };
 
     std::coroutine_handle<> switch_context(
         actor_context&& from,
@@ -346,13 +354,13 @@ namespace coroactors::detail {
         auto await_transform(actor_context::caller_context_t) {
             check_context_initialized();
 
-            return return_context_awaiter_t{ context };
+            return return_context_awaiter_t{ continuation_context };
         }
 
         auto await_transform(actor_context::current_context_t) {
             check_context_initialized();
 
-            return return_context_awaiter_t{ continuation_context };
+            return return_context_awaiter_t{ context };
         }
 
         struct yield_context_awaiter_t {
@@ -587,6 +595,11 @@ namespace coroactors::detail {
         auto await_transform(Awaitable&& awaitable)
             requires (!actor_passthru_awaitable<Awaitable, T>)
         {
+            // Protect against metaprogramming mistakes
+            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor<T>>);
+            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor_awaiter<T>>);
+            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor_result_awaiter<T>>);
+
             check_context_initialized();
 
             return same_context_wrapped_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
@@ -716,9 +729,15 @@ namespace coroactors::detail {
             {}
 
             bool await_ready()
-                requires (has_await_ready_stop_token<Awaiter>)
+                noexcept(has_await_ready_stop_token<Awaiter>
+                    ? has_noexcept_await_ready_stop_token<Awaiter>
+                    : has_noexcept_await_ready<Awaiter>)
             {
-                return awaiter.await_ready(self.get_stop_token());
+                if constexpr (has_await_ready_stop_token<Awaiter>) {
+                    return awaiter.await_ready(self.get_stop_token());
+                } else {
+                    return awaiter.await_ready();
+                }
             }
 
             template<class Promise>
@@ -741,8 +760,8 @@ namespace coroactors::detail {
             actor_promise& self;
         };
 
-        // Awaitables marked with is_actor_passthru_awaitable claim to support
-        // context switches directly and support stop token propagation.
+        // Awaitables that have awaiters marked with is_actor_passthru_awaiter
+        // claim to support context switches directly, this includes wrappers.
         template<actor_passthru_awaitable<T> Awaitable>
         auto await_transform(Awaitable&& awaitable) {
             check_context_initialized();
@@ -771,7 +790,7 @@ namespace coroactors::detail {
     template<class T>
     class [[nodiscard]] actor_awaiter {
     public:
-        using is_actor_passthru_awaitable = void;
+        using is_actor_passthru_awaiter = void;
 
         explicit actor_awaiter(actor_continuation<T> h) noexcept
             : handle(h)
@@ -817,7 +836,7 @@ namespace coroactors::detail {
 
         std::add_rvalue_reference_t<T> await_resume() {
             suspended = false;
-            return handle.promise().take_result().take();
+            return handle.promise().take_result().take_value();
         }
 
     private:
@@ -828,7 +847,7 @@ namespace coroactors::detail {
     template<class T>
     class [[nodiscard]] actor_result_awaiter {
     public:
-        using is_actor_passthru_awaitable = void;
+        using is_actor_passthru_awaiter = void;
 
         explicit actor_result_awaiter(actor_continuation<T> h) noexcept
             : handle(h)

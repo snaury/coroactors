@@ -171,7 +171,7 @@ actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::functio
             case EAction::AwaitTaskWrapped: {
                 auto result = co_await group.next_result();
                 if (result.has_value()) {
-                    results.push_back(std::move(result).take());
+                    results.push_back(std::move(result).take_value());
                 } else if (result.has_exception()) {
                     results.push_back(-1);
                 } else {
@@ -447,7 +447,7 @@ TEST(TaskGroupTest, ResumeException) {
             if (value.has_exception()) {
                 had_exception = true;
             } else {
-                result = std::move(value).take();
+                result = std::move(value).take_value();
             }
         });
 
@@ -754,4 +754,113 @@ TEST(WithTaskGroupTest, ResultType) {
     EXPECT_EQ(stage, 4);
     EXPECT_TRUE(finished);
     EXPECT_TRUE(success);
+}
+
+struct test_scheduler : public actor_scheduler {
+    std::deque<std::coroutine_handle<>> queue;
+
+    void schedule(std::coroutine_handle<> h) override {
+        queue.push_back(h);
+    }
+
+    bool preempt() const override {
+        return false;
+    }
+
+    void run_next() {
+        auto h = std::move(queue.front());
+        queue.pop_front();
+        h.resume();
+    }
+};
+
+actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, value_provider<int>& provider) {
+    actor_context context(scheduler);
+
+    stage = 1;
+    co_await context();
+
+    // Double check we are running in our context
+    EXPECT_EQ(context, co_await actor_context::current_context);
+
+    stage = 2;
+    int result = co_await with_stop_token(
+        with_task_group<int>([&](task_group<int>& group) -> actor<int> {
+            stage = 3;
+            co_await actor_context::caller_context();
+
+            // We expect with_stop_token to not interfere with our context
+            EXPECT_EQ(context, co_await actor_context::current_context);
+
+            group.add(provider.get());
+            group.add(provider.get());
+
+            stage = 4;
+            int a = co_await group.next();
+
+            stage = 5;
+            int b = co_await group.next();
+
+            EXPECT_FALSE((co_await actor_context::current_stop_token).stop_requested());
+
+            stage = 6;
+            co_return a + b;
+        }),
+        stop_token());
+
+    stage = 7;
+    EXPECT_EQ(result, 100);
+    EXPECT_TRUE((co_await actor_context::current_stop_token).stop_requested());
+}
+
+TEST(WithTaskGroupTest, WithStopTokenContext) {
+    int stage = 0;
+    test_scheduler scheduler;
+    value_provider<int> provider;
+    stop_source source;
+
+    bool finished = false;
+    bool success = false;
+
+    detach_awaitable(
+        with_stop_token(
+            do_with_stop_token_context(stage, scheduler, provider).result(),
+            source.get_token()),
+        [&](auto&& result) {
+            finished = true;
+            success = result.has_value();
+        });
+
+    EXPECT_EQ(stage, 1); // waiting for context activation
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+
+    scheduler.run_next();
+
+    EXPECT_EQ(stage, 4); // waiting for the first value
+    ASSERT_EQ(provider.queue.size(), 2u);
+    auto a = provider.take();
+    auto b = provider.take();
+    EXPECT_FALSE(a.get_stop_token().stop_requested());
+    EXPECT_FALSE(b.get_stop_token().stop_requested());
+
+    // Cancel our source, we expect task group to be isolated
+    source.request_stop();
+    EXPECT_FALSE(a.get_stop_token().stop_requested());
+    EXPECT_FALSE(b.get_stop_token().stop_requested());
+
+    a.resume(42);
+    EXPECT_EQ(stage, 4); // waiting for the first value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 5); // waiting for the second value
+
+    b.resume(58);
+    EXPECT_EQ(stage, 5); // waiting for the second value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 7); // finished
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(success);
+
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 }

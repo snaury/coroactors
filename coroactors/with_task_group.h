@@ -55,7 +55,7 @@ namespace coroactors {
             (void) co_await group.next_result();
         }
 
-        co_return std::move(r).take();
+        co_return std::move(r).take_value();
     }
 
 } // namespace coroactors
