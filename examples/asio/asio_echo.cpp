@@ -13,7 +13,11 @@ namespace asio = boost::asio;
 using asio::ip::tcp;
 using asio::any_io_executor;
 
-actor<void> serve_client(actor_scheduler& scheduler, tcp::socket socket) {
+using default_token = asio_awaitable_t<>;
+using tcp_socket = default_token::as_default_on_t<tcp::socket>;
+using tcp_acceptor = default_token::as_default_on_t<tcp::acceptor>;
+
+actor<void> serve_client(actor_scheduler& scheduler, tcp_socket socket) {
     actor_context context(scheduler);
     co_await context();
 
@@ -22,8 +26,8 @@ actor<void> serve_client(actor_scheduler& scheduler, tcp::socket socket) {
         for (;;) {
             size_t n = co_await context.with_timeout(
                 std::chrono::seconds(5),
-                socket.async_read_some(asio::buffer(data), asio_awaitable));
-            co_await asio::async_write(socket, asio::buffer(data, n), asio_awaitable);
+                socket.async_read_some(asio::buffer(data)));
+            co_await asio::async_write(socket, asio::buffer(data, n));
         }
     } catch (std::exception& e) {
         std::cout << "ERROR: " << e.what() << std::endl;
@@ -34,10 +38,11 @@ actor<void> listener(actor_scheduler& scheduler, any_io_executor executor) {
     actor_context context(scheduler);
     co_await context();
 
-    tcp::acceptor acceptor(executor, {tcp::v4(), 54321});
+    tcp_acceptor acceptor(executor, {tcp::v4(), 54321});
     for (;;) {
         std::cout << "Waiting for a client..." << std::endl;
-        tcp::socket socket = co_await acceptor.async_accept(asio_awaitable);
+        auto socket = co_await acceptor.async_accept();
+        std::cout << "Client connection from " << socket.remote_endpoint() << std::endl;
         detach_awaitable(serve_client(scheduler, std::move(socket)));
     }
 }

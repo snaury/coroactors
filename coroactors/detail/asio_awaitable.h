@@ -5,54 +5,60 @@
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/any_io_executor.hpp>
 
-namespace coroactors::detail {
-
-    struct asio_awaitable_t;
-    struct asio_awaitable_raw_args_t;
+namespace coroactors {
 
     /**
      * CompletionToken type that transforms asio operations into awaitables
      *
      * Also stores options that may modify the way operations perform.
      */
+    template<class Executor = boost::asio::any_io_executor,
+        boost::asio::cancellation_type CancelType = boost::asio::cancellation_type::all>
     struct asio_awaitable_t {
-        // Cancels all levels by default
-        boost::asio::cancellation_type cancel_type =
-            boost::asio::cancellation_type::all;
+        using executor_type = Executor;
+
+        template<class OtherExecutor>
+        struct rebind_executor {
+            using other = asio_awaitable_t<OtherExecutor, CancelType>;
+        };
 
         /**
-         * Changes cancellation type to use on cancellation
+         * Wrapped executor with asio_awaitable_t as the default completion token
          */
-        asio_awaitable_t operator()(boost::asio::cancellation_type ct) const noexcept {
-            auto a = *this;
-            a.cancel_type = ct;
-            return a;
-        }
+        template<class WrappedExecutor>
+        struct executor_with_default : public WrappedExecutor {
+            using default_completion_token_type = asio_awaitable_t;
+
+            template<class ExecutorArg>
+            executor_with_default(ExecutorArg&& executor)
+                requires (
+                    // Don't break synthesized constructors
+                    !std::is_same_v<std::decay_t<ExecutorArg>, executor_with_default> &&
+                    std::is_convertible_v<ExecutorArg&&, WrappedExecutor>
+                )
+                : WrappedExecutor(std::forward<ExecutorArg>(executor))
+            {}
+        };
 
         /**
-         * Changes behavior to return raw handler args without exceptions
+         * Changes object type to use asio_awaitable_t as the default completion token
          */
-        asio_awaitable_raw_args_t raw_args() const noexcept;
+        template<class T>
+        using as_default_on_t = typename T::template rebind_executor<
+            executor_with_default<typename T::executor_type>>::other;
+
+        /**
+         * Specifies cancellation type used for stop token propagation
+         */
+        static constexpr boost::asio::cancellation_type cancel_type = CancelType;
+
+        template<boost::asio::cancellation_type OtherCancelType>
+        using with_cancel_type_t = asio_awaitable_t<Executor, OtherCancelType>;
     };
 
-    /**
-     * CompletionToken that transforms asio operations into awaitables
-     *
-     * However it also throws an exception instead of a providing
-     * boost::system::error_code in the result type.
-     */
-    struct asio_awaitable_raw_args_t : public asio_awaitable_t {
-        explicit asio_awaitable_raw_args_t(const asio_awaitable_t& a)
-            : asio_awaitable_t(a)
-        {}
+} // namespace coroactors
 
-        template<class... Args>
-        void operator()(Args&&... args) const = delete;
-    };
-
-    inline asio_awaitable_raw_args_t asio_awaitable_t::raw_args() const noexcept {
-        return asio_awaitable_raw_args_t(*this);
-    }
+namespace coroactors::detail {
 
     template<class T>
     class asio_continuation : public result<T> {
@@ -230,29 +236,29 @@ namespace coroactors::detail {
         boost::asio::cancellation_signal cs;
     };
 
-    template<class Options, class... Ts>
+    template<class... Ts>
     struct asio_awaitable_handler_result {
         using type = std::tuple<Ts...>;
     };
 
     template<>
-    struct asio_awaitable_handler_result<asio_awaitable_t> {
+    struct asio_awaitable_handler_result<> {
         using type = void;
     };
 
     template<class T>
-    struct asio_awaitable_handler_result<asio_awaitable_t, T> {
+    struct asio_awaitable_handler_result<T> {
         using type = T;
     };
 
-    template<class Options, class... Ts>
-    using asio_awaitable_handler_result_t = typename asio_awaitable_handler_result<Options, Ts...>::type;
+    template<class... Ts>
+    using asio_awaitable_handler_result_t = typename asio_awaitable_handler_result<Ts...>::type;
 
-    template<class T>
+    template<class... Ts>
     class asio_awaitable_handler_base {
     public:
-        using return_type = T;
-        using continuation_type = asio_continuation<return_type>;
+        using result_type = asio_awaitable_handler_result_t<Ts...>;
+        using continuation_type = asio_continuation<result_type>;
         using cancellation_slot_type = boost::asio::cancellation_slot;
 
         explicit asio_awaitable_handler_base(continuation_type* r)
@@ -270,12 +276,12 @@ namespace coroactors::detail {
     /**
      * The default handler, transforms all args into result arguments
      */
-    template<class Options, class... Ts>
+    template<class... Ts>
     class asio_awaitable_handler
-        : public asio_awaitable_handler_base<asio_awaitable_handler_result_t<Options, Ts...>>
+        : public asio_awaitable_handler_base<Ts...>
     {
     public:
-        using asio_awaitable_handler_base<asio_awaitable_handler_result_t<Options, Ts...>>::asio_awaitable_handler_base;
+        using asio_awaitable_handler_base<Ts...>::asio_awaitable_handler_base;
 
         template<class... Args>
         void operator()(Args&&... args) {
@@ -290,11 +296,11 @@ namespace coroactors::detail {
      * The error code handler, transform it into an optional exception
      */
     template<class... Ts>
-    class asio_awaitable_handler<asio_awaitable_t, boost::system::error_code, Ts...>
-        : public asio_awaitable_handler_base<asio_awaitable_handler_result_t<asio_awaitable_t, Ts...>>
+    class asio_awaitable_handler<boost::system::error_code, Ts...>
+        : public asio_awaitable_handler_base<Ts...>
     {
     public:
-        using asio_awaitable_handler_base<asio_awaitable_handler_result_t<asio_awaitable_t, Ts...>>::asio_awaitable_handler_base;
+        using asio_awaitable_handler_base<Ts...>::asio_awaitable_handler_base;
 
         template<class... Args>
         void operator()(const boost::system::error_code& ec, Args&&... args) {
@@ -314,15 +320,14 @@ namespace coroactors::detail {
      * transforms eventual result into some value. Supports cancellation
      * propagation from actors into asio cancellation slots.
      */
-    template<class CompletionHandler, class Initiation, class... Args>
+    template<class CompletionHandler, class Options, class Initiation, class... Args>
     class asio_awaiter_t {
     public:
-        using return_type = typename CompletionHandler::return_type;
+        using result_type = typename CompletionHandler::result_type;
         using continuation_type = typename CompletionHandler::continuation_type;
 
-        asio_awaiter_t(asio_awaitable_t options, Initiation&& initiation, Args&&... args)
-            : options(options)
-            , initiation(std::forward<Initiation>(initiation))
+        asio_awaiter_t(Initiation&& initiation, Args&&... args)
+            : initiation(std::forward<Initiation>(initiation))
             , args(std::forward<Args>(args)...)
         {}
 
@@ -330,8 +335,7 @@ namespace coroactors::detail {
         asio_awaiter_t& operator=(const asio_awaiter_t&) = delete;
 
         asio_awaiter_t(asio_awaiter_t&& rhs)
-            : options(std::move(rhs.options))
-            , initiation(std::move(rhs.initiation))
+            : initiation(std::move(rhs.initiation))
             , args(std::move(rhs.args))
         {}
 
@@ -359,7 +363,7 @@ namespace coroactors::detail {
             if (token.stop_possible()) {
                 stop.emplace(
                     std::move(token),
-                    emit_cancellation_t{ result.get(), options.cancel_type });
+                    emit_cancellation_t{ result.get() });
 
                 // It is possible cancellation causes result to become available
                 if (result->ready()) {
@@ -375,7 +379,7 @@ namespace coroactors::detail {
             return result->set_continuation(c);
         }
 
-        return_type await_resume() {
+        result_type await_resume() {
             // All resume paths should have acquire sync on the result value
             return result->take_value();
         }
@@ -393,11 +397,10 @@ namespace coroactors::detail {
 
         struct emit_cancellation_t {
             continuation_type* r;
-            boost::asio::cancellation_type ct;
 
             void operator()() noexcept {
                 if (r->begin_cancellation()) {
-                    r->emit_cancellation(ct);
+                    r->emit_cancellation(Options::cancel_type);
                     if (auto c = r->end_cancellation()) {
                         c.resume();
                     }
@@ -406,7 +409,6 @@ namespace coroactors::detail {
         };
 
     private:
-        asio_awaitable_t options;
         std::decay_t<Initiation> initiation;
         std::tuple<std::decay_t<Args>...> args;
         detail::intrusive_ptr<continuation_type> result;
@@ -420,46 +422,25 @@ namespace boost::asio {
     /**
      * Customizes async_result to transform async operations into awaitables
      */
-    template<class R, class... Signature>
-    class async_result<::coroactors::detail::asio_awaitable_t, R(Signature...)> {
+    template<class Executor,
+        boost::asio::cancellation_type CancelType,
+        class R, class... Ts>
+    class async_result<
+        ::coroactors::asio_awaitable_t<Executor, CancelType>,
+        R(Ts...)>
+    {
     public:
         using completion_handler_type =
             ::coroactors::detail::asio_awaitable_handler<
-                ::coroactors::detail::asio_awaitable_t,
-                std::decay_t<Signature>...>;
+                std::decay_t<Ts>...>;
 
-        template<class Initiation, class... Args>
-        static auto initiate(Initiation&& initiation,
-            ::coroactors::detail::asio_awaitable_t options, Args&&... args)
+        template<class Initiation, class Options, class... Args>
+        static auto initiate(Initiation&& initiation, Options,
+            Args&&... args)
         {
             using awaiter_type = ::coroactors::detail::asio_awaiter_t<
-                completion_handler_type, Initiation, Args...>;
+                completion_handler_type, Options, Initiation, Args...>;
             return awaiter_type(
-                options,
-                std::forward<Initiation>(initiation),
-                std::forward<Args>(args)...);
-        }
-    };
-
-    /**
-     * Customizes async_result to transform async operations into awaitables
-     */
-    template<class R, class... Signature>
-    class async_result<::coroactors::detail::asio_awaitable_raw_args_t, R(Signature...)> {
-    public:
-        using completion_handler_type =
-            ::coroactors::detail::asio_awaitable_handler<
-                ::coroactors::detail::asio_awaitable_raw_args_t,
-                std::decay_t<Signature>...>;
-
-        template<class Initiation, class... Args>
-        static auto initiate(Initiation&& initiation,
-            ::coroactors::detail::asio_awaitable_raw_args_t options, Args&&... args)
-        {
-            using awaiter_type = ::coroactors::detail::asio_awaiter_t<
-                completion_handler_type, Initiation, Args...>;
-            return awaiter_type(
-                options,
                 std::forward<Initiation>(initiation),
                 std::forward<Args>(args)...);
         }

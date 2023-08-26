@@ -3,6 +3,6 @@
 
 namespace coroactors {
 
-    inline constexpr detail::asio_awaitable_t asio_awaitable{};
+    inline constexpr asio_awaitable_t<> asio_awaitable{};
 
 } // namespace coroactors

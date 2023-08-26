@@ -3,6 +3,7 @@
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/intrusive_ptr.h>
 #include <atomic>
+#include <cassert>
 #include <optional>
 
 namespace coroactors::detail {
