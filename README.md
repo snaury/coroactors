@@ -1,6 +1,8 @@
 # coroactors
 Experimental actors with C++ coroutines
 
+This is a header-only library with collection of utilities for writing thread-safe easy to use coroutines suitable for multi-threaded executors. Library classes mostly use lock-free and wait-free primites for synchronization.
+
 ## Preface
 
 I've been working on [YDB](https://ydb.tech) (a recently open-sourced distributed SQL database) for many years, and got a bit of experience in programming with actors as a result. Actor model is great at isolating mutable state, communicating using messaging kinda matches the real world, and having messages serializable makes communicating across the network almost identical to a single process. In theory that makes systems scalable, you just spread your actors across different nodes.
@@ -158,3 +160,7 @@ private:
     const std::vector<int> shards;
 }
 ```
+
+## Sleeping and timeouts
+
+Practical cancellation often arises because asynchronous code needs to timeout, e.g. so outbound requests doesn't take an unbounded time. Many forms of retry loops also need to sleep to implement exponential backoffs. While it is possible to do manually using stop tokens it would be way too cumbersome, but sleeping is impossible without a scheduler, and timer wrappers on an `actor_context` instance may be when scheduler implements a timed `schedule` call. Wrapper methods `sleep_until` and `sleep_for` return at the specified deadline, or when current stop token is cancelled, whatever comes first (these methods return true on deadline and false on cancellation when `co_await`ed). Wrapper methods `with_deadline` and `with_timeout` wrap another awaitable (which must support cancellation propagation), and cancel a forked stop token on deadline. Besides additional cancellation there are no other effects on the awaitable, it is awaited when the wrapper is awaited.

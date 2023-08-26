@@ -1,5 +1,8 @@
 #pragma once
+#include <coroactors/stop_token.h>
+#include <chrono>
 #include <coroutine>
+#include <functional>
 #include <stdexcept>
 
 namespace coroactors {
@@ -12,10 +15,11 @@ namespace coroactors {
         ~actor_scheduler() = default;
 
     public:
-        /**
-         * Schedules h to run sometime in the future
-         */
-        virtual void schedule(std::coroutine_handle<> h) = 0;
+        using clock_type = std::chrono::steady_clock;
+        using time_point = clock_type::time_point;
+        using duration = clock_type::duration;
+
+        using schedule_callback_type = std::function<void(time_point, bool)>;
 
         /**
          * Returns true when task switch should preempt
@@ -23,6 +27,24 @@ namespace coroactors {
         virtual bool preempt() const {
             // By default we preempt on every context switch
             return true;
+        }
+
+        /**
+         * Schedules h to run as soon as possible, but not recursively
+         */
+        virtual void schedule(std::coroutine_handle<> h) = 0;
+
+        /**
+         * Schedules a callback c to run at deadline d with a stop token t
+         *
+         * Callback will be called with current scheduler time and true when
+         * the requested deadline is reached, or false if the request was
+         * cancelled. Callback will also be called with the false argument
+         * immediately if scheduler does not support timers.
+         */
+        virtual void schedule(schedule_callback_type c, time_point d, stop_token t) {
+            // Doesn't support timers by default
+            c(clock_type::now(), false);
         }
 
     public:

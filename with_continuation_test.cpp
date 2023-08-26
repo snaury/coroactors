@@ -555,13 +555,13 @@ TEST(WithContinuationTest, StopToken) {
 
     detach_awaitable(
         with_stop_token(
+            source.get_token(),
             actor_wrapper(
                 actor_with_continuation(no_actor_context, &stage,
                     [&](continuation<> c) {
                         suspended = c;
                     }),
-                &refs),
-            source.get_token()),
+                &refs)),
         [&]{
             finished = true;
         });

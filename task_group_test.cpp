@@ -658,8 +658,8 @@ TEST(WithTaskGroupTest, ExplicitCancel) {
 
     detach_awaitable(
         with_stop_token(
-            do_with_task_group_cancel(stage, provider).result(),
-            source.get_token()),
+            source.get_token(),
+            do_with_task_group_cancel(stage, provider).result()),
         [&](auto&& result) {
             finished = true;
             success = result.has_value();
@@ -785,6 +785,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, va
 
     stage = 2;
     int result = co_await with_stop_token(
+        stop_token(),
         with_task_group<int>([&](task_group<int>& group) -> actor<int> {
             stage = 3;
             co_await actor_context::caller_context();
@@ -805,8 +806,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, va
 
             stage = 6;
             co_return a + b;
-        }),
-        stop_token());
+        }));
 
     stage = 7;
     EXPECT_EQ(result, 100);
@@ -824,8 +824,8 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
 
     detach_awaitable(
         with_stop_token(
-            do_with_stop_token_context(stage, scheduler, provider).result(),
-            source.get_token()),
+            source.get_token(),
+            do_with_stop_token_context(stage, scheduler, provider).result()),
         [&](auto&& result) {
             finished = true;
             success = result.has_value();

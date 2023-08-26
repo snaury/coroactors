@@ -22,7 +22,7 @@ namespace coroactors::detail {
      * The type of result returned from an awaitable
      */
     template<class T, with_task_group_callback<T> Callback>
-    using with_task_group_result_t = remove_rvalue_reference_t<
+    using with_task_group_result_t = std::remove_reference_t<
         await_result_t<with_task_group_awaitable_t<T, Callback>>>;
 
     /**

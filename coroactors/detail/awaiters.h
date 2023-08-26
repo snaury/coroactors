@@ -5,19 +5,6 @@
 
 namespace coroactors::detail {
 
-    template<class T>
-    struct remove_rvalue_reference {
-        using type = T;
-    };
-
-    template<class T>
-    struct remove_rvalue_reference<T&&> {
-        using type = T;
-    };
-
-    template<class T>
-    using remove_rvalue_reference_t = typename remove_rvalue_reference<T>::type;
-
     template<class Awaiter>
     concept has_await_ready = requires(Awaiter& awaiter) {
         awaiter.await_ready() ? 1 : 0;
@@ -113,7 +100,7 @@ namespace coroactors::detail {
     using awaiter_transform_type_t = decltype(get_awaiter(std::declval<Awaitable&&>()));
 
     /**
-     * Transforms awaitable into its awaitable type, but removes an rvalue
+     * Transforms awaitable into its awaitable type, but removes a reference
      *
      * This is useful for wrapper classes, where the result may be transferred
      * somewhere else (detach_awaitable, task_group, etc.) and the original
@@ -122,7 +109,7 @@ namespace coroactors::detail {
      */
     template<class Awaitable, class Promise = void>
         requires awaitable<Awaitable, Promise>
-    using awaiter_safe_type_t = remove_rvalue_reference_t<awaiter_transform_type_t<Awaitable, Promise>>;
+    using awaiter_safe_type_t = std::remove_reference_t<awaiter_transform_type_t<Awaitable, Promise>>;
 
     /**
      * The result type returned from an awaiter (not awaitable)

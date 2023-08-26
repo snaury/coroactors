@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
+#include <coroactors/detail/actor_context.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/mailbox.h>
@@ -85,6 +86,44 @@ namespace coroactors {
         std::coroutine_handle<> pop() const {
             std::coroutine_handle<> k = impl_->mailbox.pop_default();
             return k;
+        }
+
+        /**
+         * Returns an awaiter that resumes at the specified deadline, or when
+         * current stop token is cancelled. The result will be true on deadline
+         * and false on cancellation.
+         */
+        auto sleep_until(actor_scheduler::time_point deadline) const {
+            return detail::sleep_until_awaiter(
+                impl_ ? &impl_->scheduler : nullptr, deadline);
+        }
+
+        /**
+         * Returns an awaiter that resumes after the specified timeout, or when
+         * current stop token is cancelled. The result will be true on deadline
+         * and false on cancellation.
+         */
+        auto sleep_for(actor_scheduler::duration timeout) const {
+            return sleep_until(actor_scheduler::clock_type::now() + timeout);
+        }
+
+        /**
+         * Returns a wrapped awaitable that will be cancelled at the deadline
+         */
+        template<detail::awaitable_with_stop_token_propagation Awaitable>
+        auto with_deadline(actor_scheduler::time_point deadline, Awaitable&& awaitable) const {
+            return detail::with_deadline_awaiter<Awaitable>(
+                std::forward<Awaitable>(awaitable),
+                impl_ ? &impl_->scheduler : nullptr, deadline);
+        }
+
+        /**
+         * Returns a wrapped awaitable that will be cancelled after a timeout
+         */
+        template<detail::awaitable_with_stop_token_propagation Awaitable>
+        auto with_timeout(actor_scheduler::duration timeout, Awaitable&& awaitable) const {
+            return with_deadline(actor_scheduler::clock_type::now() + timeout,
+                std::forward<Awaitable>(awaitable));
         }
 
         /**
