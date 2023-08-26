@@ -8,7 +8,7 @@ using namespace coroactors;
 
 class TSimpleScheduler : public actor_scheduler {
 public:
-    void schedule(std::coroutine_handle<> c) override {
+    void post(std::coroutine_handle<> c) override {
         queue.push_back(c);
     }
 

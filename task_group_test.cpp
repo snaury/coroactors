@@ -759,7 +759,7 @@ TEST(WithTaskGroupTest, ResultType) {
 struct test_scheduler : public actor_scheduler {
     std::deque<std::coroutine_handle<>> queue;
 
-    void schedule(std::coroutine_handle<> h) override {
+    void post(std::coroutine_handle<> h) override {
         queue.push_back(h);
     }
 

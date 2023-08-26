@@ -30,9 +30,31 @@ namespace coroactors {
         }
 
         /**
-         * Schedules h to run as soon as possible, but not recursively
+         * Post h to resume, likely using a global queue
+         *
+         * Should be used when tasks fork, e.g. when actor coroutine is
+         * starting and switches from an empty context, or when we start a
+         * different chain of continuations in parallel to currently executing.
+         *
+         * Usually slow, corresponds to asio::post
          */
-        virtual void schedule(std::coroutine_handle<> h) = 0;
+        virtual void post(std::coroutine_handle<> h) = 0;
+
+        /**
+         * Defer h to resume, likely using a local queue
+         *
+         * Could be used when a chain of continuations cannot continue (e.g.
+         * returning from an external async operation) and when we are sure
+         * we would return to scheduler soon. Care must be taken not to use
+         * this when current thread will be busy with other work without
+         * returning to scheduler, as h would be stuck in local queue until
+         * that time.
+         *
+         * Usually fast, corresponds to asio::defer
+         */
+        virtual void defer(std::coroutine_handle<> h) {
+            post(h); // default to post
+        }
 
         /**
          * Schedules a callback c to run at deadline d with a stop token t

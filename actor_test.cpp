@@ -26,7 +26,7 @@ struct test_scheduler : public actor_scheduler {
         return false;
     }
 
-    void schedule(std::coroutine_handle<> c) override {
+    void post(std::coroutine_handle<> c) override {
         queue.push_back(c);
     }
 

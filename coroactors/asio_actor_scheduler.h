@@ -3,6 +3,8 @@
 #include <coroactors/detail/intrusive_ptr.h>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/defer.hpp>
 #include <optional>
 
 namespace coroactors {
@@ -34,16 +36,15 @@ namespace coroactors {
             return true;
         }
 
-        void schedule(std::coroutine_handle<> h) override {
-            executor_.execute([h, d = preempt_duration_]() noexcept {
-                if (!preempt_deadline) {
-                    time_point deadline = clock_type::now() + d;
-                    preempt_deadline = &deadline;
-                    h.resume();
-                    preempt_deadline = nullptr;
-                } else {
-                    h.resume();
-                }
+        void post(std::coroutine_handle<> h) override {
+            boost::asio::post(executor_, [h, d = preempt_duration_]() noexcept {
+                run_with_preemption(h, d);
+            });
+        }
+
+        void defer(std::coroutine_handle<> h) override {
+            boost::asio::defer(executor_, [h, d = preempt_duration_]() noexcept {
+                run_with_preemption(h, d);
             });
         }
 
@@ -57,6 +58,19 @@ namespace coroactors {
             detail::intrusive_ptr<timer_t> timer(
                 new timer_t(executor_, d, std::move(c), preempt_duration_));
             timer->start(std::move(t));
+        }
+
+    private:
+        template<class Callback>
+        static void run_with_preemption(Callback&& callback, duration preempt_duration) {
+            if (!preempt_deadline) {
+                time_point deadline = clock_type::now() + preempt_duration;
+                preempt_deadline = &deadline;
+                callback();
+                preempt_deadline = nullptr;
+            } else {
+                callback();
+            }
         }
 
     private:
@@ -97,14 +111,9 @@ namespace coroactors {
 
         private:
             void finish(const boost::system::error_code& ec) noexcept {
-                if (!preempt_deadline) {
-                    time_point deadline = clock_type::now() + preempt_duration;
-                    preempt_deadline = &deadline;
-                    callback(ec ? false : true);
-                    preempt_deadline = nullptr;
-                } else {
-                    callback(ec ? false : true);
-                }
+                run_with_preemption([&]{
+                        callback(ec ? false : true);
+                    }, preempt_duration);
             }
 
         private:

@@ -1,13 +1,16 @@
 #include <coroactors/actor.h>
 #include <coroactors/detach_awaitable.h>
 #include <coroactors/detail/blocking_queue.h>
+#include <coroactors/asio_actor_scheduler.h>
 #include <absl/synchronization/mutex.h>
+#include <boost/asio/thread_pool.hpp>
 #include <deque>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <mutex>
 #include <condition_variable>
+#include <variant>
 
 using namespace coroactors;
 
@@ -323,6 +326,11 @@ private:
     std::unique_ptr<IBlockingQueue> Impl;
 };
 
+enum class ESchedulerType {
+    Fast,
+    Asio,
+};
+
 enum class ESchedulerQueue {
     LockFree,
     AbslMutex,
@@ -381,7 +389,7 @@ public:
         }
     }
 
-    void schedule(std::coroutine_handle<> c) override {
+    void post(std::coroutine_handle<> c) override {
         assert(c && "Cannot schedule a null continuation");
         Queue.push(c);
     }
@@ -412,6 +420,22 @@ private:
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };
+};
+
+class TAsioScheduler {
+public:
+    TAsioScheduler(size_t threads, std::chrono::microseconds preeemptUs)
+        : pool(threads)
+        , scheduler(pool.get_executor(), preeemptUs)
+    {}
+
+    actor_scheduler& get_scheduler() {
+        return scheduler;
+    }
+
+private:
+    boost::asio::thread_pool pool;
+    asio_actor_scheduler scheduler;
 };
 
 template<class T>
@@ -467,6 +491,7 @@ int main(int argc, char** argv) {
     int numPingables = 1;
     long long count = 10'000'000;
     std::chrono::microseconds preemptUs(10);
+    ESchedulerType schedulerType = ESchedulerType::Fast;
     ESchedulerQueue queueType = ESchedulerQueue::LockFree;
     bool withLatencies = true;
     bool debugWakeups = false;
@@ -518,6 +543,10 @@ int main(int argc, char** argv) {
             queueType = ESchedulerQueue::StdMailbox;
             continue;
         }
+        if (arg == "--use-asio") {
+            schedulerType = ESchedulerType::Asio;
+            continue;
+        }
         if (arg == "--without-latencies") {
             withLatencies = false;
             continue;
@@ -530,8 +559,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    TScheduler scheduler(numThreads, preemptUs, queueType);
-    actor_scheduler::set_current_ptr(&scheduler);
+    std::variant<std::monostate, TScheduler, TAsioScheduler> scheduler;
+    switch (schedulerType) {
+        case ESchedulerType::Fast: {
+            auto& s = scheduler.emplace<1>(numThreads, preemptUs, queueType);
+            actor_scheduler::set_current_ptr(&s);
+            break;
+        }
+        case ESchedulerType::Asio: {
+            auto& s = scheduler.emplace<2>(numThreads, preemptUs);
+            actor_scheduler::set_current_ptr(&s.get_scheduler());
+            break;
+        }
+    }
 
     std::deque<TPingable> pingables;
     std::deque<TPinger> pingers;

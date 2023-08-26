@@ -58,7 +58,7 @@ namespace coroactors::detail {
             // always reschedule continuations.
             c = to.push(c);
             if (c) {
-                to.scheduler().schedule(c);
+                to.scheduler().post(c);
             }
             return std::noop_coroutine();
         }
@@ -75,27 +75,26 @@ namespace coroactors::detail {
                     if (!saved.scheduler().preempt()) {
                         return next;
                     }
-                    saved.scheduler().schedule(next);
+                    saved.scheduler().defer(next);
                 }
 
                 return std::noop_coroutine();
             } else if (to.scheduler().preempt()) {
-                // preempted by the new context
-                if (auto next = saved.pop()) {
-                    // schedule the next available continuation
-                    saved.scheduler().schedule(next);
-                }
+                // preempted by the new context, defer it first
+                to.scheduler().defer(c);
 
-                // schedule current continuation too
-                to.scheduler().schedule(c);
+                // defer the next available continuation too
+                if (auto next = saved.pop()) {
+                    saved.scheduler().defer(next);
+                }
 
                 return std::noop_coroutine();
             }
         }
 
         if (auto next = saved.pop()) {
-            // schedule the next available continuation
-            saved.scheduler().schedule(next);
+            // post the next available continuation
+            saved.scheduler().post(next);
         }
 
         // switch to the new context
@@ -178,7 +177,7 @@ namespace coroactors::detail {
                     if (p.context) {
                         next = p.context.pop();
                         if (next && p.context.scheduler().preempt()) {
-                            p.context.scheduler().schedule(next);
+                            p.context.scheduler().defer(next);
                             next = nullptr;
                         }
                     }
@@ -261,7 +260,7 @@ namespace coroactors::detail {
                 // Detached with a non-empty context, always reschedule
                 c = context.push(c);
                 if (c) {
-                    context.scheduler().schedule(c);
+                    context.scheduler().post(c);
                 }
             } else {
                 c.resume();
@@ -320,7 +319,7 @@ namespace coroactors::detail {
                 context = bound.context;
                 assert(from);
                 if (auto next = from.pop()) {
-                    from.scheduler().schedule(next);
+                    from.scheduler().post(next);
                 }
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
@@ -392,7 +391,7 @@ namespace coroactors::detail {
                 // Switch to the next coroutine in our context, unless preempted
                 auto& scheduler = self.context.scheduler();
                 if (scheduler.preempt()) {
-                    scheduler.schedule(next);
+                    scheduler.defer(next);
                     return std::noop_coroutine();
                 } else {
                     return next;
@@ -417,7 +416,7 @@ namespace coroactors::detail {
                 if (!self.context) {
                     return c;
                 }
-                self.context.scheduler().schedule(c);
+                self.context.scheduler().defer(c);
                 return std::noop_coroutine();
             }
 
@@ -475,7 +474,7 @@ namespace coroactors::detail {
                     // Note: caller may have called resume recursively, from
                     // a different actor even, and won't be expecting us to
                     // keep going indefinitely. So we always reschedule.
-                    context.scheduler().schedule(next);
+                    context.scheduler().post(next);
                 }
                 return std::noop_coroutine();
             }
@@ -497,7 +496,7 @@ namespace coroactors::detail {
         static void release_context(const actor_context& context) {
             if (context) {
                 if (auto next = context.pop()) {
-                    context.scheduler().schedule(next);
+                    context.scheduler().post(next);
                 }
             }
         }
@@ -509,7 +508,7 @@ namespace coroactors::detail {
                     if (!scheduler.preempt()) {
                         return next;
                     }
-                    scheduler.schedule(next);
+                    scheduler.defer(next);
                 }
             }
             return std::noop_coroutine();
