@@ -32,7 +32,7 @@ struct test_scheduler : public actor_scheduler {
 
     void schedule(schedule_callback_t c, time_point d, stop_token t) override {
         if (!timers_enabled) {
-            c(clock_type::now(), false);
+            c(false);
             return;
         }
         auto it = timers.emplace(
@@ -47,7 +47,7 @@ struct test_scheduler : public actor_scheduler {
                     return; // triggered during emplace
                 }
                 // The call is synchronized with destructor (i.e. removal)
-                it->second.callback(clock_type::now(), false);
+                it->second.callback(false);
                 // We destroy ourselves here, copy iterator first
                 auto copy = it;
                 timers.erase(copy);
@@ -55,7 +55,7 @@ struct test_scheduler : public actor_scheduler {
             locked = false;
             if (it->second.cancelled) {
                 it->second.stop.reset();
-                it->second.callback(clock_type::now(), false);
+                it->second.callback(false);
                 timers.erase(it);
             }
         }
@@ -73,7 +73,7 @@ struct test_scheduler : public actor_scheduler {
         auto it = timers.begin();
         it->second.stop.reset();
         assert(!it->second.cancelled);
-        it->second.callback(clock_type::now(), true);
+        it->second.callback(true);
         timers.erase(it);
     }
 
@@ -127,9 +127,9 @@ struct run_result {
 };
 
 template<class Awaitable>
-run_result<std::remove_reference_t<detail::await_result_t<Awaitable>>>
+run_result<std::decay_t<detail::await_result_t<Awaitable>>>
 run(Awaitable&& awaitable) {
-    run_result<std::remove_reference_t<detail::await_result_t<Awaitable>>> result;
+    run_result<std::decay_t<detail::await_result_t<Awaitable>>> result;
     detach_awaitable(std::forward<Awaitable>(awaitable), result.callback());
     return result;
 }

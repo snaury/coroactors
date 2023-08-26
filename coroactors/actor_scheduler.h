@@ -19,7 +19,7 @@ namespace coroactors {
         using time_point = clock_type::time_point;
         using duration = clock_type::duration;
 
-        using schedule_callback_type = std::function<void(time_point, bool)>;
+        using schedule_callback_type = std::function<void(bool)>;
 
         /**
          * Returns true when task switch should preempt
@@ -37,14 +37,13 @@ namespace coroactors {
         /**
          * Schedules a callback c to run at deadline d with a stop token t
          *
-         * Callback will be called with current scheduler time and true when
-         * the requested deadline is reached, or false if the request was
-         * cancelled. Callback will also be called with the false argument
-         * immediately if scheduler does not support timers.
+         * Callback will be called with a single argument of true when the
+         * requested deadline is reached, or false if the request was cancelled
+         * or failed with an error. Callback may also be called with the false
+         * argument immediately if scheduler does not support timers.
          */
         virtual void schedule(schedule_callback_type c, time_point d, stop_token t) {
-            // Doesn't support timers by default
-            c(clock_type::now(), false);
+            c(false); // don't support timers by default
         }
 
     public:

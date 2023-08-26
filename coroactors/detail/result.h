@@ -34,6 +34,11 @@ namespace coroactors::detail {
             result_.template emplace<1>(std::forward<Value>(value));
         }
 
+        template<class... Args>
+        void emplace_value(Args&&... args) {
+            result_.template emplace<1>(std::forward<Args>(args)...);
+        }
+
         void set_exception(std::exception_ptr&& e) noexcept {
             result_.template emplace<2>(std::move(e));
         }

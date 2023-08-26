@@ -3,18 +3,10 @@
 
 namespace coroactors::detail {
 
-    template<class T>
-    concept intrusive_object = requires(T* obj) {
-        // We can call add_ref
-        { obj->add_ref() } noexcept;
-        // We can call release_ref and compare result to zero
-        { obj->release_ref() == 0 } noexcept;
-    };
-
     /**
      * An intrusive pointer where refcount is managed by the object
      */
-    template<intrusive_object T, class Deleter = std::default_delete<T>>
+    template<class T, class Deleter = std::default_delete<T>>
     class intrusive_ptr {
     public:
         intrusive_ptr() noexcept

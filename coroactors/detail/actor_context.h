@@ -45,7 +45,7 @@ namespace coroactors::detail {
         void finish(bool success) noexcept {
             void* addr = continuation.exchange(
                 reinterpret_cast<void*>(success ? MarkerSuccess : MarkerFailure),
-                std::memory_order_acquire);
+                std::memory_order_acq_rel);
             if (addr) {
                 assert(addr != reinterpret_cast<void*>(MarkerSuccess));
                 assert(addr != reinterpret_cast<void*>(MarkerFailure));
@@ -100,7 +100,7 @@ namespace coroactors::detail {
             context.reset(new sleep_until_context);
             if (scheduler) {
                 scheduler->schedule(
-                    [context = this->context](actor_scheduler::time_point, bool success) {
+                    [context = this->context](bool success) {
                         context->finish(success);
                     },
                     deadline,
@@ -143,7 +143,7 @@ namespace coroactors::detail {
         /**
          * Called by scheduler on deadline
          */
-        void operator()(actor_scheduler::time_point, bool deadline) noexcept {
+        void operator()(bool deadline) noexcept {
             if (deadline) {
                 std::move(source).request_stop();
             }

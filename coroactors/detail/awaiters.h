@@ -109,7 +109,7 @@ namespace coroactors::detail {
      */
     template<class Awaitable, class Promise = void>
         requires awaitable<Awaitable, Promise>
-    using awaiter_safe_type_t = std::remove_reference_t<awaiter_transform_type_t<Awaitable, Promise>>;
+    using awaiter_safe_type_t = std::decay_t<awaiter_transform_type_t<Awaitable, Promise>>;
 
     /**
      * The result type returned from an awaiter (not awaitable)

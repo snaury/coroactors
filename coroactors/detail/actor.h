@@ -36,7 +36,7 @@ namespace coroactors::detail {
             typename awaitable_unwrap_awaiter_type<Awaitable, actor_promise<T>>::is_actor_passthru_awaiter;
         };
 
-    std::coroutine_handle<> switch_context(
+    inline std::coroutine_handle<> switch_context(
         actor_context&& from,
         const actor_context& to,
         std::coroutine_handle<> c)
@@ -251,6 +251,11 @@ namespace coroactors::detail {
 
         void detach() noexcept {
             std::coroutine_handle<> c = actor_continuation<T>::from_promise(*this);
+
+            if (finished) {
+                c.destroy();
+                return;
+            }
 
             if (context) {
                 // Detached with a non-empty context, always reschedule
@@ -596,9 +601,9 @@ namespace coroactors::detail {
             requires (!actor_passthru_awaitable<Awaitable, T>)
         {
             // Protect against metaprogramming mistakes
-            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor<T>>);
-            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor_awaiter<T>>);
-            static_assert(!std::is_same_v<std::remove_reference_t<Awaitable>, actor_result_awaiter<T>>);
+            static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor<T>>);
+            static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor_awaiter<T>>);
+            static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor_result_awaiter<T>>);
 
             check_context_initialized();
 

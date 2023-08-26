@@ -259,6 +259,6 @@ namespace coroactors {
     /**
      * A special empty actor context that does not isolate shared state
      */
-    static inline const actor_context no_actor_context{};
+    inline const actor_context no_actor_context{};
 
 } // namespace coroactors
