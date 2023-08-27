@@ -348,23 +348,23 @@ public:
     {
         switch (queueType) {
             case ESchedulerQueue::LockFree: {
-                Queue.emplace<detail::blocking_queue<std::coroutine_handle<>>>();
+                Queue.emplace<detail::blocking_queue<continuation_t>>();
                 break;
             }
             case ESchedulerQueue::AbslMutex: {
-                Queue.emplace<TBlockingQueueWithAbslMutex<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithAbslMutex<continuation_t>>();
                 break;
             }
             case ESchedulerQueue::StdMutex: {
-                Queue.emplace<TBlockingQueueWithStdMutex<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithStdMutex<continuation_t>>();
                 break;
             }
             case ESchedulerQueue::AbslMailbox: {
-                Queue.emplace<TBlockingQueueWithAbslMailbox<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithAbslMailbox<continuation_t>>();
                 break;
             }
             case ESchedulerQueue::StdMailbox: {
-                Queue.emplace<TBlockingQueueWithStdMailbox<std::coroutine_handle<>>>();
+                Queue.emplace<TBlockingQueueWithStdMailbox<continuation_t>>();
                 break;
             }
         }
@@ -379,7 +379,7 @@ public:
     ~TScheduler() {
         // Send a stop signal for every thread
         for (size_t i = 0; i < Threads.size(); ++i) {
-            Queue.push(nullptr);
+            Queue.push({});
         }
         for (auto& thread : Threads) {
             thread.join();
@@ -389,9 +389,9 @@ public:
         }
     }
 
-    void post(std::coroutine_handle<> c) override {
-        assert(c && "Cannot schedule a null continuation");
-        Queue.push(c);
+    void post(std::coroutine_handle<> h, actor_context&& c) override {
+        assert(h && "Cannot schedule a null coroutine");
+        Queue.push({ h, std::move(c) });
     }
 
     bool preempt() const override {
@@ -407,16 +407,30 @@ private:
         actor_scheduler::set_current_ptr(this);
         TTime deadline{};
         thread_deadline = &deadline;
-        while (auto c = Queue.pop()) {
+        while (auto cont = Queue.pop()) {
             deadline = TClock::now() + PreemptUs;
-            c.resume();
+            cont.resume();
         }
         thread_deadline = nullptr;
     }
 
 private:
+    struct continuation_t {
+        std::coroutine_handle<> h;
+        actor_context c;
+
+        explicit operator bool() const {
+            return bool(h);
+        }
+
+        void resume() {
+            c.manager().resume(h);
+        }
+    };
+
+private:
     std::chrono::microseconds PreemptUs;
-    TBlockingQueue<std::coroutine_handle<>> Queue;
+    TBlockingQueue<continuation_t> Queue;
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };

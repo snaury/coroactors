@@ -64,7 +64,7 @@ namespace coroactors {
         void detach() && noexcept {
             auto& p = handle.promise();
             handle = {};
-            return p.detach();
+            return p.start_detached();
         }
 
     private:

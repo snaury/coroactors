@@ -12,6 +12,16 @@ struct test_scheduler : public actor_scheduler {
     using time_point = actor_scheduler::time_point;
     using schedule_callback_t = actor_scheduler::schedule_callback_type;
 
+    struct continuation_t {
+        std::coroutine_handle<> h;
+        actor_context c;
+        bool deferred;
+
+        void resume() {
+            c.manager().resume(h);
+        }
+    };
+
     struct timer_t {
         schedule_callback_t callback;
         std::optional<stop_callback<std::function<void()>>> stop;
@@ -26,8 +36,12 @@ struct test_scheduler : public actor_scheduler {
         return false;
     }
 
-    void post(std::coroutine_handle<> c) override {
-        queue.push_back(c);
+    void post(std::coroutine_handle<> h, actor_context&& c) override {
+        queue.push_back(continuation_t{ h, std::move(c), false });
+    }
+
+    void defer(std::coroutine_handle<> h, actor_context&& c) override {
+        queue.push_back(continuation_t{ h, std::move(c), true });
     }
 
     void schedule(schedule_callback_t c, time_point d, stop_token t) override {
@@ -63,9 +77,9 @@ struct test_scheduler : public actor_scheduler {
 
     void run_next() {
         assert(!queue.empty());
-        auto c = queue.front();
+        auto cont = queue.front();
         queue.pop_front();
-        c.resume();
+        cont.resume();
     }
 
     void wake_next() {
@@ -77,7 +91,7 @@ struct test_scheduler : public actor_scheduler {
         timers.erase(it);
     }
 
-    std::deque<std::coroutine_handle<>> queue;
+    std::deque<continuation_t> queue;
     std::multimap<actor_scheduler::time_point, timer_t> timers;
     bool timers_enabled = false;
     bool locked = false;
@@ -196,7 +210,7 @@ TEST(ActorTest, StartWithEmptyContext) {
     EXPECT_TRUE(b && b->has_value());
 }
 
-actor<void> actor_start_with_specific_context(const actor_context& context) {
+actor<void> actor_with_specific_context(const actor_context& context) {
     co_await context();
     actor_context current = co_await actor_context::current_context;
     EXPECT_EQ(current, context);
@@ -208,16 +222,90 @@ actor<void> actor_start_with_specific_context(const actor_context& context) {
 TEST(ActorTest, StartWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    auto r = run(actor_start_with_specific_context(context).result());
-    EXPECT_FALSE(r);
-    ASSERT_EQ(scheduler.queue.size(), 1u);
-    scheduler.run_next();
-    ASSERT_EQ(scheduler.queue.size(), 0u);
+    // Not nested, so runs in the same thread
+    auto r = run(actor_with_specific_context(context).result());
     EXPECT_TRUE(r && r->has_value());
 }
 
-actor<void> actor_check_sleep(const actor_context& context, bool expected) {
+TEST(ActorTest, DetachWithSpecificContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    // Not nested, so runs in the same thread
+    actor_with_specific_context(context).detach();
+    ASSERT_EQ(scheduler.queue.size(), 0u);
+}
+
+actor<void> actor_without_context_awaits_specific_context(const actor_context& context) {
+    co_await no_actor_context();
+    EXPECT_EQ(co_await actor_context::current_context, no_actor_context);
+    co_await actor_with_specific_context(context);
+    EXPECT_EQ(co_await actor_context::current_context, no_actor_context);
+}
+
+TEST(ActorTest, AwaitWithSpecificContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    // The same thread of execution, no difference to run/detach
+    auto r = run(actor_without_context_awaits_specific_context(context).result());
+    EXPECT_TRUE(r && r->has_value());
+}
+
+actor<void> actor_with_context_awaits_empty_context(int& stage, const actor_context& context) {
+    stage = 1;
     co_await context();
+    stage = 2;
+    EXPECT_EQ(co_await actor_context::current_context, context);
+    stage = 3;
+    co_await actor_empty_context();
+    stage = 4;
+}
+
+TEST(ActorTest, AwaitEmptyFromSpecificContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    int stage = 0;
+    auto r = run(actor_with_context_awaits_empty_context(stage, context).result());
+    EXPECT_EQ(stage, 3); // we should defer on the return path
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 4);
+    EXPECT_TRUE(r && r->has_value());
+}
+
+actor<void> actor_without_context_runs_specific_context(const actor_context& context,
+        std::optional<run_result<detail::result<void>>>& r,
+        std::function<void()> before_return)
+{
+    co_await no_actor_context();
+    r = run(actor_with_specific_context(context).result());
+    before_return();
+}
+
+TEST(ActorTest, StartNestedWithSpecificContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    std::optional<run_result<detail::result<void>>> r1;
+    auto r = run(actor_without_context_runs_specific_context(context, r1,
+        [&]{
+            EXPECT_TRUE(r1);
+            EXPECT_FALSE(*r1);
+        }).result());
+    EXPECT_TRUE(r && r->has_value());
+    EXPECT_TRUE(r1 && !*r1);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    ASSERT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_TRUE(*r1 && (*r1)->has_value());
+}
+
+actor<void> actor_check_sleep(const actor_context& context, bool expected,
+        std::function<void()> before_sleep = {})
+{
+    co_await context();
+    if (before_sleep) {
+        before_sleep();
+    }
     bool success = co_await context.sleep_for(std::chrono::milliseconds(100));
     EXPECT_EQ(success, expected);
 }
@@ -233,8 +321,6 @@ TEST(ActorTest, Sleep) {
     {
         SCOPED_TRACE("timers disabled");
         auto r = run(actor_check_sleep(context, false).result());
-        ASSERT_EQ(scheduler.queue.size(), 1u);
-        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         EXPECT_TRUE(r && r->has_value());
     }
@@ -242,12 +328,11 @@ TEST(ActorTest, Sleep) {
     {
         SCOPED_TRACE("timer triggers");
         auto r = run(actor_check_sleep(context, true).result());
-        ASSERT_EQ(scheduler.queue.size(), 1u);
-        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         scheduler.wake_next();
         ASSERT_EQ(scheduler.timers.size(), 0u);
+        // Returning from a timer will defer
         ASSERT_EQ(scheduler.queue.size(), 1u);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
@@ -256,20 +341,18 @@ TEST(ActorTest, Sleep) {
     {
         SCOPED_TRACE("cancelled before sleep");
         stop_source source;
-        auto r = run(with_stop_token(source.get_token(), actor_check_sleep(context, false).result()));
-        ASSERT_EQ(scheduler.queue.size(), 1u);
-        source.request_stop();
-        scheduler.run_next();
-        ASSERT_EQ(scheduler.timers.size(), 0u);
+        auto before_sleep = [&]{
+            source.request_stop();
+        };
+        auto r = run(with_stop_token(source.get_token(), actor_check_sleep(context, false, before_sleep).result()));
         ASSERT_EQ(scheduler.queue.size(), 0u);
+        ASSERT_EQ(scheduler.timers.size(), 0u);
         EXPECT_TRUE(r && r->has_value());
     }
     {
         SCOPED_TRACE("cancelled during sleep");
         stop_source source;
         auto r = run(with_stop_token(source.get_token(), actor_check_sleep(context, false).result()));
-        ASSERT_EQ(scheduler.queue.size(), 1u);
-        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         source.request_stop();

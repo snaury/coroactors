@@ -36,71 +36,6 @@ namespace coroactors::detail {
             typename awaitable_unwrap_awaiter_type<Awaitable, actor_promise<T>>::is_actor_passthru_awaiter;
         };
 
-    inline std::coroutine_handle<> switch_context(
-        actor_context&& from,
-        const actor_context& to,
-        std::coroutine_handle<> c)
-    {
-        if (from == to) {
-            // context is not changing
-            return c;
-        }
-
-        if (!from) {
-            // special case: entering context from outside
-            // We must be careful to never switch directly, because a very
-            // common case might be starting an actor coroutine in some task
-            // group (initial context is empty) which then makes a call and
-            // awaits some other context. This might all happen recursively
-            // from another actor coroutine which will be blocked until all
-            // synchronous parts complete, which might take a very long time.
-            // We cannot detect this recursion right now, so it's safer to
-            // always reschedule continuations.
-            c = to.push(c);
-            if (c) {
-                to.scheduler().post(c);
-            }
-            return std::noop_coroutine();
-        }
-
-        // keep original context
-        auto saved = std::move(from);
-
-        if (to) {
-            c = to.push(c);
-            if (!c) {
-                // new context is currently busy
-                if (auto next = saved.pop()) {
-                    // run the next available continuation unless preempted
-                    if (!saved.scheduler().preempt()) {
-                        return next;
-                    }
-                    saved.scheduler().defer(next);
-                }
-
-                return std::noop_coroutine();
-            } else if (to.scheduler().preempt()) {
-                // preempted by the new context, defer it first
-                to.scheduler().defer(c);
-
-                // defer the next available continuation too
-                if (auto next = saved.pop()) {
-                    saved.scheduler().defer(next);
-                }
-
-                return std::noop_coroutine();
-            }
-        }
-
-        if (auto next = saved.pop()) {
-            // post the next available continuation
-            saved.scheduler().post(next);
-        }
-
-        // switch to the new context
-        return c;
-    }
-
     template<class T>
     class actor_result_handler_base {
     public:
@@ -155,17 +90,16 @@ namespace coroactors::detail {
 
         struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
-            static void await_resume() noexcept {}
+            static void await_resume() noexcept { /* never called */ }
 
             __attribute__((__noinline__))
             static std::coroutine_handle<> await_suspend(actor_continuation<T> h) noexcept {
                 auto& p = h.promise();
                 p.finished = true;
 
+                // Check if we have been co_await'ed
                 auto next = std::exchange(p.continuation, {});
                 if (!next) {
-                    // We have no continuation, it may be because it finished
-                    // without any co_awaits, or maybe it was detached.
                     if (!p.context_initialized) {
                         // We did not reach a co_await context point
                         // Suspend until actor is co_awaited
@@ -173,35 +107,47 @@ namespace coroactors::detail {
                     }
 
                     // Actor finished after a call to detach, see if there's
-                    // some other continuation available in the same context
-                    if (p.context) {
-                        next = p.context.pop();
-                        if (next && p.context.scheduler().preempt()) {
-                            p.context.scheduler().defer(next);
-                            next = nullptr;
-                        }
-                    }
-                    if (!next) {
-                        next = std::noop_coroutine();
-                    }
+                    // some other continuation available in the same context,
+                    // this would also correctly leave the context.
+                    next = p.context.manager().next();
+
                     // We have to destroy ourselves, since nobody is waiting
                     h.destroy();
+
                     return next;
                 }
 
-                auto to = std::move(p.continuation_context);
-                return switch_context(std::move(p.context), to, next);
+                if (p.continuation_context) {
+                    return p.continuation_context->manager().switch_from(
+                        p.context.manager(), next, /* returning */ true);
+                }
+
+                // We are returning to a non-actor coroutine
+                p.context.manager().leave();
+                return next;
             }
         };
 
         static auto final_suspend() noexcept { return final_suspend_t{}; }
 
-        const stop_token& get_stop_token() const noexcept {
-            return token;
+        bool ready() const {
+            return finished;
         }
 
         void set_stop_token(const stop_token& t) noexcept {
             token = t;
+        }
+
+        const stop_token& get_stop_token() const noexcept {
+            return token;
+        }
+
+        const actor_context& get_context() const {
+            return context;
+        }
+
+        const actor_context* get_context_ptr() const {
+            return &context;
         }
 
         template<class U>
@@ -214,7 +160,7 @@ namespace coroactors::detail {
             assert(context_initialized);
             assert(!finished);
             continuation = c;
-            continuation_context = c.promise().get_context();
+            continuation_context = c.promise().get_context_ptr();
         }
 
         void set_continuation(std::coroutine_handle<> c) noexcept {
@@ -235,35 +181,37 @@ namespace coroactors::detail {
             return false;
         }
 
-        std::coroutine_handle<> start() noexcept {
-            std::coroutine_handle<> c = actor_continuation<T>::from_promise(*this);
+        std::coroutine_handle<> start_await() noexcept {
+            std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
 
-            // Transfer directly if awaiter context is the same
-            if (continuation_context == context) {
-                return c;
+            if (!continuation_context) {
+                // We are awaited by a non-actor coroutine, enter the context
+                return context.manager().enter_for_await(h);
             }
 
-            // We are switching from continuation context to our context
-            auto saved = continuation_context;
-            return switch_context(std::move(saved), context, c);
+            // Transfer directly if awaiter context is the same
+            if (context == *continuation_context) {
+                // We are awaited by an actor coroutine with the same context
+                return h;
+            }
+
+            // Switch to our context
+            return context.manager().switch_from(
+                continuation_context->manager(), h, /* returning */ false);
         }
 
-        void detach() noexcept {
-            std::coroutine_handle<> c = actor_continuation<T>::from_promise(*this);
+        void start_detached(bool use_scheduler = true) noexcept {
+            std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
 
+            // Destroy an already finished coroutine
             if (finished) {
-                c.destroy();
+                h.destroy();
                 return;
             }
 
-            if (context) {
-                // Detached with a non-empty context, always reschedule
-                c = context.push(c);
-                if (c) {
-                    context.scheduler().post(c);
-                }
-            } else {
-                c.resume();
+            // Resume coroutine recursively when allowed
+            if (auto c = context.manager().enter_for_resume(h, use_scheduler)) {
+                context.manager().resume(c);
             }
         }
 
@@ -283,15 +231,30 @@ namespace coroactors::detail {
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
+                // The first time we suspend we return to caller
                 if (type == ESwitchContext::Initial) {
-                    // This is the first time we suspend
                     return std::noop_coroutine();
                 }
+
+                // We are changing to a different context
                 assert(type != ESwitchContext::Ready);
                 auto& self = c.promise();
                 auto from = std::move(self.context);
                 self.context = to;
-                return switch_context(std::move(from), self.context, c);
+                // Note: we set "returning" to true here to match a possible
+                // change in behavior when returning from actors without a
+                // context. On the one hand user could put code in a separate
+                // function, and the starting wait would be elided, but with
+                // this flag set it would have to defer when switching from
+                // empty to non-empty context. However the much more important
+                // difference is when this actor returns. With a separate
+                // function it would first switch to empty context and then
+                // returning to non-empty context would defer, but when we
+                // allow context switching without defer here, it would
+                // potentially run for a long time inside some unknown handler
+                // that initially resumed the context-less actor.
+                return self.context.manager().switch_from(
+                    from.manager(), c, /* returning */ true);
             }
 
             void await_resume() noexcept {
@@ -314,13 +277,11 @@ namespace coroactors::detail {
             }
 
             if (!bound.context) {
-                // Switching to an empty context, release without suspending
+                // Switching to an empty context, avoid suspending
                 auto from = std::move(context);
                 context = bound.context;
-                assert(from);
-                if (auto next = from.pop()) {
-                    from.scheduler().post(next);
-                }
+                context.manager().switch_from(
+                    from.manager(), nullptr, /* returning */ false);
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
@@ -336,13 +297,14 @@ namespace coroactors::detail {
                 return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
             }
 
-            // Reuse await_transform above for binding to continuation context
-            return await_transform(actor_context::bind_context_t{ continuation_context });
+            // Reuse await_transform above for binding to a continuation context
+            return await_transform(actor_context::bind_context_t{
+                continuation_context ? *continuation_context : no_actor_context
+            });
         }
 
         void check_context_initialized() const {
-            if (!context_initialized) {
-                [[unlikely]]
+            if (!context_initialized) [[unlikely]] {
                 throw std::logic_error("actor must co_await context first");
             }
         }
@@ -358,7 +320,7 @@ namespace coroactors::detail {
         auto await_transform(actor_context::caller_context_t) {
             check_context_initialized();
 
-            return return_context_awaiter_t{ continuation_context };
+            return return_context_awaiter_t{ continuation_context ? *continuation_context : no_actor_context };
         }
 
         auto await_transform(actor_context::current_context_t) {
@@ -373,29 +335,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                if (!self.context) {
-                    return c;
-                }
-                // We push current coroutine to the end of the queue
-                auto next = self.context.push(c);
-                if (next) {
-                    [[unlikely]]
-                    throw std::logic_error("Expected no continuation when pushing to a locked context");
-                }
-                // Check the front of the queue, there's at least one continuation now
-                next = self.context.pop();
-                if (!next) {
-                    [[unlikely]]
-                    throw std::logic_error("Expected at least one continuation after pushing to a locked context");
-                }
-                // Switch to the next coroutine in our context, unless preempted
-                auto& scheduler = self.context.scheduler();
-                if (scheduler.preempt()) {
-                    scheduler.defer(next);
-                    return std::noop_coroutine();
-                } else {
-                    return next;
-                }
+                return self.context.manager().yield(c);
             }
 
             void await_resume() noexcept {}
@@ -413,11 +353,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                if (!self.context) {
-                    return c;
-                }
-                self.context.scheduler().defer(c);
-                return std::noop_coroutine();
+                return self.context.manager().preempt(c);
             }
 
             void await_resume() noexcept {}
@@ -470,48 +406,17 @@ namespace coroactors::detail {
             }
 
             std::coroutine_handle<> operator()() noexcept {
-                if (auto next = context.push(std::exchange(c, {}))) {
-                    // Note: caller may have called resume recursively, from
-                    // a different actor even, and won't be expecting us to
-                    // keep going indefinitely. So we always reschedule.
-                    context.scheduler().post(next);
-                }
-                return std::noop_coroutine();
+                return context.manager().restore(std::exchange(c, {}));
             }
         };
 
-        static std::coroutine_handle<> wrap_restore_context(const actor_context& context, std::coroutine_handle<> c) {
-            if (!context) {
-                return c;
-            }
-
-            // Generate a wrapped continuation that will restore context on resume
+        /**
+         * Generates a wrapped continuation that restores context on resume
+         */
+        static std::coroutine_handle<> wrap_restore_context(
+                const actor_context& context, std::coroutine_handle<> c)
+        {
             return with_resume_callback(restore_context_callback{ context, c });
-        }
-
-        std::coroutine_handle<> wrap_restore_context(std::coroutine_handle<> c) {
-            return wrap_restore_context(context, c);
-        }
-
-        static void release_context(const actor_context& context) {
-            if (context) {
-                if (auto next = context.pop()) {
-                    context.scheduler().post(next);
-                }
-            }
-        }
-
-        static std::coroutine_handle<> next_from_context(const actor_context& context) {
-            if (context) {
-                if (auto next = context.pop()) {
-                    auto& scheduler = context.scheduler();
-                    if (!scheduler.preempt()) {
-                        return next;
-                    }
-                    scheduler.defer(next);
-                }
-            }
-            return std::noop_coroutine();
         }
 
         template<awaitable Awaitable>
@@ -551,7 +456,9 @@ namespace coroactors::detail {
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 noexcept(has_noexcept_await_suspend<Awaiter>)
             {
+                // The wrapped handle restores context before resuming
                 std::coroutine_handle<> k = wrap_restore_context(self.context, c);
+
                 // Note: we still have context locked, but after the call to
                 // Awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
@@ -562,7 +469,7 @@ namespace coroactors::detail {
                 } else if constexpr (has_await_suspend_bool<Awaiter>) {
                     if (!awaiter.await_suspend(std::move(k))) {
                         // Awaiter did not suspend, release context and resume
-                        release_context(context);
+                        context.manager().leave();
                         return k;
                     }
                 } else {
@@ -572,14 +479,14 @@ namespace coroactors::detail {
                         // Awaiter is asking us to resume some coroutine, but
                         // we cannot know if it is the same coroutine, even
                         // if it has the same address (it may have been
-                        // destroyed and reallocated again)
-                        release_context(context);
+                        // destroyed and reallocated again).
+                        context.manager().leave();
                         return k;
                     }
                 }
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return next_from_context(context);
+                return context.manager().next();
             }
 
             Result await_resume()
@@ -648,18 +555,27 @@ namespace coroactors::detail {
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 noexcept(has_noexcept_await_suspend<Awaiter>)
             {
-                std::coroutine_handle<> k = wrap_restore_context(new_context, c);
                 if (ready) {
-                    // Awaiter's await_ready returned true, we just need to change context
+                    // Awaiter's await_ready returned true, so we perform a
+                    // context switch here, as if returning from the awaiter.
+                    // This also handles return path for a context-less actor
+                    // that wraps a trivial awaitable in a context. It would
+                    // behavior as if switching to a new context, see a large
+                    // comment in switch_context_awaiter as to why.
                     assert(self.context != new_context);
-                    release_context(self.context);
+                    auto context = std::move(self.context);
                     self.context = new_context;
-                    return k;
+                    return self.context.manager().switch_from(
+                        context, c, /* returning */ true);
                 }
+
+                // The wrapped handle restores context before resuming
+                std::coroutine_handle<> k = wrap_restore_context(new_context, c);
+
                 // Note: we still have context locked, but after the call to
                 // Awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
-                auto context = self.context;
+                auto context = std::move(self.context);
                 // Change promise context to new context
                 self.context = new_context;
                 if constexpr (has_await_suspend_void<Awaiter>) {
@@ -667,8 +583,8 @@ namespace coroactors::detail {
                     awaiter.await_suspend(std::move(k));
                 } else if constexpr (has_await_suspend_bool<Awaiter>) {
                     if (!awaiter.await_suspend(std::move(k))) {
-                        // Awaiter did not suspend, release context and resume
-                        release_context(context);
+                        // Awaiter did not suspend, leave context and resume
+                        context.manager().leave();
                         return k;
                     }
                 } else {
@@ -679,13 +595,13 @@ namespace coroactors::detail {
                         // we cannot know if it is the same coroutine, even
                         // if it has the same address (it may have been
                         // destroyed and reallocated again)
-                        release_context(context);
+                        context.manager().leave();
                         return k;
                     }
                 }
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return next_from_context(context);
+                return context.manager().next();
             }
 
             Result await_resume()
@@ -717,7 +633,7 @@ namespace coroactors::detail {
 
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
-                continuation_context,
+                continuation_context ? *continuation_context : no_actor_context,
                 *this);
         }
 
@@ -773,19 +689,11 @@ namespace coroactors::detail {
             return actor_passthru_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
-        const actor_context& get_context() const {
-            return context;
-        }
-
-        bool ready() const {
-            return finished;
-        }
-
     private:
         stop_token token;
         actor_context context;
         std::coroutine_handle<> continuation;
-        actor_context continuation_context;
+        const actor_context* continuation_context{ nullptr };
         bool context_initialized = false;
         bool context_inherited = false;
         bool finished = false;
@@ -835,7 +743,7 @@ namespace coroactors::detail {
             auto& p = handle.promise();
             p.set_continuation(c);
             suspended = true;
-            return p.start();
+            return p.start_await();
         }
 
         std::add_rvalue_reference_t<T> await_resume() {
@@ -892,7 +800,7 @@ namespace coroactors::detail {
             auto& p = handle.promise();
             p.set_continuation(c);
             suspended = true;
-            return p.start();
+            return p.start_await();
         }
 
         result<T>&& await_resume() {

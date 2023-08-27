@@ -288,10 +288,19 @@ TEST(WithContinuationTest, CompleteWithException) {
 }
 
 struct test_scheduler : public actor_scheduler {
-    std::deque<std::coroutine_handle<>> queue;
+    struct continuation_t {
+        std::coroutine_handle<> h;
+        actor_context c;
 
-    void post(std::coroutine_handle<> h) override {
-        queue.push_back(h);
+        void resume() {
+            c.manager().resume(h);
+        }
+    };
+
+    std::deque<continuation_t> queue;
+
+    void post(std::coroutine_handle<> h, actor_context&& c) override {
+        queue.push_back({ h, std::move(c) });
     }
 
     bool preempt() const override {
@@ -299,51 +308,56 @@ struct test_scheduler : public actor_scheduler {
     }
 
     void run_next() {
-        auto h = std::move(queue.front());
+        auto cont = std::move(queue.front());
         queue.pop_front();
-        h.resume();
+        cont.resume();
     }
 };
 
 template<class Callback>
-actor<void> actor_with_continuation(const actor_context& context, int* stage, Callback callback) {
+actor<void> actor_with_continuation(const actor_context& context, int& stage, Callback callback) {
     co_await context();
-    *stage = 1;
+    stage = 1;
+    co_await actor_context::preempt;
+    stage = 2;
     co_await with_continuation(callback);
-    *stage = 2;
+    stage = 3;
 }
 
-actor<int> actor_with_result(const actor_context& context, int result) {
+actor<int> actor_with_result(const actor_context& context, int& stage, int result) {
     co_await context();
+    stage = 1;
     co_return result;
 }
 
 TEST(WithContinuationTest, ActorCompleteSync) {
     int stage = 0;
+    int rstage = 0;
     int result = 0;
 
     test_scheduler scheduler;
     actor_context context(scheduler);
 
     // Start the first actor function
-    actor_with_continuation(context, &stage, [&](continuation<> c) {
-        EXPECT_EQ(stage, 1);
+    actor_with_continuation(context, stage, [&](continuation<> c) {
+        EXPECT_EQ(stage, 2);
         c.resume();
-        EXPECT_EQ(stage, 1);
+        EXPECT_EQ(stage, 2);
     }).detach();
 
-    // It should initially block on context activation
-    EXPECT_EQ(stage, 0);
+    // It should initially block at the preemption point
+    EXPECT_EQ(stage, 1);
     EXPECT_EQ(scheduler.queue.size(), 1);
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(context, 42),
+        actor_with_result(context, rstage, 42),
         [&](int value) {
             result = value;
         });
 
-    // It will be enqueued after the first one
+    // It will be enqueued after the first one (in the mailbox)
+    EXPECT_EQ(rstage, 0);
     EXPECT_EQ(result, 0);
     ASSERT_EQ(scheduler.queue.size(), 1);
 
@@ -351,13 +365,15 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     scheduler.run_next();
 
     // The first function should complete and transfer to the second one
-    EXPECT_EQ(stage, 2);
+    EXPECT_EQ(stage, 3);
+    EXPECT_EQ(rstage, 1);
     EXPECT_EQ(result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 }
 
 TEST(WithContinuationTest, ActorCompleteAsync) {
     int stage = 0;
+    int rstage = 0;
     int result = 0;
 
     test_scheduler scheduler;
@@ -366,23 +382,24 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     continuation<> suspended;
 
     // Start the first actor function
-    actor_with_continuation(context, &stage, [&](continuation<> c) {
-        EXPECT_EQ(stage, 1);
+    actor_with_continuation(context, stage, [&](continuation<> c) {
+        EXPECT_EQ(stage, 2);
         suspended = c;
     }).detach();
 
-    // It should initially block on context activation
-    EXPECT_EQ(stage, 0);
+    // It should initially block at the preemption point
+    EXPECT_EQ(stage, 1);
     EXPECT_EQ(scheduler.queue.size(), 1);
 
     // Start another actor function
     detach_awaitable(
-        actor_with_result(context, 42),
+        actor_with_result(context, rstage, 42),
         [&](int value) {
             result = value;
         });
 
-    // It will be enqueued after the first one
+    // It will be enqueued after the first one (in the mailbox)
+    EXPECT_EQ(rstage, 0);
     EXPECT_EQ(result, 0);
     ASSERT_EQ(scheduler.queue.size(), 1);
 
@@ -390,24 +407,25 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     scheduler.run_next();
 
     // The first function should be suspended now
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     ASSERT_TRUE(suspended);
 
     // However the second function should have started running and completed
+    EXPECT_EQ(rstage, 1);
     EXPECT_EQ(result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 
     // Resume the continuation, it should not monopolize our thread here
     suspended.resume();
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     ASSERT_EQ(scheduler.queue.size(), 1);
 
     // Activate the context
     scheduler.run_next();
 
     // It should now complete
-    EXPECT_EQ(stage, 2);
+    EXPECT_EQ(stage, 3);
     EXPECT_EQ(scheduler.queue.size(), 0);
 }
 
@@ -448,9 +466,9 @@ TEST(WithContinuationTest, DestroyUnwind) {
 
     detach_awaitable(
         actor_wrapper(
-            actor_with_continuation(no_actor_context, &stage,
+            actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
-                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 3);
                     suspended = c;
                 }),
@@ -459,7 +477,7 @@ TEST(WithContinuationTest, DestroyUnwind) {
             finished = true;
         });
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     ASSERT_TRUE(suspended);
     EXPECT_FALSE(finished);
     ASSERT_EQ(refs, 2);
@@ -479,9 +497,9 @@ TEST(WithContinuationTest, DestroyFromCallback) {
 
     detach_awaitable(
         actor_wrapper(
-            actor_with_continuation(no_actor_context, &stage,
+            actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<>&& c) {
-                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 3);
                     c.reset();
                 }),
@@ -490,7 +508,7 @@ TEST(WithContinuationTest, DestroyFromCallback) {
             finished = true;
         });
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     EXPECT_FALSE(finished);
     EXPECT_EQ(refs, 0);
 }
@@ -527,21 +545,21 @@ TEST(WithContinuationTest, DestroyBottomUp) {
 
     auto coro = simple_run(
         actor_wrapper(
-            actor_with_continuation(no_actor_context, &stage,
+            actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
-                    EXPECT_EQ(stage, 1);
+                    EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 3);
                     suspended = c;
                 }),
             &refs));
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 2);
     ASSERT_TRUE(suspended);
 
     coro.handle.destroy();
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 0);
 }
 
@@ -557,7 +575,7 @@ TEST(WithContinuationTest, StopToken) {
         with_stop_token(
             source.get_token(),
             actor_wrapper(
-                actor_with_continuation(no_actor_context, &stage,
+                actor_with_continuation(no_actor_context, stage,
                     [&](continuation<> c) {
                         suspended = c;
                     }),
@@ -566,7 +584,7 @@ TEST(WithContinuationTest, StopToken) {
             finished = true;
         });
 
-    EXPECT_EQ(stage, 1);
+    EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 1);
     ASSERT_TRUE(suspended);
     EXPECT_TRUE(suspended.get_stop_token().stop_possible());

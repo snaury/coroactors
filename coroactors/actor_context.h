@@ -6,88 +6,49 @@
 #include <coroactors/detail/mailbox.h>
 #include <cassert>
 #include <coroutine>
+#include <stdexcept>
+#include <utility>
 
 namespace coroactors {
 
     class actor_context {
-        struct impl {
-            std::atomic<size_t> refcount{ 0 };
-            actor_scheduler& scheduler;
-            detail::mailbox<std::coroutine_handle<>> mailbox;
+        friend class detail::actor_context_manager;
 
-            explicit impl(class actor_scheduler& s)
-                : scheduler(s)
-            {
-                // Change mailbox to initially unlocked
-                if (!mailbox.try_unlock()) {
-                    assert(false && "Unexpected failure to unlock the mailbox");
-                }
-            }
-
-            void add_ref() noexcept {
-                refcount.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            size_t release_ref() noexcept {
-                return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
-            }
-        };
+        actor_context(detail::actor_context_state* ptr) noexcept
+            : ptr(ptr)
+        {}
 
     public:
         actor_context() noexcept = default;
 
         actor_context(actor_scheduler& s)
-            : impl_(new impl(s))
+            : ptr(new detail::actor_context_state(s))
         {}
 
         explicit operator bool() const {
-            return bool(impl_);
+            return bool(ptr);
         }
 
         friend bool operator==(const actor_context& a, const actor_context& b) {
-            return a.impl_.get() == b.impl_.get();
-        }
-
-        friend bool operator!=(const actor_context& a, const actor_context& b) {
-            return a.impl_.get() != b.impl_.get();
+            return a.ptr == b.ptr;
         }
 
         actor_scheduler& scheduler() const {
-            return impl_->scheduler;
-        }
-
-        /**
-         * Add a new continuation to this actor context
-         *
-         * Returns it if this context becomes locked and runnable as the result
-         * of this push, which could either be resumed directly or scheduled
-         * using a scheduler. Returns nullptr if this context is currently
-         * locked and/or running, possibly in another thread.
-         */
-        std::coroutine_handle<> push(std::coroutine_handle<> c) const {
-            assert(c && "Attempt to push a nullptr coroutine handle");
-            if (impl_->mailbox.push(c)) {
-                std::coroutine_handle<> k = impl_->mailbox.pop_default();
-                assert(k == c);
-                return k;
-            } else {
-                return nullptr;
+            if (!ptr) [[unlikely]] {
+                throw std::logic_error("empty context doesn't have a scheduler");
             }
+            return ptr->scheduler;
         }
 
+    public:
         /**
-         * Returns the next continuation from this actor context or nullptr
-         *
-         * This context must be locked and running by the caller, otherwise the
-         * behavior is undefined. When nullptr is returned the context is
-         * unlocked and no longer runnable, which may become locked by another
-         * push possibly in another concurrent thread.
+         * Returns continuations manager
          */
-        std::coroutine_handle<> pop() const {
-            std::coroutine_handle<> k = impl_->mailbox.pop_default();
-            return k;
+        detail::actor_context_manager manager() const {
+            return detail::actor_context_manager(ptr.get());
         }
 
+    public:
         /**
          * Returns an awaiter that resumes at the specified deadline, or when
          * current stop token is cancelled. The result will be true on deadline
@@ -95,7 +56,7 @@ namespace coroactors {
          */
         auto sleep_until(actor_scheduler::time_point deadline) const {
             return detail::sleep_until_awaiter(
-                impl_ ? &impl_->scheduler : nullptr, deadline);
+                ptr ? &ptr->scheduler : nullptr, deadline);
         }
 
         /**
@@ -114,7 +75,7 @@ namespace coroactors {
         auto with_deadline(actor_scheduler::time_point deadline, Awaitable&& awaitable) const {
             return detail::with_deadline_awaiter<Awaitable>(
                 std::forward<Awaitable>(awaitable),
-                impl_ ? &impl_->scheduler : nullptr, deadline);
+                ptr ? &ptr->scheduler : nullptr, deadline);
         }
 
         /**
@@ -126,6 +87,7 @@ namespace coroactors {
                 std::forward<Awaitable>(awaitable));
         }
 
+    public:
         /**
          * A placeholder type for `actor_context::operator()`
          */
@@ -252,8 +214,9 @@ namespace coroactors {
          */
         static constexpr current_stop_token_t current_stop_token{};
 
+
     private:
-        detail::intrusive_ptr<impl> impl_;
+        detail::intrusive_ptr<detail::actor_context_state> ptr;
     };
 
     /**
@@ -262,3 +225,15 @@ namespace coroactors {
     inline const actor_context no_actor_context{};
 
 } // namespace coroactors
+
+namespace coroactors::detail {
+
+    inline void actor_context_manager::post(std::coroutine_handle<> h) const {
+        ptr->scheduler.post(h, actor_context(ptr));
+    }
+
+    inline void actor_context_manager::defer(std::coroutine_handle<> h) const {
+        ptr->scheduler.defer(h, actor_context(ptr));
+    }
+
+} // namespace coroactors::detail

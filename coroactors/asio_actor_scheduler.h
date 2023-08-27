@@ -32,19 +32,19 @@ namespace coroactors {
                 return clock_type::now() >= *deadline;
             }
 
-            // Not running actors, always preempt
+            // Not running actors right now, always preempt
             return true;
         }
 
-        void post(std::coroutine_handle<> h) override {
-            boost::asio::post(executor_, [h, d = preempt_duration_]() noexcept {
-                run_with_preemption(h, d);
+        void post(std::coroutine_handle<> h, actor_context&& c) override {
+            boost::asio::post(executor_, [h, c = std::move(c), d = preempt_duration_]() noexcept {
+                resume_with_preemption(h, c, d);
             });
         }
 
-        void defer(std::coroutine_handle<> h) override {
-            boost::asio::defer(executor_, [h, d = preempt_duration_]() noexcept {
-                run_with_preemption(h, d);
+        void defer(std::coroutine_handle<> h, actor_context&& c) override {
+            boost::asio::defer(executor_, [h, c = std::move(c), d = preempt_duration_]() noexcept {
+                resume_with_preemption(h, c, d);
             });
         }
 
@@ -56,20 +56,21 @@ namespace coroactors {
 
             // This object manages its own lifetime
             detail::intrusive_ptr<timer_t> timer(
-                new timer_t(executor_, d, std::move(c), preempt_duration_));
+                new timer_t(executor_, d, std::move(c)));
             timer->start(std::move(t));
         }
 
     private:
-        template<class Callback>
-        static void run_with_preemption(Callback&& callback, duration preempt_duration) {
+        static void resume_with_preemption(std::coroutine_handle<> h,
+                const actor_context& c, duration preempt_duration)
+        {
             if (!preempt_deadline) {
                 time_point deadline = clock_type::now() + preempt_duration;
                 preempt_deadline = &deadline;
-                callback();
+                c.manager().resume(h);
                 preempt_deadline = nullptr;
             } else {
-                callback();
+                c.manager().resume(h);
             }
         }
 
@@ -77,11 +78,9 @@ namespace coroactors {
         class timer_t {
         public:
             timer_t(const executor_type& executor, time_point deadline,
-                    schedule_callback_type&& callback,
-                    duration preempt_duration)
+                    schedule_callback_type&& callback)
                 : timer(executor, deadline)
                 , callback(std::move(callback))
-                , preempt_duration(preempt_duration)
             {}
 
             timer_t(const timer_t&) = delete;
@@ -111,9 +110,7 @@ namespace coroactors {
 
         private:
             void finish(const boost::system::error_code& ec) noexcept {
-                run_with_preemption([&]{
-                        callback(ec ? false : true);
-                    }, preempt_duration);
+                callback(ec ? false : true);
             }
 
         private:
@@ -136,7 +133,6 @@ namespace coroactors {
             std::atomic<size_t> refcount{ 0 };
             boost::asio::steady_timer timer;
             schedule_callback_type callback;
-            duration preempt_duration;
             std::optional<stop_callback<cancel_t>> cancel;
         };
 

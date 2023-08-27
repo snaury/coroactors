@@ -757,10 +757,19 @@ TEST(WithTaskGroupTest, ResultType) {
 }
 
 struct test_scheduler : public actor_scheduler {
-    std::deque<std::coroutine_handle<>> queue;
+    struct continuation_t {
+        std::coroutine_handle<> h;
+        actor_context c;
 
-    void post(std::coroutine_handle<> h) override {
-        queue.push_back(h);
+        void resume() {
+            c.manager().resume(h);
+        }
+    };
+
+    std::deque<continuation_t> queue;
+
+    void post(std::coroutine_handle<> h, actor_context&& c) override {
+        queue.push_back({ h, std::move(c) });
     }
 
     bool preempt() const override {
@@ -768,9 +777,9 @@ struct test_scheduler : public actor_scheduler {
     }
 
     void run_next() {
-        auto h = std::move(queue.front());
+        auto cont = std::move(queue.front());
         queue.pop_front();
-        h.resume();
+        cont.resume();
     }
 };
 
@@ -830,11 +839,6 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
             finished = true;
             success = result.has_value();
         });
-
-    EXPECT_EQ(stage, 1); // waiting for context activation
-    ASSERT_EQ(scheduler.queue.size(), 1u);
-
-    scheduler.run_next();
 
     EXPECT_EQ(stage, 4); // waiting for the first value
     ASSERT_EQ(provider.queue.size(), 2u);

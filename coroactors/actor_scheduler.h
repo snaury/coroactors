@@ -7,6 +7,8 @@
 
 namespace coroactors {
 
+    class actor_context;
+
     /**
      * A generic actor scheduler interface
      */
@@ -30,30 +32,31 @@ namespace coroactors {
         }
 
         /**
-         * Post h to resume, likely using a global queue
+         * Post h to resume with context c
          *
-         * Should be used when tasks fork, e.g. when actor coroutine is
-         * starting and switches from an empty context, or when we start a
-         * different chain of continuations in parallel to currently executing.
+         * Should be used when tasks fork, e.g. when it is desirable for h to
+         * run in parallel with the current activity.
          *
-         * Usually slow, corresponds to asio::post
+         * Corresponds to asio::post and relationship.fork.
+         *
+         * May cause an additional thread to wake up, so usually slow.
          */
-        virtual void post(std::coroutine_handle<> h) = 0;
+        virtual void post(std::coroutine_handle<> h, actor_context&& c) = 0;
 
         /**
-         * Defer h to resume, likely using a local queue
+         * Defer h to resume with context c
          *
-         * Could be used when a chain of continuations cannot continue (e.g.
-         * returning from an external async operation) and when we are sure
-         * we would return to scheduler soon. Care must be taken not to use
-         * this when current thread will be busy with other work without
-         * returning to scheduler, as h would be stuck in local queue until
-         * that time.
+         * Should be used when current task is replacing itself with another
+         * task, i.e. it's a continuation via a scheduler.
          *
-         * Usually fast, corresponds to asio::defer
+         * Corresponds to asio::defer and relationship.continuation.
+         *
+         * The continuation will not run until execution returns to scheduler,
+         * so it must be used with care. The upside is no waking up threads,
+         * since there is no additional useful work.
          */
-        virtual void defer(std::coroutine_handle<> h) {
-            post(h); // default to post
+        virtual void defer(std::coroutine_handle<> h, actor_context&& c) {
+            post(h, std::move(c)); // default to post
         }
 
         /**
