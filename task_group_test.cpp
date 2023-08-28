@@ -564,7 +564,7 @@ actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider)
     co_await no_actor_context();
 
     try {
-        co_await with_task_group<int>([&](const task_group<int>& group) -> actor<void> {
+        co_await with_task_group<int>([&](task_group<int>& group) -> actor<void> {
             co_await actor_context::caller_context();
 
             group.add(provider.get());
@@ -705,7 +705,7 @@ actor<void> do_with_task_group_result_type(int& stage, value_provider<int>& prov
     co_await no_actor_context();
 
     auto result = co_await with_task_group<int>(
-        [&](const task_group<int>& group) -> actor<move_only_int> {
+        [&](task_group<int>& group) -> actor<move_only_int> {
             co_await actor_context::caller_context();
 
             group.add(provider.get());
@@ -795,7 +795,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, va
     stage = 2;
     int result = co_await with_stop_token(
         stop_token(),
-        with_task_group<int>([&](const task_group<int>& group) -> actor<int> {
+        with_task_group<int>([&](task_group<int>& group) -> actor<int> {
             stage = 3;
             co_await actor_context::caller_context();
 
@@ -869,15 +869,16 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
 
-actor<void> do_wait_ready_with_token(int& stage, actor_scheduler& scheduler, value_provider<int>& provider,
-        stop_token token, bool expected)
+template<class WhenReadyCall>
+actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, value_provider<int>& provider,
+        WhenReadyCall when_ready, bool expected)
 {
     stage = 1;
     co_await actor_context(scheduler)();
 
     stage = 2;
     int result = co_await with_task_group<int>(
-        [&](const task_group<int>& group) -> actor<int> {
+        [&](task_group<int>& group) -> actor<int> {
             stage = 3;
             co_await actor_context::caller_context();
 
@@ -885,7 +886,8 @@ actor<void> do_wait_ready_with_token(int& stage, actor_scheduler& scheduler, val
             group.add(provider.get());
 
             stage = 4;
-            bool r = co_await with_stop_token(token, group.wait_ready());
+            bool r = co_await when_ready(group);
+            // bool r = co_await with_stop_token(token, group.when_ready());
             EXPECT_EQ(r, expected);
 
             stage = 5;
@@ -894,7 +896,10 @@ actor<void> do_wait_ready_with_token(int& stage, actor_scheduler& scheduler, val
             stage = 6;
             int b = co_await group.next();
 
-            EXPECT_FALSE((co_await actor_context::current_stop_token).stop_requested());
+            // Note: gcc fails with 'insufficient contextual information' when
+            // a co_await expression with a method call is in paranthesis.
+            auto token = co_await actor_context::current_stop_token;
+            EXPECT_FALSE(token.stop_requested());
 
             stage = 7;
             co_return a + b;
@@ -913,8 +918,12 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
     bool finished = false;
     bool success = false;
 
+    auto when_ready = [&](auto& group) {
+        return with_stop_token(source.get_token(), group.when_ready());
+    };
+
     detach_awaitable(
-        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), true).result(),
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, true).result(),
         [&](auto&& result) {
             finished = true;
             success = result.has_value();
@@ -951,8 +960,12 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
     bool finished = false;
     bool success = false;
 
+    auto when_ready = [&](auto& group) {
+        return with_stop_token(source.get_token(), group.when_ready());
+    };
+
     detach_awaitable(
-        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), false).result(),
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
         [&](auto&& result) {
             finished = true;
             success = result.has_value();
@@ -995,30 +1008,104 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
     bool finished = false;
     bool success = false;
 
-    source.request_stop();
+    auto when_ready = [&](auto& group) {
+        source.request_stop();
+        return with_stop_token(source.get_token(), group.when_ready());
+    };
 
     detach_awaitable(
-        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), false).result(),
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
         [&](auto&& result) {
             finished = true;
             success = result.has_value();
         });
 
-    EXPECT_EQ(stage, 4); // waiting in wait_next
+    EXPECT_EQ(stage, 5); // waiting for the first value
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
     auto b = provider.take();
-
-    EXPECT_EQ(stage, 4); // waiting on wait_next (context resume)
-    ASSERT_EQ(scheduler.queue.size(), 1u);
-    scheduler.run_next();
-    EXPECT_EQ(stage, 5); // waiting for the first value
 
     a.resume(42);
     EXPECT_EQ(stage, 5); // waiting for the first value (context resume)
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 6); // waiting for the second value
+
+    b.resume(58);
+    EXPECT_EQ(stage, 6); // waiting for the second value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 8); // finished
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(success);
+
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+template<class Awaiter, class Hook>
+struct await_suspend_hook {
+    Awaiter awaiter;
+    Hook hook;
+
+    bool await_ready() {
+        return awaiter.await_ready();
+    }
+
+    decltype(auto) await_suspend(std::coroutine_handle<> h) {
+        hook();
+        return awaiter.await_suspend(h);
+    }
+
+    decltype(auto) await_resume() {
+        return awaiter.await_resume();
+    }
+};
+
+template<class Awaiter, class Hook>
+await_suspend_hook(Awaiter, Hook) -> await_suspend_hook<Awaiter, Hook>;
+
+TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
+    int stage = 0;
+    test_scheduler scheduler;
+    value_provider<int> provider;
+    stop_source source;
+
+    bool finished = false;
+    bool success = false;
+
+    auto when_ready = [&](auto& group) {
+        return await_suspend_hook{
+            with_stop_token(source.get_token(), group.when_ready()),
+            [&]{
+                source.request_stop();
+            },
+        };
+    };
+
+    detach_awaitable(
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
+        [&](auto&& result) {
+            finished = true;
+            success = result.has_value();
+        });
+
+    ASSERT_EQ(provider.queue.size(), 2u);
+    auto a = provider.take();
+    auto b = provider.take();
+
+    EXPECT_EQ(stage, 4); // waiting in wait_next (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+
+    EXPECT_EQ(stage, 5); // waiting for the first value
+    ASSERT_EQ(scheduler.queue.size(), 0u);
+
+    a.resume(42);
+    EXPECT_EQ(stage, 5); // waiting for the first value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 6); // waiting for the second value
+    ASSERT_EQ(scheduler.queue.size(), 0u);
 
     b.resume(58);
     EXPECT_EQ(stage, 6); // waiting for the second value (context resume)

@@ -128,7 +128,7 @@ public:
         // The template parameter specifies type of a single task result
         // The co_await will return whatever result the lambda returns
         co_return co_await with_task_group<Response>(
-            [&](const task_group<Response>& group) -> actor<FastResponse> {
+            [&](task_group<Response>& group) -> actor<FastResponse> {
                 // We are guaranteed to run in the same context as the caller
                 // All actor functions must co_await context, so we do just that
                 co_await actor_context::caller_context();

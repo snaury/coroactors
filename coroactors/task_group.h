@@ -5,12 +5,14 @@ namespace coroactors {
 
     /**
      * Task group allows waiting for multiple awaitables with the same result
-     * type T and processing results in the order they complete. Awaitables
+     * type T and awaiting for results in the order they complete. Awaitables
      * are started when added and may run concurrently with the owner of the
-     * task group. The task group object itself is strictly single-threaded
-     * however and must not be shared between coroutines. The task group is
-     * destroyed all unfinished tasks are detached and their results will be
-     * ignored.
+     * task group. Methods in the task group, unless otherwise specified, are
+     * not thread-safe, cannot be called from multiple threads simultaneously,
+     * and only one coroutine may await on the task group at any one time.
+     *
+     * When the task group is destroyed all unfinished tasks are detached,
+     * cancelled, and their results (even exceptions) will be ignored.
      */
     template<class T>
     class task_group {
@@ -44,7 +46,7 @@ namespace coroactors {
          * Adds a new awaitable to the task group and returns its index
          */
         template<class Awaitable>
-        size_t add(Awaitable&& awaitable) const {
+        size_t add(Awaitable&& awaitable) {
             assert(sink_);
             auto coro = detail::make_task_group_coroutine<T>(std::forward<Awaitable>(awaitable));
             return coro.start(sink_, source_.get_token());
@@ -59,7 +61,7 @@ namespace coroactors {
         }
 
         /**
-         * Returns true if task group has at least one unawaited task
+         * Returns true when task group has at least one unawaited task
          */
         explicit operator bool() const {
             assert(sink_);
@@ -67,19 +69,23 @@ namespace coroactors {
         }
 
         /**
-         * Returns true if there is at least one result that can be awaited without blocking
+         * Returns true when there is at least one result which can be awaited without blocking
          */
         bool ready() const {
             assert(sink_);
-            return sink_->await_ready();
+            return sink_->ready();
         }
 
         /**
-         * Wait until ready() returns true, or the request is cancelled
+         * Returns when ready() starts to return true when awaited, or when
+         * then caller (not the task group) is cancelled.
+         *
+         * Returns the result of calling ready(), i.e. it would return false
+         * when this call returns because is was cancelled.
          */
-        detail::task_group_wait_ready_awaiter<T> wait_ready() const {
+        detail::task_group_when_ready_awaiter<T> when_ready() const {
             assert(sink_);
-            return detail::task_group_wait_ready_awaiter<T>{ sink_.get() };
+            return detail::task_group_when_ready_awaiter<T>{ sink_.get() };
         }
 
         /**
@@ -126,8 +132,12 @@ namespace coroactors {
 
         /**
          * Returns the next available result value when awaited
+         *
+         * Note: this call cannot be cancelled after it starts awaiting, and
+         * will only return when at least one task finishes and its result can
+         * be consumed. Use `when_ready()` for awaiting with cancellation.
          */
-        next_awaiter_t next() const noexcept {
+        next_awaiter_t next() {
             assert(sink_);
             return next_awaiter_t{ sink_.get() };
         }
@@ -176,21 +186,27 @@ namespace coroactors {
 
         /**
          * Returns the next available result wrapper when awaited
+         *
+         * Note: this call cannot be cancelled after it starts awaiting, and
+         * will only return when at least one task finishes and its result can
+         * be consumed. Use `when_ready()` for awaiting with cancellation.
          */
-        next_result_awaiter_t next_result() const noexcept {
+        next_result_awaiter_t next_result() {
             return next_result_awaiter_t{ sink_.get() };
         }
 
         /**
          * Requests all added tasks to stop
+         *
+         * This method is thread-safe and can be called by any thread.
          */
-        void request_stop() const noexcept {
+        void request_stop() noexcept {
             source_.request_stop();
         }
 
     private:
         sink_ptr sink_{ new sink_type };
-        mutable stop_source source_;
+        stop_source source_;
     };
 
 } // namespace coroactors

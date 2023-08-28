@@ -5,10 +5,10 @@
 namespace coroactors::detail {
 
     /**
-     * Matches callback that accepts a group const reference and returns an awaitable
+     * Matches callback that accepts a group lvalue reference and returns an awaitable
      */
     template<class Callback, class T>
-    concept with_task_group_callback = requires(Callback callback, const task_group<T>& group) {
+    concept with_task_group_callback = requires(Callback callback, task_group<T> group) {
         { callback(group) } -> awaitable;
     };
 

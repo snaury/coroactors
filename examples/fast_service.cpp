@@ -37,7 +37,7 @@ public:
         co_await context();
 
         co_return co_await with_task_group<SlowService::Response>(
-            [&](const task_group<SlowService::Response>& group) -> actor<Response> {
+            [&](task_group<SlowService::Response>& group) -> actor<Response> {
                 co_await actor_context::caller_context();
 
                 for (const auto& service : services) {

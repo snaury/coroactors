@@ -35,7 +35,7 @@ namespace coroactors::detail {
             : scheduler(s)
         {
             // Change mailbox to initially unlocked
-            if (!mailbox.try_unlock()) [[unlikely]] {
+            if (!mailbox_.try_unlock()) [[unlikely]] {
                 throw std::logic_error("unexpected failure to initially unlock the mailbox");
             }
         }
@@ -86,8 +86,8 @@ namespace coroactors::detail {
          */
         std::coroutine_handle<> push(std::coroutine_handle<> c) {
             assert(c && "Attempt to push a nullptr coroutine handle");
-            if (mailbox.push(c)) {
-                std::coroutine_handle<> k = mailbox.pop_default();
+            if (mailbox_.push(c)) {
+                std::coroutine_handle<> k = mailbox_.pop_default();
                 assert(k == c);
                 return k;
             } else {
@@ -104,7 +104,7 @@ namespace coroactors::detail {
          * locked by another push, even concurrently in another thread.
          */
         std::coroutine_handle<> pop() {
-            std::coroutine_handle<> k = mailbox.pop_default();
+            std::coroutine_handle<> k = mailbox_.pop_default();
             return k;
         }
 
@@ -249,7 +249,7 @@ namespace coroactors::detail {
     private:
         std::atomic<size_t> refcount{ 0 };
         actor_scheduler& scheduler;
-        mailbox<std::coroutine_handle<>> mailbox;
+        mailbox<std::coroutine_handle<>> mailbox_;
 #if COROACTORS_EXACT_RUNNING_CONTEXT
         actor_context_state* prev{ nullptr };
         size_t next_count = 0;

@@ -7,6 +7,7 @@
 #include <cassert>
 #include <coroutine>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace coroactors::detail {
@@ -84,9 +85,6 @@ namespace coroactors::detail {
          * destructor to make sure pending results are deallocated.
         */
         void detach() noexcept {
-            // Note: detach is usually called from the task group, and it holds
-            // a strong reference to the sink. However we also call detach from
-            // destructor and usually it's already detached.
             void* headValue = last_ready.exchange(reinterpret_cast<void*>(MarkerDetached), std::memory_order_acq_rel);
             if (headValue) {
                 if (headValue == reinterpret_cast<void*>(MarkerDetached)) {
@@ -119,8 +117,8 @@ namespace coroactors::detail {
         std::coroutine_handle<> push(std::unique_ptr<task_group_result_node<T>>&& result) noexcept {
             // Note: we don't need acquire here to synchronize with another
             // push. This is because we don't touch anything stored inside that
-            // pointer ourselves, and publishing a new head is part of a releas
-            // sequence.
+            // pointer ourselves, and publishing a new head is part of a
+            // release sequence.
             void* headValue = last_ready.load(std::memory_order_relaxed);
             for (;;) {
                 if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) {
@@ -142,7 +140,7 @@ namespace coroactors::detail {
                     // Task group is detached, discard all results
                     break;
                 }
-                // Note: MarkerCancelled is just a marker, the real head is nullptr
+                // Note: MarkerCancelled is just a flag, the real head is nullptr
                 task_group_result_node<T>* head =
                     headValue != reinterpret_cast<void*>(MarkerCancelled)
                         ? reinterpret_cast<task_group_result_node<T>*>(headValue)
@@ -161,19 +159,69 @@ namespace coroactors::detail {
         }
 
         /**
-         * We return true when at least one result is already available
+         * Returns true when at least one result is already available
+         *
+         * Note it is allowed to call ready() while another coroutine is
+         * awaiting on a task group. For await_ready() it is not.
          */
-        bool await_ready() noexcept {
-            return ready_queue || last_ready.load(std::memory_order_relaxed);
+        bool ready() const noexcept {
+            if (ready_queue) {
+                return true;
+            }
+
+            void* headValue = last_ready.load(std::memory_order_relaxed);
+            if (headValue) {
+                // Not ready: another coroutine is awaiting
+                if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) [[unlikely]] {
+                    return false;
+                }
+                // These indicate a data race
+                assert(headValue != reinterpret_cast<void*>(MarkerDetached));
+                assert(headValue != reinterpret_cast<void*>(MarkerCancelled));
+                return true;
+            }
+
+            // Currently empty
+            return false;
+        }
+
+        /**
+         * Returns true when at least one result is already available
+         */
+        bool await_ready() const {
+            if (continuation) [[unlikely]] {
+                // Note: this only protects against synchronized coroutines
+                // calling awaiting methods at the same time. It does not
+                // prevent data races.
+                throw std::logic_error("task group cannot be awaited by multiple coroutines");
+            }
+
+            if (ready_queue) {
+                return true;
+            }
+
+            void* headValue = last_ready.load(std::memory_order_relaxed);
+            if (headValue) {
+                // These indicate a data race
+                assert(headValue != reinterpret_cast<void*>(MarkerDetached));
+                assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
+                assert(headValue != reinterpret_cast<void*>(MarkerCancelled));
+                return true;
+            }
+
+            // Currently empty
+            return false;
         }
 
         /**
          * Tries to register c as the next result continuation, and returns
-         * noop_coroutine on success. If there's a race and new result is
-         * discovered will return c to resume immediately.
+         * noop_coroutine on success. If there's a race and new result or a
+         * concurrent cancellation is discovered it will return c to resume
+         * immediately.
          */
         std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
             assert(!ready_queue && "Caller suspending with non-empty ready queue");
+            assert(!continuation && "Caller suspending with another continuation");
             continuation = c;
             void* headValue = last_ready.load(std::memory_order_relaxed);
             for (;;) {
@@ -183,7 +231,7 @@ namespace coroactors::detail {
                     if (!last_ready.compare_exchange_weak(headValue, reinterpret_cast<void*>(MarkerAwaiting), std::memory_order_release)) {
                         continue;
                     }
-                    // Continuation may already be waking up on another thread
+                    // Continuation may already be waking up in another thread
                     return std::noop_coroutine();
                 }
                 if (headValue == reinterpret_cast<void*>(MarkerCancelled)) {
@@ -192,7 +240,7 @@ namespace coroactors::detail {
                     if (!last_ready.compare_exchange_weak(headValue, nullptr, std::memory_order_acquire)) {
                         continue;
                     }
-                    // We removed the cancellation flag, resume now
+                    // We removed a cancellation flag, resume now
                     break;
                 }
                 // Lost the race: ready queue is not empty
@@ -208,9 +256,11 @@ namespace coroactors::detail {
          * Tries to cancel a currently pending await and returns the removed
          * continuation on success.
          *
-         * When concurrent is true will also try to set a cancellation flag on
-         * an empty result queue (no awaiter yet), so a suspend attempt is
-         * properly cancelled.
+         * When concurrent is true will try to set a concurrent cancellation
+         * flag on an empty result queue (no awaiter yet), so a suspend attempt
+         * is properly cancelled after a race. When concurrent is false (the
+         * default) any already existing cancellation flag is also cleaned up
+         * instead.
          */
         std::coroutine_handle<> await_cancel(bool concurrent = false) noexcept {
             void* headValue = last_ready.load(std::memory_order_relaxed);
@@ -223,14 +273,14 @@ namespace coroactors::detail {
                     return std::exchange(continuation, {});
                 }
                 if (headValue == reinterpret_cast<void*>(MarkerCancelled) && !concurrent) {
-                    // Remove the cancellation mark
+                    // Remove an existing cancellation flag and return
                     if (!last_ready.compare_exchange_weak(headValue, nullptr, std::memory_order_acquire)) {
                         continue;
                     }
                     break;
                 }
                 if (!headValue && concurrent) {
-                    // Mark current head as concurrently cancelled
+                    // Mark current head as concurrently cancelled and return
                     if (!last_ready.compare_exchange_weak(headValue, reinterpret_cast<void*>(MarkerCancelled), std::memory_order_release)) {
                         continue;
                     }
@@ -250,6 +300,7 @@ namespace coroactors::detail {
             if (!ready_queue) {
                 // Note: acquire here synchronizes with release in push
                 void* headValue = last_ready.exchange(nullptr, std::memory_order_acquire);
+                // These indicate a data race
                 assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
                 assert(headValue != reinterpret_cast<void*>(MarkerDetached));
                 assert(headValue != reinterpret_cast<void*>(MarkerCancelled));
@@ -283,7 +334,7 @@ namespace coroactors::detail {
          */
         size_t next_index() noexcept {
             ++count_;
-            return added_++;
+            return next_index_++;
         }
 
     private:
@@ -291,7 +342,7 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerAwaiting = 1;
         // Signals task group is detached and new results will not be consumed
         static constexpr uintptr_t MarkerDetached = 2;
-        // Signals future await_suspend that the request is already cancelled
+        // Signals the next await_suspend that the request is already cancelled
         static constexpr uintptr_t MarkerCancelled = 3;
 
         // A reference count for intrusive_ptr
@@ -305,25 +356,25 @@ namespace coroactors::detail {
 
         // The number of tasks that have not been awaited yet
         size_t count_{ 0 };
-        // The number of tasks ever added to the group
-        size_t added_{ 0 };
+        // The number of tasks added to the group, also the next index
+        size_t next_index_{ 0 };
     };
 
     template<class T>
-    class task_group_wait_ready_awaiter {
+    class task_group_when_ready_awaiter {
     public:
-        explicit task_group_wait_ready_awaiter(task_group_sink<T>* sink) noexcept
+        explicit task_group_when_ready_awaiter(task_group_sink<T>* sink) noexcept
             : sink(sink)
         {}
 
-        task_group_wait_ready_awaiter(const task_group_wait_ready_awaiter&) = delete;
-        task_group_wait_ready_awaiter& operator=(const task_group_wait_ready_awaiter&) = delete;
+        task_group_when_ready_awaiter(const task_group_when_ready_awaiter&) = delete;
+        task_group_when_ready_awaiter& operator=(const task_group_when_ready_awaiter&) = delete;
 
-        task_group_wait_ready_awaiter(task_group_wait_ready_awaiter&& rhs) noexcept
+        task_group_when_ready_awaiter(task_group_when_ready_awaiter&& rhs) noexcept
             : sink(rhs.sink)
         {}
 
-        ~task_group_wait_ready_awaiter() noexcept {
+        ~task_group_when_ready_awaiter() noexcept {
             if (cancel) {
                 // Make sure to clean up the callback first
                 cancel.reset();
@@ -348,6 +399,12 @@ namespace coroactors::detail {
 
             // Setup cancellation forwarding when needed
             if (token.stop_possible()) {
+                if (token.stop_requested()) {
+                    // Don't suspend when already cancelled
+                    return true;
+                }
+
+                // It's ok when cancellation races and callback runs here
                 cancel.emplace(std::move(token), sink);
             }
 
@@ -357,6 +414,27 @@ namespace coroactors::detail {
         __attribute__((__noinline__))
         std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
             suspended = true;
+            // Note: there are two possible pathways for an empty queue here:
+            // 1) The cancellation callback runs first, there is no awaiter or
+            //    a result yet, it sets the cancellation flag, which we consume
+            //    while trying to install a continuation. Post coditions: head
+            //    is either empty (cancel consumed, and will not run again) or
+            //    awaiting.
+            // 2) We install our continuation first, then the cancellation
+            //    callback runs, consumes the awaiting flag and resumes us.
+            //    Post conditions: head is empty, we are resumed.
+            // In all cases the result may be pushed to the queue, in which
+            // case cancellation flag will be dropped and ignored (removed
+            // when already set, will never be added to a non-empty queue), we
+            // are resumed one way or another, post condition is head having a
+            // result (ready). This result cannot be consumed by a concurrent
+            // coroutine unless there is a data race, so cancellation will do
+            // nothing because the head is not empty.
+            //
+            // In short, our invariants:
+            // 1) We resume with an empty head only when cancellation happend.
+            // 2) We resume with a non-empty head only when there's a result.
+            // 3) The cancellation flag is never set when we resume.
             return sink->await_suspend(h);
         }
 
@@ -364,18 +442,14 @@ namespace coroactors::detail {
             suspended = false;
 
             if (cancel) {
-                // First we need to cancel the cancellation, if any
-                // We would also synchronize with callback finishing here
+                // Remove the cancellation callback, it either happend already,
+                // or we synchronize with it finishing (doing nothing). Note
+                // we don't need to call await_cancel here, we are not awaiting.
                 cancel.reset();
-                // Make sure there is no leftover cancellation flag. But it
-                // shouldn't be possible though, because we are supposed to
-                // wake up either when there is a result (and nobody should
-                // consume that), or because we actually consumed the
-                // cancellation flag.
-                sink->await_cancel();
             }
 
-            // Now we just return whether we are ready or not
+            // We call await_ready and not ready because current coroutine is
+            // still awaiting and it double checks for possible data races.
             return sink->await_ready();
         }
 
