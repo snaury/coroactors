@@ -179,7 +179,6 @@ namespace coroactors::detail {
          */
         void emit_cancellation(boost::asio::cancellation_type ct) noexcept {
             cs->emit(ct);
-            cs.reset();
         }
 
         /**
