@@ -38,7 +38,7 @@ namespace coroactors {
                 co_await callback(group);
                 r.set_value();
             } else {
-                r.set_value(co_await callback(group));
+                r.set_value(co_await callback(const_cast<const task_group<T>&>(group)));
             }
         } catch (...) {
             r.set_exception(std::current_exception());

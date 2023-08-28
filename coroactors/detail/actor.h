@@ -566,7 +566,7 @@ namespace coroactors::detail {
                     auto context = std::move(self.context);
                     self.context = new_context;
                     return self.context.manager().switch_from(
-                        context, c, /* returning */ true);
+                        context.manager(), c, /* returning */ true);
                 }
 
                 // The wrapped handle restores context before resuming

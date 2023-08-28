@@ -100,6 +100,8 @@ namespace coroactors::detail {
                     // resume being called concurrently, but here it means we're
                     // lucky and may just ignore it.
                     continuation = {};
+                } else if (headValue == reinterpret_cast<void*>(MarkerCancelled)) {
+                    // A leftover cancellation marker, probably never happens
                 } else {
                     // Destroy current linked list of results
                     std::unique_ptr<task_group_result_node<T>> head(
@@ -140,7 +142,11 @@ namespace coroactors::detail {
                     // Task group is detached, discard all results
                     break;
                 }
-                task_group_result_node<T>* head = reinterpret_cast<task_group_result_node<T>*>(headValue);
+                // Note: MarkerCancelled is just a marker, the real head is nullptr
+                task_group_result_node<T>* head =
+                    headValue != reinterpret_cast<void*>(MarkerCancelled)
+                        ? reinterpret_cast<task_group_result_node<T>*>(headValue)
+                        : nullptr;
                 result->next = head;
                 void* nextValue = result.get();
                 // Note: release here synchronizes with acquire in await_resume
@@ -180,6 +186,15 @@ namespace coroactors::detail {
                     // Continuation may already be waking up on another thread
                     return std::noop_coroutine();
                 }
+                if (headValue == reinterpret_cast<void*>(MarkerCancelled)) {
+                    // An awaiter has concurrently cancelled itself
+                    // Note: acquire here synchronizes with release in await_cancel
+                    if (!last_ready.compare_exchange_weak(headValue, nullptr, std::memory_order_acquire)) {
+                        continue;
+                    }
+                    // We removed the cancellation flag, resume now
+                    break;
+                }
                 // Lost the race: ready queue is not empty
                 assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
                 assert(headValue != reinterpret_cast<void*>(MarkerDetached));
@@ -187,6 +202,44 @@ namespace coroactors::detail {
             }
             continuation = {};
             return c;
+        }
+
+        /**
+         * Tries to cancel a currently pending await and returns the removed
+         * continuation on success.
+         *
+         * When concurrent is true will also try to set a cancellation flag on
+         * an empty result queue (no awaiter yet), so a suspend attempt is
+         * properly cancelled.
+         */
+        std::coroutine_handle<> await_cancel(bool concurrent = false) noexcept {
+            void* headValue = last_ready.load(std::memory_order_relaxed);
+            for (;;) {
+                if (headValue == reinterpret_cast<void*>(MarkerAwaiting)) {
+                    // Remove current awaiter and return it on success
+                    if (!last_ready.compare_exchange_weak(headValue, nullptr, std::memory_order_acquire)) {
+                        continue;
+                    }
+                    return std::exchange(continuation, {});
+                }
+                if (headValue == reinterpret_cast<void*>(MarkerCancelled) && !concurrent) {
+                    // Remove the cancellation mark
+                    if (!last_ready.compare_exchange_weak(headValue, nullptr, std::memory_order_acquire)) {
+                        continue;
+                    }
+                    break;
+                }
+                if (!headValue && concurrent) {
+                    // Mark current head as concurrently cancelled
+                    if (!last_ready.compare_exchange_weak(headValue, reinterpret_cast<void*>(MarkerCancelled), std::memory_order_release)) {
+                        continue;
+                    }
+                    break;
+                }
+                assert(headValue != reinterpret_cast<void*>(MarkerDetached));
+                break;
+            }
+            return {};
         }
 
         /**
@@ -199,6 +252,7 @@ namespace coroactors::detail {
                 void* headValue = last_ready.exchange(nullptr, std::memory_order_acquire);
                 assert(headValue != reinterpret_cast<void*>(MarkerAwaiting));
                 assert(headValue != reinterpret_cast<void*>(MarkerDetached));
+                assert(headValue != reinterpret_cast<void*>(MarkerCancelled));
                 task_group_result_node<T>* head = reinterpret_cast<task_group_result_node<T>*>(headValue);
                 assert(head && "Task group is resuming with an empty queue");
                 while (head) {
@@ -213,7 +267,23 @@ namespace coroactors::detail {
             auto* next = std::exchange(ready_queue->next, nullptr);
             result = std::move(ready_queue);
             ready_queue.reset(next);
+            --count_;
             return result;
+        }
+
+        /**
+         * Returns the number of tasks that have not been awaited yet
+         */
+        size_t count() const noexcept {
+            return count_;
+        }
+
+        /**
+         * Returns index for the next added task
+         */
+        size_t next_index() noexcept {
+            ++count_;
+            return added_++;
         }
 
     private:
@@ -221,6 +291,8 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerAwaiting = 1;
         // Signals task group is detached and new results will not be consumed
         static constexpr uintptr_t MarkerDetached = 2;
+        // Signals future await_suspend that the request is already cancelled
+        static constexpr uintptr_t MarkerCancelled = 3;
 
         // A reference count for intrusive_ptr
         std::atomic<size_t> refcount{ 0 };
@@ -230,6 +302,102 @@ namespace coroactors::detail {
         std::unique_ptr<task_group_result_node<T>> ready_queue;
         // Continuation waiting for the next result
         std::coroutine_handle<> continuation;
+
+        // The number of tasks that have not been awaited yet
+        size_t count_{ 0 };
+        // The number of tasks ever added to the group
+        size_t added_{ 0 };
+    };
+
+    template<class T>
+    class task_group_wait_ready_awaiter {
+    public:
+        explicit task_group_wait_ready_awaiter(task_group_sink<T>* sink) noexcept
+            : sink(sink)
+        {}
+
+        task_group_wait_ready_awaiter(const task_group_wait_ready_awaiter&) = delete;
+        task_group_wait_ready_awaiter& operator=(const task_group_wait_ready_awaiter&) = delete;
+
+        task_group_wait_ready_awaiter(task_group_wait_ready_awaiter&& rhs) noexcept
+            : sink(rhs.sink)
+        {}
+
+        ~task_group_wait_ready_awaiter() noexcept {
+            if (cancel) {
+                // Make sure to clean up the callback first
+                cancel.reset();
+            }
+
+            if (suspended) {
+                // Support bottom-up destruction (awaiter destroyed before it
+                // was resumed). It is up to user to ensure there are no
+                // concurrent resume attempts.
+                sink->await_cancel();
+            }
+        }
+
+        bool await_ready(stop_token token = {}) {
+            if (sink->count() == 0) {
+                throw std::out_of_range("task group has no tasks to await");
+            }
+
+            if (sink->await_ready()) {
+                return true;
+            }
+
+            // Setup cancellation forwarding when needed
+            if (token.stop_possible()) {
+                cancel.emplace(std::move(token), sink);
+            }
+
+            return false;
+        }
+
+        __attribute__((__noinline__))
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+            suspended = true;
+            return sink->await_suspend(h);
+        }
+
+        bool await_resume() noexcept {
+            suspended = false;
+
+            if (cancel) {
+                // First we need to cancel the cancellation, if any
+                // We would also synchronize with callback finishing here
+                cancel.reset();
+                // Make sure there is no leftover cancellation flag. But it
+                // shouldn't be possible though, because we are supposed to
+                // wake up either when there is a result (and nobody should
+                // consume that), or because we actually consumed the
+                // cancellation flag.
+                sink->await_cancel();
+            }
+
+            // Now we just return whether we are ready or not
+            return sink->await_ready();
+        }
+
+    private:
+        struct cancel_t {
+            task_group_sink<T>* sink;
+
+            explicit cancel_t(task_group_sink<T>* sink)
+                : sink(sink)
+            {}
+
+            void operator()() noexcept {
+                if (auto h = sink->await_cancel(true)) {
+                    h.resume();
+                }
+            }
+        };
+
+    private:
+        task_group_sink<T>* sink;
+        std::optional<stop_callback<cancel_t>> cancel;
+        bool suspended = false;
     };
 
     template<class T>
@@ -310,12 +478,14 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return final_suspend_t{}; }
 
-        void start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token, size_t index) {
-            this->result_->index = index;
+        size_t start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token) {
+            size_t index = sink->next_index();
             sink_ = sink;
             token_ = std::move(token);
             running = true;
+            this->result_->index = index;
             task_group_handle<T>::from_promise(*this).resume();
+            return index;
         }
 
         template<awaitable_with_stop_token_propagation Awaitable>
@@ -385,8 +555,8 @@ namespace coroactors::detail {
     public:
         using promise_type = task_group_promise<T>;
 
-        void start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token, size_t index) {
-            handle.promise().start(sink, std::move(token), index);
+        size_t start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token) {
+            return handle.promise().start(sink, std::move(token));
         }
 
     private:

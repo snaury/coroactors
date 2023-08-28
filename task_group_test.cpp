@@ -564,7 +564,7 @@ actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider)
     co_await no_actor_context();
 
     try {
-        co_await with_task_group<int>([&](task_group<int>& group) -> actor<void> {
+        co_await with_task_group<int>([&](const task_group<int>& group) -> actor<void> {
             co_await actor_context::caller_context();
 
             group.add(provider.get());
@@ -705,7 +705,7 @@ actor<void> do_with_task_group_result_type(int& stage, value_provider<int>& prov
     co_await no_actor_context();
 
     auto result = co_await with_task_group<int>(
-        [&](task_group<int>& group) -> actor<move_only_int> {
+        [&](const task_group<int>& group) -> actor<move_only_int> {
             co_await actor_context::caller_context();
 
             group.add(provider.get());
@@ -795,7 +795,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, va
     stage = 2;
     int result = co_await with_stop_token(
         stop_token(),
-        with_task_group<int>([&](task_group<int>& group) -> actor<int> {
+        with_task_group<int>([&](const task_group<int>& group) -> actor<int> {
             stage = 3;
             co_await actor_context::caller_context();
 
@@ -863,6 +863,168 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 7); // finished
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(success);
+
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+actor<void> do_wait_ready_with_token(int& stage, actor_scheduler& scheduler, value_provider<int>& provider,
+        stop_token token, bool expected)
+{
+    stage = 1;
+    co_await actor_context(scheduler)();
+
+    stage = 2;
+    int result = co_await with_task_group<int>(
+        [&](const task_group<int>& group) -> actor<int> {
+            stage = 3;
+            co_await actor_context::caller_context();
+
+            group.add(provider.get());
+            group.add(provider.get());
+
+            stage = 4;
+            bool r = co_await with_stop_token(token, group.wait_ready());
+            EXPECT_EQ(r, expected);
+
+            stage = 5;
+            int a = co_await group.next();
+
+            stage = 6;
+            int b = co_await group.next();
+
+            EXPECT_FALSE((co_await actor_context::current_stop_token).stop_requested());
+
+            stage = 7;
+            co_return a + b;
+        });
+
+    stage = 8;
+    EXPECT_EQ(result, 100);
+}
+
+TEST(WithTaskGroupTest, WaitReadySuccess) {
+    int stage = 0;
+    test_scheduler scheduler;
+    value_provider<int> provider;
+    stop_source source;
+
+    bool finished = false;
+    bool success = false;
+
+    detach_awaitable(
+        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), true).result(),
+        [&](auto&& result) {
+            finished = true;
+            success = result.has_value();
+        });
+
+    EXPECT_EQ(stage, 4); // waiting in wait_next
+    ASSERT_EQ(provider.queue.size(), 2u);
+    auto a = provider.take();
+    auto b = provider.take();
+
+    a.resume(42);
+    EXPECT_EQ(stage, 4); // waiting on wait_next (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 6); // waiting for the second value
+
+    b.resume(58);
+    EXPECT_EQ(stage, 6); // waiting for the second value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 8); // finished
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(success);
+
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+TEST(WithTaskGroupTest, WaitReadyCancelled) {
+    int stage = 0;
+    test_scheduler scheduler;
+    value_provider<int> provider;
+    stop_source source;
+
+    bool finished = false;
+    bool success = false;
+
+    detach_awaitable(
+        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), false).result(),
+        [&](auto&& result) {
+            finished = true;
+            success = result.has_value();
+        });
+
+    EXPECT_EQ(stage, 4); // waiting in wait_next
+    ASSERT_EQ(provider.queue.size(), 2u);
+    auto a = provider.take();
+    auto b = provider.take();
+
+    source.request_stop();
+    EXPECT_EQ(stage, 4); // waiting on wait_next (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 5); // waiting for the first value
+
+    a.resume(42);
+    EXPECT_EQ(stage, 5); // waiting for the first value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 6); // waiting for the second value
+
+    b.resume(58);
+    EXPECT_EQ(stage, 6); // waiting for the second value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 8); // finished
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(success);
+
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
+    int stage = 0;
+    test_scheduler scheduler;
+    value_provider<int> provider;
+    stop_source source;
+
+    bool finished = false;
+    bool success = false;
+
+    source.request_stop();
+
+    detach_awaitable(
+        do_wait_ready_with_token(stage, scheduler, provider, source.get_token(), false).result(),
+        [&](auto&& result) {
+            finished = true;
+            success = result.has_value();
+        });
+
+    EXPECT_EQ(stage, 4); // waiting in wait_next
+    ASSERT_EQ(provider.queue.size(), 2u);
+    auto a = provider.take();
+    auto b = provider.take();
+
+    EXPECT_EQ(stage, 4); // waiting on wait_next (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 5); // waiting for the first value
+
+    a.resume(42);
+    EXPECT_EQ(stage, 5); // waiting for the first value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 6); // waiting for the second value
+
+    b.resume(58);
+    EXPECT_EQ(stage, 6); // waiting for the second value (context resume)
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(stage, 8); // finished
     EXPECT_TRUE(finished);
     EXPECT_TRUE(success);
 

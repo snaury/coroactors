@@ -14,6 +14,9 @@ namespace coroactors {
      */
     template<class T>
     class task_group {
+        using sink_type = detail::task_group_sink<T>;
+        using sink_ptr = detail::intrusive_ptr<sink_type>;
+
     public:
         using result_type = detail::task_group_result<T>;
         using value_type = T;
@@ -26,12 +29,8 @@ namespace coroactors {
         task_group(task_group&& rhs)
             : sink_(std::move(rhs.sink_))
             , source_(std::move(rhs.source_))
-            , count_(rhs.count_)
-            , left_(rhs.left_)
         {
             rhs.sink_.reset();
-            rhs.count_ = 0;
-            rhs.left_ = 0;
         }
 
         ~task_group() {
@@ -45,27 +44,26 @@ namespace coroactors {
          * Adds a new awaitable to the task group and returns its index
          */
         template<class Awaitable>
-        size_t add(Awaitable&& awaitable) {
+        size_t add(Awaitable&& awaitable) const {
             assert(sink_);
-            size_t index = count_++;
             auto coro = detail::make_task_group_coroutine<T>(std::forward<Awaitable>(awaitable));
-            coro.start(sink_, source_.get_token(), index);
-            ++left_;
-            return index;
+            return coro.start(sink_, source_.get_token());
         }
 
         /**
-         * Returns the number of started and unawaited tasks
+         * Returns the number that have been started but not awaited yet
          */
-        size_t left() const {
-            return left_;
+        size_t count() const {
+            assert(sink_);
+            return sink_->count();
         }
 
         /**
          * Returns true if task group has at least one unawaited task
          */
         explicit operator bool() const {
-            return left_ > 0;
+            assert(sink_);
+            return sink_->count() > 0;
         }
 
         /**
@@ -77,39 +75,61 @@ namespace coroactors {
         }
 
         /**
+         * Wait until ready() returns true, or the request is cancelled
+         */
+        detail::task_group_wait_ready_awaiter<T> wait_ready() const {
+            assert(sink_);
+            return detail::task_group_wait_ready_awaiter<T>{ sink_.get() };
+        }
+
+        /**
          * Implementation of task_group<T>::next()
          */
         class [[nodiscard]] next_awaiter_t {
         public:
-            explicit next_awaiter_t(task_group& group) noexcept
-                : group(group)
+            explicit next_awaiter_t(sink_type* sink) noexcept
+                : sink(sink)
             {}
 
-            bool await_ready() noexcept {
-                assert(group.left_ > 0 && "Task group has no tasks to await");
-                --group.left_;
-                return group.sink_->await_ready();
+            ~next_awaiter_t() noexcept {
+                if (suspended) {
+                    // Support for bottom-up destruction (awaiter destroyed
+                    // before it was resumed). It is up to user to ensure there
+                    // are no concurrent resume attempts.
+                    sink->await_cancel();
+                }
+            }
+
+            bool await_ready() {
+                if (sink->count() == 0) {
+                    throw std::out_of_range("task group has no tasks to await");
+                }
+                return sink->await_ready();
             }
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
-                return group.sink_->await_suspend(c);
+                suspended = true;
+                return sink->await_suspend(c);
             }
 
             T await_resume() {
-                auto result = group.sink_->await_resume();
+                suspended = false;
+                auto result = sink->await_resume();
                 return std::move(*result).take_value();
             }
 
         private:
-            task_group& group;
+            sink_type* sink;
+            bool suspended = false;
         };
 
         /**
          * Returns the next available result value when awaited
          */
-        next_awaiter_t next() noexcept {
-            return next_awaiter_t{ *this };
+        next_awaiter_t next() const noexcept {
+            assert(sink_);
+            return next_awaiter_t{ sink_.get() };
         }
 
         /**
@@ -117,49 +137,60 @@ namespace coroactors {
          */
         class [[nodiscard]] next_result_awaiter_t {
         public:
-            explicit next_result_awaiter_t(task_group& group) noexcept
-                : group(group)
+            explicit next_result_awaiter_t(sink_type* sink) noexcept
+                : sink(sink)
             {}
 
-            bool await_ready() noexcept {
-                assert(group.left_ > 0 && "Task group has no tasks to await");
-                --group.left_;
-                return group.sink_->await_ready();
+            ~next_result_awaiter_t() noexcept {
+                if (suspended) {
+                    // Support for bottom-up destruction (awaiter destroyed
+                    // before it was resumed). It is up to user to ensure there
+                    // are no concurrent resume attempts.
+                    sink->await_cancel();
+                }
+            }
+
+            bool await_ready() {
+                if (sink->count() == 0) {
+                    throw std::out_of_range("task group has no tasks to await");
+                }
+                return sink->await_ready();
             }
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
-                return group.sink_->await_suspend(c);
+                suspended = true;
+                return sink->await_suspend(c);
             }
 
             result_type await_resume() {
-                auto result = group.sink_->await_resume();
+                suspended = false;
+                auto result = sink->await_resume();
                 return std::move(*result);
             }
 
         private:
-            task_group& group;
+            sink_type* sink;
+            bool suspended = false;
         };
 
         /**
          * Returns the next available result wrapper when awaited
          */
-        next_result_awaiter_t next_result() noexcept {
-            return next_result_awaiter_t{ *this };
+        next_result_awaiter_t next_result() const noexcept {
+            return next_result_awaiter_t{ sink_.get() };
         }
 
         /**
          * Requests all added tasks to stop
          */
-        void request_stop() noexcept {
+        void request_stop() const noexcept {
             source_.request_stop();
         }
 
     private:
-        detail::intrusive_ptr<detail::task_group_sink<T>> sink_{ new detail::task_group_sink<T> };
-        stop_source source_;
-        size_t count_ = 0;
-        size_t left_ = 0;
+        sink_ptr sink_{ new sink_type };
+        mutable stop_source source_;
     };
 
 } // namespace coroactors
