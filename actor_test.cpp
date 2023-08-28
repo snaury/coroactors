@@ -363,3 +363,66 @@ TEST(ActorTest, Sleep) {
         EXPECT_TRUE(r && r->has_value());
     }
 }
+
+struct aborted_suspend {
+    bool await_ready() {
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> h) {
+        // Abort suspend and resume
+        return false;
+    }
+
+    int await_resume() {
+        return 42;
+    }
+};
+
+actor<void> actor_aborted_suspend(const actor_context& context) {
+    co_await context();
+
+    int value = co_await aborted_suspend{};
+    EXPECT_EQ(value, 42);
+}
+
+TEST(TestActor, AbortedSuspend) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+
+    auto r = run(actor_aborted_suspend(context).result());
+    // Suspend is aborted, so we expect no context switch on the return path
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_TRUE(r && r->has_value());
+}
+
+struct throw_during_suspend {
+    bool await_ready() {
+        return false;
+    }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        throw std::runtime_error("throw during suspend");
+    }
+
+    void await_resume() {
+        // should be unreachable
+    }
+};
+
+actor<void> actor_throw_during_suspend(const actor_context& context) {
+    co_await context();
+
+    EXPECT_THROW(co_await throw_during_suspend{}, std::runtime_error);
+}
+
+TEST(TestActor, ThrowDuringSuspend) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+
+    auto r = run(actor_throw_during_suspend(context).result());
+    // Suspend throws an exception, so we expect to observe it in the actor
+    // without context switches, double frees or any leaks.
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_TRUE(r && r->has_value());
+}
