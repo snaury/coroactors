@@ -1,9 +1,10 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
-#include <tuple>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/any_io_executor.hpp>
+#include <tuple>
+#include <utility>
 
 namespace coroactors {
 
@@ -349,9 +350,7 @@ namespace coroactors::detail {
             result.reset(new continuation_type);
 
             // Initiate the async operation
-            std::apply(
-                start_initiation_t{ initiation, CompletionHandler(result.get()) },
-                std::move(args));
+            initiate();
 
             // The operation has started and may have already completed in
             // another thread, avoid setting stop token in that case.
@@ -385,15 +384,16 @@ namespace coroactors::detail {
         }
 
     private:
-        struct start_initiation_t {
-            Initiation& initiation;
-            CompletionHandler&& handler;
+        void initiate() {
+            initiate(std::index_sequence_for<Args...>());
+        }
 
-            template<class... InitArgs>
-            void operator()(InitArgs&&... args) {
-                std::move(initiation)(std::move(handler), std::forward<InitArgs>(args)...);
-            }
-        };
+        template<size_t... I>
+        void initiate(std::index_sequence<I...>) {
+            std::move(initiation)(
+                CompletionHandler(result.get()),
+                std::get<I>(std::move(args))...);
+        }
 
         struct emit_cancellation_t {
             continuation_type* r;

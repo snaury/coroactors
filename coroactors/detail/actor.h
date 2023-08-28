@@ -66,6 +66,96 @@ namespace coroactors::detail {
         }
     };
 
+    /**
+     * Sets suspended to false and destroys coroutine handle on exceptions
+     */
+    template<bool is_noexcept = false>
+    class destroy_on_exceptions_guard {
+    public:
+        destroy_on_exceptions_guard(std::coroutine_handle<> k, bool& suspended) noexcept
+            : k(k)
+            , suspended(suspended)
+        {}
+
+        destroy_on_exceptions_guard(const destroy_on_exceptions_guard&) = delete;
+        destroy_on_exceptions_guard& operator=(const destroy_on_exceptions_guard&) = delete;
+
+        ~destroy_on_exceptions_guard() noexcept {
+            if (suspended && count != std::uncaught_exceptions()) [[unlikely]] {
+                suspended = false;
+                k.destroy();
+            }
+        }
+
+    private:
+        std::coroutine_handle<> k;
+        bool& suspended;
+        int count = std::uncaught_exceptions();
+    };
+
+    /**
+     * Specialization that does nothing when await_suspend is noexcept
+     */
+    template<>
+    class destroy_on_exceptions_guard<true> {
+    public:
+        destroy_on_exceptions_guard(std::coroutine_handle<>, bool&) noexcept {}
+    };
+
+    /**
+     * A callback type that restores actor context before resuming a coroutine
+     */
+    class actor_restore_context_callback {
+    public:
+        actor_restore_context_callback(const actor_context& context,
+                std::coroutine_handle<> c, bool& suspended) noexcept
+            : context(context)
+            , c(c)
+            , suspended(suspended)
+        {}
+
+        actor_restore_context_callback(const actor_restore_context_callback&) = delete;
+        actor_restore_context_callback& operator=(const actor_restore_context_callback&) = delete;
+
+        actor_restore_context_callback(actor_restore_context_callback&& rhs) noexcept
+            : context(rhs.context)
+            , c(std::exchange(rhs.c, {}))
+            , suspended(rhs.suspended)
+        {}
+
+        ~actor_restore_context_callback() noexcept {
+            // Note: must short circuit on `c` here. The `suspended`
+            // reference is likely pointing to an already destroyed value
+            // after the coroutine is resumed.
+            if (c && suspended) {
+                // Callback was not invoked, but we are supposed to resume
+                // our continuation. All we can do now is destroy it and
+                // hope it unwinds its stack correctly.
+                c.destroy();
+            }
+        }
+
+        std::coroutine_handle<> operator()() noexcept {
+            return context.manager().restore(std::exchange(c, {}));
+        }
+
+        /**
+         * Wraps a given actor coroutine handle `c` to restore the given actor
+         * context before resuming. The handle also propagates destroy calls
+         * unless the `suspended` variable equals to false at the time.
+         */
+        static std::coroutine_handle<> wrap(const actor_context& context,
+                std::coroutine_handle<> c, bool& suspended) noexcept
+        {
+            return with_resume_callback(actor_restore_context_callback{ context, c, suspended });
+        }
+
+    private:
+        const actor_context& context;
+        std::coroutine_handle<> c;
+        bool& suspended;
+    };
+
     template<class T>
     class actor_promise final : public actor_result_handler<T> {
     public:
@@ -379,90 +469,6 @@ namespace coroactors::detail {
             return current_stop_token_awaiter_t{ token };
         }
 
-        struct restore_context_callback {
-            const actor_context& context;
-            std::coroutine_handle<> c;
-            bool& suspended;
-
-            restore_context_callback(const actor_context& context,
-                    std::coroutine_handle<> c, bool& suspended) noexcept
-                : context(context)
-                , c(c)
-                , suspended(suspended)
-            {}
-
-            restore_context_callback(const restore_context_callback&) = delete;
-            restore_context_callback& operator=(const restore_context_callback&) = delete;
-
-            restore_context_callback(restore_context_callback&& rhs) noexcept
-                : context(rhs.context)
-                , c(std::exchange(rhs.c, {}))
-                , suspended(rhs.suspended)
-            {}
-
-            ~restore_context_callback() noexcept {
-                // Note: must short circuit on `c` here. The `suspended`
-                // reference is likely pointing to an already destroyed value
-                // after the coroutine is resumed.
-                if (c && suspended) {
-                    // Callback was not invoked, but we are supposed to resume
-                    // our continuation. All we can do now is destroy it and
-                    // hope it unwinds its stack correctly.
-                    c.destroy();
-                }
-            }
-
-            std::coroutine_handle<> operator()() noexcept {
-                return context.manager().restore(std::exchange(c, {}));
-            }
-        };
-
-        /**
-         * Generates a wrapped continuation that restores context on resume
-         */
-        static std::coroutine_handle<> wrap_restore_context(
-                const actor_context& context, std::coroutine_handle<> c,
-                bool& suspended)
-        {
-            return with_resume_callback(restore_context_callback{ context, c, suspended });
-        }
-
-        /**
-         * Sets suspended to false and destroys coroutine handle on exceptions
-         */
-        template<bool is_noexcept = false>
-        class destroy_on_exceptions_guard {
-        public:
-            destroy_on_exceptions_guard(std::coroutine_handle<> k, bool& suspended) noexcept
-                : k(k)
-                , suspended(suspended)
-            {}
-
-            destroy_on_exceptions_guard(const destroy_on_exceptions_guard&) = delete;
-            destroy_on_exceptions_guard& operator=(const destroy_on_exceptions_guard&) = delete;
-
-            ~destroy_on_exceptions_guard() noexcept {
-                if (suspended && count != std::uncaught_exceptions()) [[unlikely]] {
-                    suspended = false;
-                    k.destroy();
-                }
-            }
-
-        private:
-            std::coroutine_handle<> k;
-            bool& suspended;
-            int count = std::uncaught_exceptions();
-        };
-
-        /**
-         * Specialization that does nothing when await_suspend is noexcept
-         */
-        template<>
-        class destroy_on_exceptions_guard<true> {
-        public:
-            destroy_on_exceptions_guard(std::coroutine_handle<>, bool&) noexcept {}
-        };
-
         template<awaitable Awaitable>
         class same_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
@@ -502,7 +508,7 @@ namespace coroactors::detail {
                 // noexcept(has_noexcept_await_suspend<Awaiter>)
             {
                 // The wrapped handle restores context before resuming
-                std::coroutine_handle<> k = wrap_restore_context(self.context, c, suspended);
+                std::coroutine_handle<> k = actor_restore_context_callback::wrap(self.context, c, suspended);
 
                 // This will make sure wrapper does not leak on exceptions
                 destroy_on_exceptions_guard<has_noexcept_await_suspend<Awaiter>> guard(k, suspended);
@@ -625,7 +631,7 @@ namespace coroactors::detail {
                 }
 
                 // The wrapped handle restores context before resuming
-                std::coroutine_handle<> k = wrap_restore_context(new_context, c, suspended);
+                std::coroutine_handle<> k = actor_restore_context_callback::wrap(new_context, c, suspended);
 
                 // This will make sure wrapper does not leak on exceptions
                 destroy_on_exceptions_guard<has_noexcept_await_suspend<Awaiter>> guard(k, suspended);
