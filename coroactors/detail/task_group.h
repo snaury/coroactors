@@ -215,11 +215,11 @@ namespace coroactors::detail {
 
         /**
          * Tries to register c as the next result continuation, and returns
-         * noop_coroutine on success. If there's a race and new result or a
-         * concurrent cancellation is discovered it will return c to resume
-         * immediately.
+         * true on success. If there's a race and new result or a concurrent
+         * cancellation is discovered it will return false so caller may
+         * resume immediately.
          */
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
+        bool await_suspend(std::coroutine_handle<> c) noexcept {
             assert(!ready_queue && "Caller suspending with non-empty ready queue");
             assert(!continuation && "Caller suspending with another continuation");
             continuation = c;
@@ -232,7 +232,7 @@ namespace coroactors::detail {
                         continue;
                     }
                     // Continuation may already be waking up in another thread
-                    return std::noop_coroutine();
+                    return true;
                 }
                 if (headValue == reinterpret_cast<void*>(MarkerCancelled)) {
                     // An awaiter has concurrently cancelled itself
@@ -249,7 +249,7 @@ namespace coroactors::detail {
                 break;
             }
             continuation = {};
-            return c;
+            return false;
         }
 
         /**
@@ -412,7 +412,7 @@ namespace coroactors::detail {
         }
 
         __attribute__((__noinline__))
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+        bool await_suspend(std::coroutine_handle<> h) noexcept {
             suspended = true;
             // Note: there are two possible pathways for an empty queue here:
             // 1) The cancellation callback runs first, there is no awaiter or

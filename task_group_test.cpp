@@ -1093,10 +1093,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
     auto a = provider.take();
     auto b = provider.take();
 
-    EXPECT_EQ(stage, 4); // waiting in wait_next (context resume)
-    ASSERT_EQ(scheduler.queue.size(), 1u);
-    scheduler.run_next();
-
+    // Note: no actor context switch since we returned immediately
     EXPECT_EQ(stage, 5); // waiting for the first value
     ASSERT_EQ(scheduler.queue.size(), 0u);
 

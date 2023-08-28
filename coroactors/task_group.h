@@ -114,7 +114,7 @@ namespace coroactors {
             }
 
             __attribute__((__noinline__))
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
+            bool await_suspend(std::coroutine_handle<> c) noexcept {
                 suspended = true;
                 return sink->await_suspend(c);
             }
@@ -168,7 +168,7 @@ namespace coroactors {
             }
 
             __attribute__((__noinline__))
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) noexcept {
+            bool await_suspend(std::coroutine_handle<> c) noexcept {
                 suspended = true;
                 return sink->await_suspend(c);
             }
