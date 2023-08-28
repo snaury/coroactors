@@ -65,7 +65,11 @@ namespace coroactors::detail {
     template<class T>
     class asio_continuation : public result<T> {
     public:
-        asio_continuation() = default;
+        explicit asio_continuation(bool allow_cancellation) {
+            if (allow_cancellation) {
+                cs.emplace();
+            }
+        }
 
         asio_continuation(const asio_continuation&) = delete;
         asio_continuation& operator=(const asio_continuation&) = delete;
@@ -132,9 +136,25 @@ namespace coroactors::detail {
         }
 
         boost::asio::cancellation_slot slot() noexcept {
-            return cs.slot();
+            if (cs) {
+                return cs->slot();
+            } else {
+                return {}; // unconnected slot
+            }
         }
 
+        /**
+         * This method sets the cancellation flag in the continuation pointer,
+         * making sure continuation will not be resumed until (a potentially
+         * very long) cancellation finishes. There would be no races otherwise,
+         * because awaiter resume synchronizes on stop callback destruction,
+         * and it would wait anyway. However asio uses a global mutex on the
+         * cancellation path, and it would cause two threads not doing any
+         * useful work, so it's better to avoid waking up in the first place.
+         *
+         * Returns true when cancellation flag is set, false when there's no
+         * point in cancellation, because there's a result available already.
+         */
         bool begin_cancellation() noexcept {
             void* addr = continuation.load(std::memory_order_relaxed);
             while (addr != reinterpret_cast<void*>(MarkerResult)) {
@@ -153,10 +173,22 @@ namespace coroactors::detail {
             return false;
         }
 
+        /**
+         * Emits the specified cancellation type, can be done as long as no
+         * other thread potentially calls methods on the same io object.
+         */
         void emit_cancellation(boost::asio::cancellation_type ct) noexcept {
-            cs.emit(ct);
+            cs->emit(ct);
+            cs.reset();
         }
 
+        /**
+         * This ends cancellation started with begin_cancellation, and removes
+         * the cancellation flag. It may be the case that the result was
+         * provided already, but resume was blocked because the cancellation
+         * was in progress. In which case it removes the marked continuation
+         * and returns a valid handle, which must be resumed.
+         */
         std::coroutine_handle<> end_cancellation() noexcept {
             void* addr = continuation.load(std::memory_order_relaxed);
             for (;;) {
@@ -185,6 +217,10 @@ namespace coroactors::detail {
             return {};
         }
 
+        /**
+         * Publishes the result of operation and returns the continuation
+         * handle unless it's not installed yet, or blocked by cancellation.
+         */
         std::coroutine_handle<> finish() noexcept {
             void* addr = continuation.load(std::memory_order_acquire);
             for (;;) {
@@ -235,7 +271,7 @@ namespace coroactors::detail {
     private:
         std::atomic<size_t> refcount{ 0 };
         std::atomic<void*> continuation{ nullptr };
-        boost::asio::cancellation_signal cs;
+        std::optional<boost::asio::cancellation_signal> cs;
     };
 
     template<class... Ts>
@@ -318,6 +354,29 @@ namespace coroactors::detail {
     };
 
     /**
+     * The optional exception handler, rethrows it in the awaiter
+     */
+    template<class... Ts>
+    class asio_awaitable_handler<std::exception_ptr, Ts...>
+        : public asio_awaitable_handler_base<Ts...>
+    {
+    public:
+        using asio_awaitable_handler_base<Ts...>::asio_awaitable_handler_base;
+
+        template<class... Args>
+        void operator()(std::exception_ptr e, Args&&... args) {
+            if (e) {
+                this->result->set_exception(std::move(e));
+            } else {
+                this->result->emplace_value(std::forward<Args>(args)...);
+            }
+            if (auto c = this->result->finish()) {
+                c.resume();
+            }
+        }
+    };
+
+    /**
      * The awaiter class that, when awaited, initiates the async operation and
      * transforms eventual result into some value. Supports cancellation
      * propagation from actors into asio cancellation slots.
@@ -342,13 +401,15 @@ namespace coroactors::detail {
         {}
 
         ~asio_awaiter_t() {
-            if (result) {
+            if (result && suspended) {
+                // Try to support bottom-up destruction, but operation's
+                // handler could be waking us up in another thread already.
                 result->unset_continuation();
             }
         }
 
         bool await_ready(stop_token token = {}) {
-            result.reset(new continuation_type);
+            result.reset(new continuation_type(token.stop_possible()));
 
             // Initiate the async operation
             initiate();
@@ -359,15 +420,23 @@ namespace coroactors::detail {
                 return true;
             }
 
-            // Setup passthru from stop token to cancellation slot
+            // Setup passthru from stop_token to cancellation_slot
             if (token.stop_possible()) {
-                stop.emplace(
-                    std::move(token),
-                    emit_cancellation_t{ result.get() });
+                if (token.stop_requested()) {
+                    // The token is cancelled already. There's no risk in us
+                    // racing with await_resume, so emit without begin/end.
+                    result->emit_cancellation(Options::cancel_type);
 
-                // It is possible cancellation causes result to become available
-                if (result->ready()) {
-                    return true;
+                    // There's a chance handler was called after emit
+                    if (result->ready()) {
+                        return true;
+                    }
+                } else {
+                    // Otherwise install the stop callback that would emit
+                    // cancellation while we are suspended.
+                    stop.emplace(
+                        std::move(token),
+                        emit_cancellation_t{ result.get() });
                 }
             }
 
@@ -376,11 +445,13 @@ namespace coroactors::detail {
 
         __attribute__((__noinline__))
         bool await_suspend(std::coroutine_handle<> c) {
+            suspended = true;
             return result->set_continuation(c);
         }
 
         result_type await_resume() {
             // All resume paths should have acquire sync on the result value
+            suspended = false;
             return result->take_value();
         }
 
@@ -414,6 +485,7 @@ namespace coroactors::detail {
         std::tuple<std::decay_t<Args>...> args;
         detail::intrusive_ptr<continuation_type> result;
         std::optional<stop_callback<emit_cancellation_t>> stop;
+        bool suspended = false;
     };
 
 } // namespace coroactors::detail
