@@ -196,6 +196,15 @@ namespace coroactors {
         }
 
         /**
+         * Returns a stop token associated with this task group
+         *
+         * This method is thread-safe and can be called by any thread.
+         */
+        stop_token get_stop_token() const noexcept {
+            return source_.get_token();
+        }
+
+        /**
          * Requests all added tasks to stop
          *
          * This method is thread-safe and can be called by any thread.
