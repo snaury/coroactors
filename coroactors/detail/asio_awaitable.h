@@ -16,13 +16,6 @@ namespace coroactors {
     template<class Executor = boost::asio::any_io_executor,
         boost::asio::cancellation_type CancelType = boost::asio::cancellation_type::all>
     struct asio_awaitable_t {
-        using executor_type = Executor;
-
-        template<class OtherExecutor>
-        struct rebind_executor {
-            using other = asio_awaitable_t<OtherExecutor, CancelType>;
-        };
-
         /**
          * Wrapped executor with asio_awaitable_t as the default completion token
          */
@@ -47,6 +40,14 @@ namespace coroactors {
         template<class T>
         using as_default_on_t = typename T::template rebind_executor<
             executor_with_default<typename T::executor_type>>::other;
+
+        /**
+         * Changes object to use asio_awaitable_t as the default completion token
+         */
+        template<class T>
+        static as_default_on_t<std::decay_t<T>> as_default_on(T&& obj) {
+            return as_default_on_t<std::decay_t<T>>(std::forward<T>(obj));
+        }
 
         /**
          * Specifies cancellation type used for stop token propagation
