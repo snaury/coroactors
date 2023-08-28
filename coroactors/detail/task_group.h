@@ -10,6 +10,15 @@
 #include <optional>
 #include <utility>
 
+namespace coroactors {
+
+    class task_group_error : public std::logic_error {
+    public:
+        using std::logic_error::logic_error;
+    };
+
+} // namespace coroactors
+
 namespace coroactors::detail {
 
     /**
@@ -193,7 +202,7 @@ namespace coroactors::detail {
                 // Note: this only protects against synchronized coroutines
                 // calling awaiting methods at the same time. It does not
                 // prevent data races.
-                throw std::logic_error("task group cannot be awaited by multiple coroutines");
+                throw task_group_error("task group cannot be awaited by multiple coroutines");
             }
 
             if (ready_queue) {
@@ -390,7 +399,7 @@ namespace coroactors::detail {
 
         bool await_ready(stop_token token = {}) {
             if (sink->count() == 0) {
-                throw std::out_of_range("task group has no tasks to await");
+                throw task_group_error("task group has no tasks to await");
             }
 
             if (sink->await_ready()) {
@@ -564,7 +573,7 @@ namespace coroactors::detail {
 
         template<awaitable_with_stop_token_propagation Awaitable>
         class pass_stop_token_awaiter {
-            using Awaiter = awaiter_transform_type_t<Awaitable>;
+            using Awaiter = awaiter_type_t<Awaitable>;
 
         public:
             pass_stop_token_awaiter(Awaitable&& awaitable, task_group_promise& self)

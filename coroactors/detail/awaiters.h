@@ -89,30 +89,20 @@ namespace coroactors::detail {
     }
 
     /**
-     * Transforms awaitable into its awaitable type, which may be an rvalue reference
+     * Returns an Awaiter type from an Awaitable deduced type, which is often
+     * an rvalue reference when Awaitable is also an Awaiter.
      *
      * Best for await_transform classes, where it's guaranteed that original
-     * awaitable and a transformed awaiter have the same lifetime. Similar to
-     * having an `Awaiter&&` deduced argument in a wrapper function.
+     * awaitable and a transformed awaiter have the same lifetime, similar to
+     * having an `Awaiter&&` deduced argument in a wrapper function. When
+     * lifetimes are not guaranteed to match use std::decay_t on the result.
      */
     template<class Awaitable, class Promise = void>
         requires awaitable<Awaitable, Promise>
-    using awaiter_transform_type_t = decltype(get_awaiter(std::declval<Awaitable&&>()));
+    using awaiter_type_t = decltype(get_awaiter(std::declval<Awaitable&&>()));
 
     /**
-     * Transforms awaitable into its awaitable type, but removes a reference
-     *
-     * This is useful for wrapper classes, where the result may be transferred
-     * somewhere else (detach_awaitable, task_group, etc.) and the original
-     * awaitable may be destroyed before the result finished awaiting. Similar
-     * to having an `Awaiter` deduced argument in a wrapper function.
-     */
-    template<class Awaitable, class Promise = void>
-        requires awaitable<Awaitable, Promise>
-    using awaiter_safe_type_t = std::decay_t<awaiter_transform_type_t<Awaitable, Promise>>;
-
-    /**
-     * The result type returned from an awaiter (not awaitable)
+     * The result type returned from an awaiter (not an awaitable)
      */
     template<class Awaiter, class Promise = void>
         requires awaiter<Awaiter, Promise>
@@ -123,7 +113,7 @@ namespace coroactors::detail {
      */
     template<class Awaitable, class Promise = void>
         requires awaitable<Awaitable, Promise>
-    using await_result_t = awaiter_result_t<awaiter_transform_type_t<Awaitable>>;
+    using await_result_t = awaiter_result_t<awaiter_type_t<Awaitable>>;
 
     /**
      * Concept for awaiters that have a wrapped_awaiter_type typedef defined
@@ -152,7 +142,7 @@ namespace coroactors::detail {
     using awaitable_unwrap_awaiter_type = awaiter_unwrap_awaiter_type<
         std::conditional_t<
             has_co_await<Awaitable, Promise>,
-            awaiter_safe_type_t<Awaitable, Promise>,
+            std::decay_t<awaiter_type_t<Awaitable, Promise>>,
             Awaitable>>;
 
 } // namespace coroactors::detail

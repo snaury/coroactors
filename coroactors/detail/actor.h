@@ -5,10 +5,16 @@
 #include <coroactors/stop_token.h>
 #include <coroactors/with_resume_callback.h>
 #include <cassert>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 namespace coroactors {
+
+    class actor_error : public std::logic_error {
+    public:
+        using std::logic_error::logic_error;
+    };
 
     template<class T>
     class actor;
@@ -395,7 +401,7 @@ namespace coroactors::detail {
 
         void check_context_initialized() const {
             if (!context_initialized) [[unlikely]] {
-                throw std::logic_error("actor must co_await context first");
+                throw actor_error("actor must co_await context first");
             }
         }
 
@@ -472,7 +478,7 @@ namespace coroactors::detail {
         template<awaitable Awaitable>
         class same_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
-            using Awaiter = awaiter_transform_type_t<Awaitable>;
+            using Awaiter = awaiter_type_t<Awaitable>;
             // Note: Result may be a reference type
             using Result = awaiter_result_t<Awaiter>;
 
@@ -578,7 +584,7 @@ namespace coroactors::detail {
         template<awaitable Awaitable>
         class change_context_wrapped_awaiter {
             // Note: Awaiter may be a reference type
-            using Awaiter = awaiter_transform_type_t<Awaitable>;
+            using Awaiter = awaiter_type_t<Awaitable>;
             // Note: Result may be a reference type
             using Result = awaiter_result_t<Awaiter>;
 
@@ -708,7 +714,7 @@ namespace coroactors::detail {
 
         template<class Awaitable>
         class actor_passthru_awaiter {
-            using Awaiter = awaiter_transform_type_t<Awaitable>;
+            using Awaiter = awaiter_type_t<Awaitable>;
             using Result = awaiter_result_t<Awaiter>;
 
         public:

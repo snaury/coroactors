@@ -825,7 +825,7 @@ namespace coroactors::detail {
 
     template<awaitable_with_stop_token_propagation Awaitable>
     class with_deadline_awaiter {
-        using Awaiter = awaiter_safe_type_t<Awaitable>;
+        using Awaiter = std::decay_t<awaiter_type_t<Awaitable>>;
 
     public:
         using wrapped_awaiter_type = awaiter_unwrap_awaiter_type<Awaiter>;

@@ -55,7 +55,23 @@ namespace coroactors::detail {
             return result_.index() == 2;
         }
 
-        std::add_lvalue_reference_t<T> get_value() const {
+        std::add_lvalue_reference_t<T> get_value() {
+            switch (result_.index()) {
+                case 1: {
+                    if constexpr (std::is_void_v<T>) {
+                        return;
+                    } else {
+                        return std::get<1>(result_);
+                    }
+                }
+                case 2: {
+                    std::rethrow_exception(std::get<2>(result_));
+                }
+            }
+            throw result_error("result has neither value nor exception");
+        }
+
+        std::add_lvalue_reference_t<const T> get_value() const {
             switch (result_.index()) {
                 case 1: {
                     if constexpr (std::is_void_v<T>) {

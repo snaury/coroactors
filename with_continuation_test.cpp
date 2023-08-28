@@ -1,7 +1,7 @@
 #include <coroactors/with_continuation.h>
 #include <coroactors/actor.h>
-#include <coroactors/detach_awaitable.h>
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/packaged_awaitable.h>
 #include <exception>
 #include <functional>
 #include <gtest/gtest.h>
@@ -48,7 +48,7 @@ struct with_suspend_hook {
 
 template<detail::awaitable Awaitable>
 class autostart_inspect {
-    using Awaiter = detail::awaiter_transform_type_t<Awaitable>;
+    using Awaiter = detail::awaiter_type_t<Awaitable>;
 
 public:
     autostart_inspect(Awaitable&& awaitable)
@@ -333,7 +333,6 @@ actor<int> actor_with_result(const actor_context& context, int& stage, int resul
 TEST(WithContinuationTest, ActorCompleteSync) {
     int stage = 0;
     int rstage = 0;
-    int result = 0;
 
     test_scheduler scheduler;
     actor_context context(scheduler);
@@ -350,15 +349,12 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     EXPECT_EQ(scheduler.queue.size(), 1);
 
     // Start another actor function
-    detach_awaitable(
-        actor_with_result(context, rstage, 42),
-        [&](int value) {
-            result = value;
-        });
+    auto result = packaged_awaitable(
+        actor_with_result(context, rstage, 42));
 
     // It will be enqueued after the first one (in the mailbox)
     EXPECT_EQ(rstage, 0);
-    EXPECT_EQ(result, 0);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(scheduler.queue.size(), 1);
 
     // Activate the context
@@ -367,14 +363,13 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     // The first function should complete and transfer to the second one
     EXPECT_EQ(stage, 3);
     EXPECT_EQ(rstage, 1);
-    EXPECT_EQ(result, 42);
+    EXPECT_EQ(*result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 }
 
 TEST(WithContinuationTest, ActorCompleteAsync) {
     int stage = 0;
     int rstage = 0;
-    int result = 0;
 
     test_scheduler scheduler;
     actor_context context(scheduler);
@@ -392,15 +387,12 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(scheduler.queue.size(), 1);
 
     // Start another actor function
-    detach_awaitable(
-        actor_with_result(context, rstage, 42),
-        [&](int value) {
-            result = value;
-        });
+    auto result = packaged_awaitable(
+        actor_with_result(context, rstage, 42));
 
     // It will be enqueued after the first one (in the mailbox)
     EXPECT_EQ(rstage, 0);
-    EXPECT_EQ(result, 0);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(scheduler.queue.size(), 1);
 
     // Activate the context
@@ -412,7 +404,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
 
     // However the second function should have started running and completed
     EXPECT_EQ(rstage, 1);
-    EXPECT_EQ(result, 42);
+    EXPECT_EQ(*result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0);
 
     // Resume the continuation, it should not monopolize our thread here
@@ -459,12 +451,11 @@ actor<void> actor_wrapper(actor<void> nested, int* refs) {
 
 TEST(WithContinuationTest, DestroyUnwind) {
     int stage = 0;
-    bool finished = false;
     int refs = 0;
 
     continuation<> suspended;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
@@ -472,30 +463,27 @@ TEST(WithContinuationTest, DestroyUnwind) {
                     EXPECT_EQ(refs, 3);
                     suspended = c;
                 }),
-            &refs),
-        [&]{
-            finished = true;
-        });
+            &refs));
 
     EXPECT_EQ(stage, 2);
     ASSERT_TRUE(suspended);
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(refs, 2);
 
     // Destroy continuation
     suspended.reset();
 
     // Coroutine shouldn't finish, but stack should be unwound
-    EXPECT_FALSE(finished);
+    EXPECT_FALSE(result.running());
+    EXPECT_FALSE(result);
     ASSERT_EQ(refs, 0);
 }
 
 TEST(WithContinuationTest, DestroyFromCallback) {
     int stage = 0;
-    bool finished = false;
     int refs = 0;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<>&& c) {
@@ -503,38 +491,12 @@ TEST(WithContinuationTest, DestroyFromCallback) {
                     EXPECT_EQ(refs, 3);
                     c.reset();
                 }),
-            &refs),
-        [&]{
-            finished = true;
-        });
+            &refs));
 
     EXPECT_EQ(stage, 2);
-    EXPECT_FALSE(finished);
+    EXPECT_FALSE(result.running());
+    EXPECT_FALSE(result);
     EXPECT_EQ(refs, 0);
-}
-
-// A very simple class for grabbing the bottom (outer) coroutine frame
-struct simple_coroutine {
-    std::coroutine_handle<> handle;
-
-    struct promise_type {
-        auto initial_suspend() noexcept { return std::suspend_never{}; }
-        auto final_suspend() noexcept { return std::suspend_never{}; }
-
-        simple_coroutine get_return_object() noexcept {
-            return simple_coroutine{
-                std::coroutine_handle<promise_type>::from_promise(*this),
-            };
-        }
-
-        void unhandled_exception() noexcept { std::terminate(); }
-        void return_void() noexcept {}
-    };
-};
-
-template<class Awaitable>
-simple_coroutine simple_run(Awaitable awaitable) {
-    co_return co_await std::move(awaitable);
 }
 
 TEST(WithContinuationTest, DestroyBottomUp) {
@@ -543,7 +505,7 @@ TEST(WithContinuationTest, DestroyBottomUp) {
 
     continuation<> suspended;
 
-    auto coro = simple_run(
+    auto result = packaged_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
@@ -557,7 +519,7 @@ TEST(WithContinuationTest, DestroyBottomUp) {
     EXPECT_EQ(refs, 2);
     ASSERT_TRUE(suspended);
 
-    coro.handle.destroy();
+    result.destroy();
 
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 0);
@@ -566,12 +528,11 @@ TEST(WithContinuationTest, DestroyBottomUp) {
 TEST(WithContinuationTest, StopToken) {
     int stage = 0;
     int refs = 0;
-    bool finished = false;
 
     stop_source source;
     continuation<> suspended;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         with_stop_token(
             source.get_token(),
             actor_wrapper(
@@ -579,10 +540,7 @@ TEST(WithContinuationTest, StopToken) {
                     [&](continuation<> c) {
                         suspended = c;
                     }),
-                &refs)),
-        [&]{
-            finished = true;
-        });
+                &refs)));
 
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 1);
@@ -591,4 +549,7 @@ TEST(WithContinuationTest, StopToken) {
     EXPECT_FALSE(suspended.get_stop_token().stop_requested());
     source.request_stop();
     EXPECT_TRUE(suspended.get_stop_token().stop_requested());
+    EXPECT_TRUE(result.running());
+    suspended.resume();
+    EXPECT_TRUE(result.success());
 }

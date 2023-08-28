@@ -35,7 +35,7 @@ namespace coroactors {
 
         actor_scheduler& scheduler() const {
             if (!ptr) [[unlikely]] {
-                throw std::logic_error("empty context doesn't have a scheduler");
+                throw std::invalid_argument("empty context doesn't have a scheduler");
             }
             return ptr->scheduler;
         }

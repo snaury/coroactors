@@ -1,6 +1,6 @@
 #include <coroactors/task_group.h>
 #include <coroactors/actor.h>
-#include <coroactors/detach_awaitable.h>
+#include <coroactors/packaged_awaitable.h>
 #include <coroactors/with_task_group.h>
 #include <deque>
 #include <vector>
@@ -75,6 +75,11 @@ private:
     stop_token token;
 };
 
+class no_value_error : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 template<class T>
 struct value_provider {
     std::mutex lock;
@@ -108,7 +113,7 @@ struct value_provider {
 
         T await_resume() {
             if (!result) {
-                throw std::runtime_error("resumed without a value");
+                throw no_value_error("resumed without a value");
             }
             return std::move(*result);
         }
@@ -193,9 +198,8 @@ actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::functio
 TEST(TaskGroupTest, SimpleAsync) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -205,17 +209,14 @@ TEST(TaskGroupTest, SimpleAsync) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 3u);
     provider.resume(1);
     provider.resume(2);
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, 2, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -223,13 +224,12 @@ TEST(TaskGroupTest, SimpleAsync) {
 TEST(TaskGroupTest, SimpleSync) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
     provider.provide(1);
     provider.provide(2);
     provider.provide(3);
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -239,13 +239,10 @@ TEST(TaskGroupTest, SimpleSync) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, 2, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -253,9 +250,8 @@ TEST(TaskGroupTest, SimpleSync) {
 TEST(TaskGroupTest, SimpleMultiThreaded) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 10) {
@@ -265,10 +261,7 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 10u);
     std::latch barrier(10);
@@ -282,7 +275,7 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
     for (auto& t : threads) {
         t.join();
     }
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::sort(result->begin(), result->end());
     std::vector<int> expected;
     for (int i = 1; i <= 10; ++i) {
@@ -294,9 +287,8 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
 TEST(TaskGroupTest, CompleteOutOfOrder) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -306,17 +298,14 @@ TEST(TaskGroupTest, CompleteOutOfOrder) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 3u);
     provider.resume_at(1, 2);
     provider.resume(1);
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 2, 1, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -324,9 +313,8 @@ TEST(TaskGroupTest, CompleteOutOfOrder) {
 TEST(TaskGroupTest, CompleteBeforeAwaited) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -339,19 +327,16 @@ TEST(TaskGroupTest, CompleteBeforeAwaited) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 4u);
     provider.resume(1);
     provider.resume(2);
     provider.resume(3);
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 1u);
     provider.resume(4);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 4, 1, 2, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -359,9 +344,8 @@ TEST(TaskGroupTest, CompleteBeforeAwaited) {
 TEST(TaskGroupTest, LocalReadyQueue) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -380,10 +364,7 @@ TEST(TaskGroupTest, LocalReadyQueue) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 4u);
     // Arrange for two tasks to be ready
@@ -391,14 +372,14 @@ TEST(TaskGroupTest, LocalReadyQueue) {
     provider.resume(2);
     // Unblock coroutine, it will grab value 4 and value 1 and block again
     provider.resume_at(1, 4);
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 2u);
     // Unblock the last task, now we have both ready queue and atomic queue
     provider.resume(3);
     // Unblock coroutine again, it will grab value 5 and finally values 2 and 3
     provider.resume(5);
 
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 4, 1, 5, 2, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -406,21 +387,17 @@ TEST(TaskGroupTest, LocalReadyQueue) {
 TEST(TaskGroupTest, DetachAll) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
                 return EAction::AddTask;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     EXPECT_EQ(result->size(), 0u);
     EXPECT_EQ(provider.queue.size(), 3u);
     // Note: value_provider destructor will fail all tasks
@@ -429,10 +406,8 @@ TEST(TaskGroupTest, DetachAll) {
 TEST(TaskGroupTest, ResumeException) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
-    bool had_exception = false;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -442,29 +417,21 @@ TEST(TaskGroupTest, ResumeException) {
                 return EAction::AwaitTask;
             }
             return EAction::Return;
-        }).result(),
-        [&](auto&& value) {
-            if (value.has_exception()) {
-                had_exception = true;
-            } else {
-                result = std::move(value).take_value();
-            }
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 3u);
     provider.resume(1);
     provider.take().resume();
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(had_exception);
+    ASSERT_TRUE(result.has_exception());
 }
 
 TEST(TaskGroupTest, ResumeExceptionIgnored) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -474,17 +441,14 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
                 return EAction::AwaitTaskWrapped;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 3u);
     provider.resume(1);
     provider.take().resume();
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, -1, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -492,9 +456,8 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
 TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
     size_t last_step = 0;
     value_provider<int> provider;
-    std::optional<std::vector<int>> result;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         run_scenario(provider, [&]{
             auto step = ++last_step;
             if (step <= 3) {
@@ -504,17 +467,14 @@ TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
                 return EAction::AwaitTaskWrapped;
             }
             return EAction::Return;
-        }),
-        [&](auto&& value) {
-            result = std::move(value);
-        });
+        }));
 
     ASSERT_EQ(provider.queue.size(), 3u);
     provider.resume(1);
     provider.take().destroy();
     provider.resume(3);
     EXPECT_EQ(provider.queue.size(), 0u);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, -2, 3 };
     EXPECT_EQ(*result, expected);
 }
@@ -549,15 +509,9 @@ actor<void> check_request_stop() {
 }
 
 TEST(TaskGroupTest, GroupRequestStop) {
-    bool finished = false;
-
-    detach_awaitable(
-        check_request_stop(),
-        [&]{
-            finished = true;
-        });
-
-    ASSERT_TRUE(finished);
+    auto result = packaged_awaitable(
+        check_request_stop());
+    ASSERT_TRUE(result.success());
 }
 
 actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider) {
@@ -593,80 +547,60 @@ actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider)
 TEST(WithTaskGroupTest, ImplicitCancel) {
     int stage = 0;
     value_provider<int> provider;
-    bool finished = false;
-    bool success = false;
 
-    detach_awaitable(
-        do_with_task_group_cancel(stage, provider).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_with_task_group_cancel(stage, provider));
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
     a.resume(42);
     EXPECT_EQ(stage, 3); // returned from group.next()
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     EXPECT_TRUE(b.get_stop_token().stop_requested());
     b.destroy();
     EXPECT_EQ(stage, 5); // returned from with_task_group
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 }
 
 TEST(WithTaskGroupTest, ImplicitCancelException) {
     int stage = 1;
     value_provider<int> provider;
-    bool finished = false;
-    bool success = false;
 
-    detach_awaitable(
-        do_with_task_group_cancel(stage, provider).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_with_task_group_cancel(stage, provider));
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
     a.resume();
     EXPECT_EQ(stage, 2); // group.next() thrown an exception
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     EXPECT_TRUE(b.get_stop_token().stop_requested());
     b.destroy();
     EXPECT_EQ(stage, 4); // with_task_group thrown an exception
-    EXPECT_TRUE(finished);
-    EXPECT_FALSE(success);
+    EXPECT_THROW(*result, no_value_error);
 }
 
 TEST(WithTaskGroupTest, ExplicitCancel) {
     int stage = 0;
     value_provider<int> provider;
-    bool finished = false;
-    bool success = false;
 
     stop_source source;
 
-    detach_awaitable(
+    auto result = packaged_awaitable(
         with_stop_token(
             source.get_token(),
-            do_with_task_group_cancel(stage, provider).result()),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+            do_with_task_group_cancel(stage, provider)));
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
     auto b = provider.take();
@@ -676,14 +610,13 @@ TEST(WithTaskGroupTest, ExplicitCancel) {
     EXPECT_TRUE(a.get_stop_token().stop_requested());
     EXPECT_TRUE(b.get_stop_token().stop_requested());
     EXPECT_EQ(stage, 1); // still waiting on group.next();
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     b.resume(42);
     EXPECT_EQ(stage, 3); // returned from group.next()
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     a.resume();
     EXPECT_EQ(stage, 5); // returned from with_task_group
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 }
 
 struct move_only_int {
@@ -732,28 +665,21 @@ actor<void> do_with_task_group_result_type(int& stage, value_provider<int>& prov
 TEST(WithTaskGroupTest, ResultType) {
     int stage = 0;
     value_provider<int> provider;
-    bool finished = false;
-    bool success = false;
 
-    detach_awaitable(
-        do_with_task_group_result_type(stage, provider).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_with_task_group_result_type(stage, provider));
 
     EXPECT_EQ(stage, 1);
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     a.resume(42);
     EXPECT_EQ(stage, 2);
-    EXPECT_FALSE(finished);
+    EXPECT_TRUE(result.running());
     b.resume(58);
     EXPECT_EQ(stage, 4);
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 }
 
 struct test_scheduler : public actor_scheduler {
@@ -828,17 +754,10 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
     value_provider<int> provider;
     stop_source source;
 
-    bool finished = false;
-    bool success = false;
-
-    detach_awaitable(
+    auto result = packaged_awaitable(
         with_stop_token(
             source.get_token(),
-            do_with_stop_token_context(stage, scheduler, provider).result()),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+            do_with_stop_token_context(stage, scheduler, provider)));
 
     EXPECT_EQ(stage, 4); // waiting for the first value
     ASSERT_EQ(provider.queue.size(), 2u);
@@ -863,8 +782,7 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 7); // finished
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
@@ -915,19 +833,12 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
     value_provider<int> provider;
     stop_source source;
 
-    bool finished = false;
-    bool success = false;
-
     auto when_ready = [&](auto& group) {
         return with_stop_token(source.get_token(), group.when_ready());
     };
 
-    detach_awaitable(
-        do_when_ready_with_token(stage, scheduler, provider, when_ready, true).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, true));
 
     EXPECT_EQ(stage, 4); // waiting in wait_next
     ASSERT_EQ(provider.queue.size(), 2u);
@@ -945,8 +856,7 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 8); // finished
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
@@ -957,19 +867,12 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
     value_provider<int> provider;
     stop_source source;
 
-    bool finished = false;
-    bool success = false;
-
     auto when_ready = [&](auto& group) {
         return with_stop_token(source.get_token(), group.when_ready());
     };
 
-    detach_awaitable(
-        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
     EXPECT_EQ(stage, 4); // waiting in wait_next
     ASSERT_EQ(provider.queue.size(), 2u);
@@ -993,8 +896,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 8); // finished
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
@@ -1005,20 +907,13 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
     value_provider<int> provider;
     stop_source source;
 
-    bool finished = false;
-    bool success = false;
-
     auto when_ready = [&](auto& group) {
         source.request_stop();
         return with_stop_token(source.get_token(), group.when_ready());
     };
 
-    detach_awaitable(
-        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
     EXPECT_EQ(stage, 5); // waiting for the first value
     ASSERT_EQ(provider.queue.size(), 2u);
@@ -1036,8 +931,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 8); // finished
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
@@ -1070,9 +964,6 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
     value_provider<int> provider;
     stop_source source;
 
-    bool finished = false;
-    bool success = false;
-
     auto when_ready = [&](auto& group) {
         return await_suspend_hook{
             with_stop_token(source.get_token(), group.when_ready()),
@@ -1082,12 +973,8 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
         };
     };
 
-    detach_awaitable(
-        do_when_ready_with_token(stage, scheduler, provider, when_ready, false).result(),
-        [&](auto&& result) {
-            finished = true;
-            success = result.has_value();
-        });
+    auto result = packaged_awaitable(
+        do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
     ASSERT_EQ(provider.queue.size(), 2u);
     auto a = provider.take();
@@ -1109,8 +996,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     EXPECT_EQ(stage, 8); // finished
-    EXPECT_TRUE(finished);
-    EXPECT_TRUE(success);
+    EXPECT_TRUE(result.success());
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }

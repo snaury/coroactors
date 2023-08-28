@@ -1,5 +1,5 @@
 #include <coroactors/actor.h>
-#include <coroactors/detach_awaitable.h>
+#include <coroactors/packaged_awaitable.h>
 #include <coroactors/with_continuation.h>
 #include <gtest/gtest.h>
 #include <deque>
@@ -97,66 +97,14 @@ struct test_scheduler : public actor_scheduler {
     bool locked = false;
 };
 
-template<class T>
-struct run_result {
-    struct data_t {
-        std::optional<T> value;
-        bool finished = false;
-    };
-
-    struct callback_t {
-        std::shared_ptr<data_t> data;
-
-        explicit callback_t(const std::shared_ptr<data_t>& data)
-            : data(data)
-        {}
-
-        callback_t(callback_t&&) = default;
-        callback_t(const callback_t&) = delete;
-        callback_t& operator=(const callback_t&) = delete;
-
-        ~callback_t() {
-            if (data) {
-                data->finished = true;
-            }
-        }
-
-        void operator()(T&& value) {
-            data->value.emplace(std::move(value));
-        }
-    };
-
-    callback_t callback() {
-        return callback_t(data);
-    }
-
-    bool finished() const { return data->finished; }
-
-    explicit operator bool() const { return bool(data->value); }
-
-    T* operator->() const { return &*data->value; }
-    T& operator*() const { return *data->value; }
-
-    std::shared_ptr<data_t> data = std::make_shared<data_t>();
-};
-
-template<class Awaitable>
-run_result<std::decay_t<detail::await_result_t<Awaitable>>>
-run(Awaitable&& awaitable) {
-    run_result<std::decay_t<detail::await_result_t<Awaitable>>> result;
-    detach_awaitable(std::forward<Awaitable>(awaitable), result.callback());
-    return result;
-}
-
 actor<int> actor_return_const(int value) {
     co_return value;
 }
 
 TEST(ActorTest, ImmediateReturn) {
-    auto result = run(actor_return_const(42));
-    ASSERT_TRUE(result.finished());
-    ASSERT_TRUE(result);
-    ASSERT_EQ(*result, 42);
+    auto r = packaged_awaitable(actor_return_const(42));
+    ASSERT_TRUE(r.success());
+    ASSERT_EQ(*r, 42);
 }
 
 actor<void> actor_await_const_without_context(int value) {
@@ -183,14 +131,14 @@ actor<void> actor_await_sleep_without_context() {
 }
 
 TEST(ActorTest, CannotAwaitWithoutContext) {
-    auto a = run(actor_await_const_without_context(42).result());
-    EXPECT_TRUE(a && a->has_exception());
-    auto b = run(actor_await_caller_context_without_context().result());
-    EXPECT_TRUE(b && b->has_exception());
-    auto c = run(actor_await_current_context_without_context().result());
-    EXPECT_TRUE(c && c->has_exception());
-    auto d = run(actor_await_sleep_without_context().result());
-    EXPECT_TRUE(d && d->has_exception());
+    auto a = packaged_awaitable(actor_await_const_without_context(42));
+    EXPECT_TRUE(a.has_exception());
+    auto b = packaged_awaitable(actor_await_caller_context_without_context());
+    EXPECT_TRUE(b.has_exception());
+    auto c = packaged_awaitable(actor_await_current_context_without_context());
+    EXPECT_TRUE(c.has_exception());
+    auto d = packaged_awaitable(actor_await_sleep_without_context());
+    EXPECT_TRUE(d.has_exception());
 }
 
 actor<void> actor_empty_context() {
@@ -204,10 +152,10 @@ actor<void> actor_empty_caller_context() {
 }
 
 TEST(ActorTest, StartWithEmptyContext) {
-    auto a = run(actor_empty_context().result());
-    EXPECT_TRUE(a && a->has_value());
-    auto b = run(actor_empty_caller_context().result());
-    EXPECT_TRUE(b && b->has_value());
+    auto a = packaged_awaitable(actor_empty_context());
+    EXPECT_TRUE(a.success());
+    auto b = packaged_awaitable(actor_empty_caller_context());
+    EXPECT_TRUE(b.success());
 }
 
 actor<void> actor_with_specific_context(const actor_context& context) {
@@ -223,8 +171,8 @@ TEST(ActorTest, StartWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
     // Not nested, so runs in the same thread
-    auto r = run(actor_with_specific_context(context).result());
-    EXPECT_TRUE(r && r->has_value());
+    auto r = packaged_awaitable(actor_with_specific_context(context));
+    EXPECT_TRUE(r.success());
 }
 
 TEST(ActorTest, DetachWithSpecificContext) {
@@ -246,8 +194,8 @@ TEST(ActorTest, AwaitWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
     // The same thread of execution, no difference to run/detach
-    auto r = run(actor_without_context_awaits_specific_context(context).result());
-    EXPECT_TRUE(r && r->has_value());
+    auto r = packaged_awaitable(actor_without_context_awaits_specific_context(context));
+    EXPECT_TRUE(r.success());
 }
 
 actor<void> actor_with_context_awaits_empty_context(int& stage, const actor_context& context) {
@@ -264,39 +212,39 @@ TEST(ActorTest, AwaitEmptyFromSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
     int stage = 0;
-    auto r = run(actor_with_context_awaits_empty_context(stage, context).result());
+    auto r = packaged_awaitable(actor_with_context_awaits_empty_context(stage, context));
     EXPECT_EQ(stage, 3); // we should defer on the return path
     ASSERT_EQ(scheduler.queue.size(), 1u);
     EXPECT_EQ(scheduler.queue[0].deferred, true);
     scheduler.run_next();
     EXPECT_EQ(stage, 4);
-    EXPECT_TRUE(r && r->has_value());
+    EXPECT_TRUE(r.success());
 }
 
 actor<void> actor_without_context_runs_specific_context(const actor_context& context,
-        std::optional<run_result<detail::result<void>>>& r,
+        std::optional<packaged_awaitable<void>>& r,
         std::function<void()> before_return)
 {
     co_await no_actor_context();
-    r = run(actor_with_specific_context(context).result());
+    r.emplace(actor_with_specific_context(context));
     before_return();
 }
 
 TEST(ActorTest, StartNestedWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    std::optional<run_result<detail::result<void>>> r1;
-    auto r = run(actor_without_context_runs_specific_context(context, r1,
+    std::optional<packaged_awaitable<void>> r1;
+    auto r = packaged_awaitable(actor_without_context_runs_specific_context(context, r1,
         [&]{
             EXPECT_TRUE(r1);
             EXPECT_FALSE(*r1);
-        }).result());
-    EXPECT_TRUE(r && r->has_value());
-    EXPECT_TRUE(r1 && !*r1);
+        }));
+    EXPECT_TRUE(r.success());
+    EXPECT_TRUE(r1->running());
     ASSERT_EQ(scheduler.queue.size(), 1u);
     scheduler.run_next();
     ASSERT_EQ(scheduler.queue.size(), 0u);
-    EXPECT_TRUE(*r1 && (*r1)->has_value());
+    EXPECT_TRUE(r1->success());
 }
 
 actor<void> actor_check_sleep(const actor_context& context, bool expected,
@@ -315,19 +263,19 @@ TEST(ActorTest, Sleep) {
     actor_context context(scheduler);
     {
         SCOPED_TRACE("no actor context");
-        auto r = run(actor_check_sleep(no_actor_context, false).result());
-        EXPECT_TRUE(r && r->has_value());
+        auto r = packaged_awaitable(actor_check_sleep(no_actor_context, false));
+        EXPECT_TRUE(r.success());
     }
     {
         SCOPED_TRACE("timers disabled");
-        auto r = run(actor_check_sleep(context, false).result());
+        auto r = packaged_awaitable(actor_check_sleep(context, false));
         ASSERT_EQ(scheduler.queue.size(), 0u);
-        EXPECT_TRUE(r && r->has_value());
+        EXPECT_TRUE(r.success());
     }
     scheduler.timers_enabled = true;
     {
         SCOPED_TRACE("timer triggers");
-        auto r = run(actor_check_sleep(context, true).result());
+        auto r = packaged_awaitable(actor_check_sleep(context, true));
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         scheduler.wake_next();
@@ -336,7 +284,7 @@ TEST(ActorTest, Sleep) {
         ASSERT_EQ(scheduler.queue.size(), 1u);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
-        EXPECT_TRUE(r && r->has_value());
+        EXPECT_TRUE(r.success());
     }
     {
         SCOPED_TRACE("cancelled before sleep");
@@ -344,15 +292,15 @@ TEST(ActorTest, Sleep) {
         auto before_sleep = [&]{
             source.request_stop();
         };
-        auto r = run(with_stop_token(source.get_token(), actor_check_sleep(context, false, before_sleep).result()));
+        auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false, before_sleep)));
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 0u);
-        EXPECT_TRUE(r && r->has_value());
+        EXPECT_TRUE(r.success());
     }
     {
         SCOPED_TRACE("cancelled during sleep");
         stop_source source;
-        auto r = run(with_stop_token(source.get_token(), actor_check_sleep(context, false).result()));
+        auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false)));
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         source.request_stop();
@@ -360,7 +308,7 @@ TEST(ActorTest, Sleep) {
         ASSERT_EQ(scheduler.queue.size(), 1u);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
-        EXPECT_TRUE(r && r->has_value());
+        EXPECT_TRUE(r.success());
     }
 }
 
@@ -390,10 +338,10 @@ TEST(TestActor, AbortedSuspend) {
     test_scheduler scheduler;
     actor_context context(scheduler);
 
-    auto r = run(actor_aborted_suspend(context).result());
+    auto r = packaged_awaitable(actor_aborted_suspend(context));
     // Suspend is aborted, so we expect no context switch on the return path
     EXPECT_EQ(scheduler.queue.size(), 0u);
-    EXPECT_TRUE(r && r->has_value());
+    EXPECT_TRUE(r.success());
 }
 
 struct throw_during_suspend {
@@ -420,9 +368,9 @@ TEST(TestActor, ThrowDuringSuspend) {
     test_scheduler scheduler;
     actor_context context(scheduler);
 
-    auto r = run(actor_throw_during_suspend(context).result());
+    auto r = packaged_awaitable(actor_throw_during_suspend(context));
     // Suspend throws an exception, so we expect to observe it in the actor
     // without context switches, double frees or any leaks.
     EXPECT_EQ(scheduler.queue.size(), 0u);
-    EXPECT_TRUE(r && r->has_value());
+    EXPECT_TRUE(r.success());
 }

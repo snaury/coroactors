@@ -108,7 +108,7 @@ namespace coroactors {
 
             bool await_ready() {
                 if (sink->count() == 0) {
-                    throw std::out_of_range("task group has no tasks to await");
+                    throw task_group_error("task group has no tasks to await");
                 }
                 return sink->await_ready();
             }
@@ -162,7 +162,7 @@ namespace coroactors {
 
             bool await_ready() {
                 if (sink->count() == 0) {
-                    throw std::out_of_range("task group has no tasks to await");
+                    throw task_group_error("task group has no tasks to await");
                 }
                 return sink->await_ready();
             }

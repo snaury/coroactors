@@ -1,3 +1,4 @@
+#pragma once
 #include <coroactors/detail/awaiters.h>
 #include <coroutine>
 
@@ -48,14 +49,14 @@ namespace coroactors::detail {
     template<class Awaitable>
     concept awaitable_with_stop_token_propagation =
         awaitable<Awaitable> &&
-        has_await_ready_stop_token<awaiter_safe_type_t<Awaitable>>;
+        has_await_ready_stop_token<std::decay_t<awaiter_type_t<Awaitable>>>;
 
     /**
      * Awaiter that overrides stop token of an awaitable
      */
     template<awaitable_with_stop_token_propagation Awaitable>
     class with_stop_token_awaiter {
-        using Awaiter = awaiter_safe_type_t<Awaitable>;
+        using Awaiter = std::decay_t<awaiter_type_t<Awaitable>>;
 
     public:
         using wrapped_awaiter_type = awaiter_unwrap_awaiter_type<Awaiter>;
