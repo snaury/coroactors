@@ -50,7 +50,7 @@ namespace coroactors::detail {
             return initialized_.load(std::memory_order_relaxed) == true;
         }
 
-        std::add_rvalue_reference_t<T> take_value() {
+        T take_value() {
             // This synchronizes with release in set_value/set_exception
             if (initialized_.load(std::memory_order_acquire)) {
                 switch (result_.index()) {

@@ -821,7 +821,7 @@ namespace coroactors::detail {
             return p.start_await();
         }
 
-        std::add_rvalue_reference_t<T> await_resume() {
+        T await_resume() {
             suspended = false;
             return handle.promise().take_result().take_value();
         }
@@ -878,7 +878,7 @@ namespace coroactors::detail {
             return p.start_await();
         }
 
-        result<T>&& await_resume() {
+        result<T> await_resume() {
             suspended = false;
             return handle.promise().take_result();
         }
