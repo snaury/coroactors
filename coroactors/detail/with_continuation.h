@@ -227,6 +227,7 @@ namespace coroactors::detail {
                 return false;
 
             case status::destroyed:
+            default:
                 // All continuation object references have been destroyed
                 // before we could set the continuation. We destroy
                 // ourselves and return true since we are not resuming.

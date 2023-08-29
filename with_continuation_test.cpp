@@ -337,7 +337,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
 
     // It should initially block at the preemption point
     EXPECT_EQ(stage, 1);
-    EXPECT_EQ(scheduler.queue.size(), 1);
+    EXPECT_EQ(scheduler.queue.size(), 1u);
 
     // Start another actor function
     auto result = packaged_awaitable(
@@ -346,7 +346,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     // It will be enqueued after the first one (in the mailbox)
     EXPECT_EQ(rstage, 0);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(scheduler.queue.size(), 1);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
 
     // Activate the context
     scheduler.run_next();
@@ -355,7 +355,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     EXPECT_EQ(stage, 3);
     EXPECT_EQ(rstage, 1);
     EXPECT_EQ(*result, 42);
-    EXPECT_EQ(scheduler.queue.size(), 0);
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 }
 
 TEST(WithContinuationTest, ActorCompleteAsync) {
@@ -375,7 +375,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
 
     // It should initially block at the preemption point
     EXPECT_EQ(stage, 1);
-    EXPECT_EQ(scheduler.queue.size(), 1);
+    EXPECT_EQ(scheduler.queue.size(), 1u);
 
     // Start another actor function
     auto result = packaged_awaitable(
@@ -384,7 +384,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     // It will be enqueued after the first one (in the mailbox)
     EXPECT_EQ(rstage, 0);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(scheduler.queue.size(), 1);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
 
     // Activate the context
     scheduler.run_next();
@@ -396,20 +396,20 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     // However the second function should have started running and completed
     EXPECT_EQ(rstage, 1);
     EXPECT_EQ(*result, 42);
-    EXPECT_EQ(scheduler.queue.size(), 0);
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 
     // Resume the continuation, it should not monopolize our thread here
     suspended.resume();
 
     EXPECT_EQ(stage, 2);
-    ASSERT_EQ(scheduler.queue.size(), 1);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
 
     // Activate the context
     scheduler.run_next();
 
     // It should now complete
     EXPECT_EQ(stage, 3);
-    EXPECT_EQ(scheduler.queue.size(), 0);
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 }
 
 class count_refs_guard {
