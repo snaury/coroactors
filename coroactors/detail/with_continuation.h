@@ -1,4 +1,6 @@
 #pragma once
+#include <coroactors/detail/intrusive_ptr.h>
+#include <coroactors/detail/result.h>
 #include <coroactors/stop_token.h>
 #include <atomic>
 #include <cassert>
@@ -22,103 +24,129 @@ namespace coroactors::detail {
     };
 
     template<class T>
-    class continuation_result {
-    public:
-        continuation_result() = default;
-
-        template<class... TArgs>
-        void set_value(TArgs&&... args) {
-            result_.template emplace<1>(std::forward<TArgs>(args)...);
-            initialized_.store(true, std::memory_order_release);
-        }
-
-        void set_exception(std::exception_ptr&& e) noexcept {
-            result_.template emplace<2>(std::move(e));
-            initialized_.store(true, std::memory_order_release);
-        }
-
-        bool has_result() const noexcept {
-            // Note: this is relaxed because it is only an observer of whether
-            // set_value/set_exception was called before the last shared_ptr
-            // reference was dropped. It's important however that it's not
-            // stale when weak_ptr::lock returns nullptr, otherwise we may
-            // decide set_value/set_exception have never been called. Now to
-            // guarantee safe destruction refcount decrements usually have
-            // memory_order_acq_rel, so the store to initialized_ must have
-            // happened before weak_ptr::lock returns nullptr, and thus no
-            // stale value should ever be observed.
-            return initialized_.load(std::memory_order_relaxed) == true;
-        }
-
-        T take_value() {
-            // This synchronizes with release in set_value/set_exception
-            if (initialized_.load(std::memory_order_acquire)) {
-                switch (result_.index()) {
-                case 1:
-                    if constexpr (!std::is_void_v<T>) {
-                        return std::get<1>(std::move(result_));
-                    } else {
-                        return;
-                    }
-                case 2:
-                    std::rethrow_exception(std::get<2>(std::move(result_)));
-                }
-            }
-            throw std::logic_error("unexpected state in take_value");
-        }
-
-    private:
-        struct Void {};
-        using Result = std::conditional_t<std::is_void_v<T>, Void, T>;
-        std::variant<std::monostate, Result, std::exception_ptr> result_;
-        std::atomic<bool> initialized_{ false };
-    };
-
-    template<class T>
     class continuation_state {
+    private:
+        static constexpr uintptr_t MarkerFinished = 1;
+        static constexpr uintptr_t MarkerDestroyed = 2;
+
     public:
-        continuation_state(continuation_result<T>* result, stop_token&& token) noexcept
-            : result(result)
+        continuation_state(result<T>* result_ptr, stop_token&& token) noexcept
+            : result_ptr(result_ptr)
             , token(std::move(token))
         {}
-
-        ~continuation_state() noexcept {
-            // This synchronizes with release in set_continuation
-            void* addr = continuation.exchange(
-                reinterpret_cast<void*>(MarkerDestroyed),
-                std::memory_order_acquire);
-            assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
-            if (addr && addr != reinterpret_cast<void*>(MarkerFinished)) {
-                // Continuation was not resumed and this is the last reference
-                // Propagate this as an awaiting coroutine frame destruction
-                std::coroutine_handle<>::from_address(addr).destroy();
-            }
-        }
 
         continuation_state(const continuation_state&) = delete;
         continuation_state& operator=(const continuation_state&) = delete;
 
-        bool set_continuation(std::coroutine_handle<> c) noexcept {
+        void add_ref() noexcept {
+            refcount_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        size_t release_ref() noexcept {
+            return refcount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        }
+
+        void add_strong_ref() noexcept {
+            strong_refcount_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void release_strong_ref() noexcept {
+            // Note: we need memory_order_acq_rel here, because thread 1 may
+            // start setting the result, but fail with an exception before it
+            // calls finish, decrement strong refcount (not zero yet), and
+            // pause before decrementing the full refcount. Then thread 2 would
+            // drop the strong refcount to zero and finally start destroying
+            // the coroutine. That coroutine needs the result modifications to
+            // happen before its destruction, and so we need release in thread 1
+            // and acquire in thread 2.
+            if (strong_refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                // The last strong owner marks continuation as destroyed,
+                // unless the caller finished with a value first (possibly in
+                // another thread).
+                destroy_strong();
+            }
+        }
+
+        void init_strong() noexcept {
+            add_ref();
+            add_strong_ref();
+        }
+
+        void destroy_strong() noexcept {
+            void* addr = continuation.load(std::memory_order_relaxed);
+            while (addr != reinterpret_cast<void*>(MarkerFinished)) {
+                assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
+                // Note: we need memory_order_acq_rel on success here, because
+                // we need set_continuation to happen before the destruction,
+                // but also we need everything else to happen before destroy
+                // marker is possibly observed in an awaiter, where it would
+                // call destructors.
+                if (continuation.compare_exchange_weak(
+                        addr, reinterpret_cast<void*>(MarkerDestroyed),
+                        std::memory_order_acq_rel, std::memory_order_relaxed))
+                {
+                    if (addr) {
+                        std::coroutine_handle<>::from_address(addr).destroy();
+                    }
+                    break;
+                }
+            }
+
+            // Remove the additional reference to the object
+            if (release_ref() == 0) {
+                delete this;
+            }
+        }
+
+        bool ready() const noexcept {
+            // We use memory_order_acquire to also synchronize with the result
+            void* addr = continuation.load(std::memory_order_acquire);
+            return addr == reinterpret_cast<void*>(MarkerFinished);
+        }
+
+        enum class status : uintptr_t {
+            success = 0,
+            finished = MarkerFinished,
+            destroyed = MarkerDestroyed,
+        };
+
+        status set_continuation(std::coroutine_handle<> c) noexcept {
             void* addr = nullptr;
-            // Note: this synchronizes with later resume or destroy
-            // This does not synchronize with the result of resume in any way
-            return continuation.compare_exchange_strong(addr, c.address(), std::memory_order_release);
+            // Note: this synchronizes with later resume or destroy (release),
+            // and also synchronizes with possible finish or destroy calls.
+            if (continuation.compare_exchange_strong(
+                    addr, c.address(), std::memory_order_acq_rel))
+            {
+                return status::success;
+            }
+            assert(
+                addr == reinterpret_cast<void*>(MarkerFinished) ||
+                addr == reinterpret_cast<void*>(MarkerDestroyed));
+            return static_cast<status>(reinterpret_cast<uintptr_t>(addr));
         }
 
         template<class... TArgs>
         void set_value(TArgs&&... args) {
-            result->set_value(std::forward<TArgs>(args)...);
+            if (!result_ptr) {
+                throw std::logic_error("coroutine frame resumed or destroyed already");
+            }
+            result_ptr->set_value(std::forward<TArgs>(args)...);
         }
 
-        void set_exception(std::exception_ptr&& e) noexcept {
-            result->set_exception(std::move(e));
+        void set_exception(std::exception_ptr&& e) {
+            if (!result_ptr) {
+                throw std::logic_error("coroutine frame resumed or destroyed already");
+            }
+            result_ptr->set_exception(std::move(e));
         }
 
         std::coroutine_handle<> finish() noexcept {
-            // This synchronizes with release in set_continuation
+            // Try to catch attempts to resume again
+            result_ptr = nullptr;
+            // This synchronizes with acquire/release in set_continuation
             void* addr = continuation.exchange(
                 reinterpret_cast<void*>(MarkerFinished),
-                std::memory_order_acquire);
+                std::memory_order_acq_rel);
             assert(addr != reinterpret_cast<void*>(MarkerFinished));
             assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
             if (addr) {
@@ -129,10 +157,13 @@ namespace coroactors::detail {
         }
 
         void cancel() noexcept {
+            // Try to catch attempts to resume later
+            result_ptr = nullptr;
             // Called by awaiter when it is destroyed without resuming
             // Tries to make sure it will not be resumed or destroyed later,
             // but it's up to the user to make sure there is no race with both
             // ends trying to resume/destroy the same coroutine frame.
+            // Note: we don't care if it was finished or destroyed before.
             continuation.store(nullptr, std::memory_order_release);
         }
 
@@ -141,19 +172,19 @@ namespace coroactors::detail {
         }
 
     private:
-        static constexpr uintptr_t MarkerFinished = 1;
-        static constexpr uintptr_t MarkerDestroyed = 2;
-
-    private:
-        continuation_result<T>* const result;
+        std::atomic<size_t> refcount_{ 0 };
+        std::atomic<size_t> strong_refcount_{ 0 };
         std::atomic<void*> continuation{ nullptr };
+        result<T>* result_ptr;
         stop_token token;
     };
 
     template<class T, class Callback>
     class [[nodiscard]] with_continuation_awaiter
-        : private continuation_result<T>
+        : private result<T>
     {
+        using status = typename continuation_state<T>::status;
+
     public:
         with_continuation_awaiter(Callback& callback) noexcept
             : callback(callback)
@@ -169,48 +200,39 @@ namespace coroactors::detail {
         {}
 
         ~with_continuation_awaiter() noexcept {
-            if (auto state = state_.lock()) {
-                state->cancel();
+            if (state_) {
+                state_->cancel();
             }
         }
 
         bool await_ready(stop_token token = {}) noexcept {
-            auto state = std::make_shared<continuation_state<T>>(
-                static_cast<continuation_result<T>*>(this), std::move(token));
-            state_ = state;
-            std::forward<Callback>(callback)(continuation<T>(state));
-            // Avoid suspending when continuation has the result already
-            return this->has_result();
+            state_.reset(new continuation_state<T>(
+                static_cast<result<T>*>(this), std::move(token)));
+            std::forward<Callback>(callback)(continuation<T>(state_.get()));
+            // Avoid suspending when the result is ready
+            return state_->ready();
         }
 
         __attribute__((__noinline__))
         bool await_suspend(std::coroutine_handle<> c) noexcept {
-            if (auto state = state_.lock()) {
-                if (!state->set_continuation(c)) {
-                    // Continuation resumed concurrently in another thread
-                    // Note: there is no result synchronization yet
-                    return false;
-                }
-
+            switch (state_->set_continuation(c)) {
+            case status::success:
                 // Continuation is set and this coroutine will be resumed or
                 // destroyed eventually, possibly concurrently with us in
-                // another thread. There's also an edge case where the last
-                // reference is dropped while we are holding on to the state,
-                // but state destructor will then destroy our own coroutine
-                // frame, which should be ok since we are suspended.
+                // another thread.
+                return true;
+
+            case status::finished:
+                // Continuation was resumed concurrently in another thread
+                return false;
+
+            case status::destroyed:
+                // All continuation object references have been destroyed
+                // before we could set the continuation. We destroy
+                // ourselves and return true since we are not resuming.
+                c.destroy();
                 return true;
             }
-
-            // Continuation object is already destroyed, which could happen
-            // just after it was resumed with some result. We should resume.
-            if (this->has_result()) {
-                return false;
-            }
-
-            // The last reference was dropped without resuming, so we need to
-            // destroy our own coroutine frame.
-            c.destroy();
-            return true;
         }
 
         T await_resume() {
@@ -219,7 +241,7 @@ namespace coroactors::detail {
         }
 
     private:
-        std::weak_ptr<continuation_state<T>> state_;
+        intrusive_ptr<continuation_state<T>> state_;
         Callback& callback;
     };
 

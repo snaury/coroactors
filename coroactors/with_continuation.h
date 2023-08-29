@@ -11,19 +11,72 @@ namespace coroactors {
         template<class U, class Callback>
         friend class detail::with_continuation_awaiter;
 
-        continuation(const std::shared_ptr<detail::continuation_state<T>>& state)
-            : state(std::move(state))
-        {}
+        explicit continuation(detail::continuation_state<T>* state) noexcept
+            : state(state)
+        {
+            state->init_strong();
+        }
 
     public:
-        continuation() noexcept = default;
+        continuation() noexcept
+            : state(nullptr)
+        {}
+
+        continuation(const continuation& rhs) noexcept
+            : state(rhs.state)
+        {
+            if (state) {
+                state->add_strong_ref();
+            }
+        }
+
+        continuation(continuation&& rhs) noexcept
+            : state(std::exchange(rhs.state, nullptr))
+        {}
+
+        ~continuation() noexcept {
+            if (state) {
+                state->release_strong_ref();
+            }
+        }
+
+        continuation& operator=(const continuation& rhs) noexcept {
+            auto* prev = state;
+            state = rhs.state;
+            if (state) {
+                state->add_strong_ref();
+            }
+            if (prev) {
+                prev->release_strong_ref();
+            }
+            return *this;
+        }
+
+        continuation& operator=(continuation&& rhs) noexcept {
+            if (this != &rhs) [[likely]] {
+                auto* prev = state;
+                state = rhs.state;
+                rhs.state = nullptr;
+                if (prev) {
+                    prev->release_strong_ref();
+                }
+            }
+            return *this;
+        }
 
         explicit operator bool() const noexcept {
             return bool(state);
         }
 
+        friend bool operator==(const continuation& a, const continuation& b) noexcept {
+            return a.state == b.state;
+        }
+
         void reset() noexcept {
-            state.reset();
+            if (state) {
+                state->release_strong_ref();
+                state = nullptr;
+            }
         }
 
         /**
@@ -31,9 +84,7 @@ namespace coroactors {
          * result constructed from args
          */
         template<class... TArgs>
-        std::coroutine_handle<> release_with_result(TArgs&&... args)
-            noexcept(std::is_void_v<T>)
-        {
+        std::coroutine_handle<> release_with_result(TArgs&&... args) {
             state->set_value(std::forward<TArgs>(args)...);
             if (auto c = state->finish()) {
                 return c;
@@ -43,10 +94,10 @@ namespace coroactors {
         }
 
         /**
-         * Returns a coroutine handle that may be resumed manually by throwing
-         * an exception
+         * Returns a coroutine handle that may be resumed manually and will
+         * throw the provided exception
          */
-        std::coroutine_handle<> release_with_exception(std::exception_ptr&& e) noexcept {
+        std::coroutine_handle<> release_with_exception(std::exception_ptr&& e) {
             state->set_exception(std::move(e));
             if (auto c = state->finish()) {
                 return c;
@@ -62,9 +113,7 @@ namespace coroactors {
          * Returns false if continuation will continue without suspending
          */
         template<class... TArgs>
-        bool resume(TArgs&&... args)
-            noexcept(std::is_void_v<T>)
-        {
+        bool resume(TArgs&&... args) {
             state->set_value(std::forward<TArgs>(args)...);
             if (auto c = state->finish()) {
                 c.resume();
@@ -80,7 +129,7 @@ namespace coroactors {
          * Returns true if suspended continuation was resumed
          * Returns false if continuation will continue without suspending
          */
-        bool resume_with_exception(std::exception_ptr&& e) noexcept {
+        bool resume_with_exception(std::exception_ptr&& e) {
             state->set_exception(std::move(e));
             if (auto c = state->finish()) {
                 c.resume();
@@ -98,8 +147,7 @@ namespace coroactors {
         }
 
     private:
-        // Note: awaiter only keeps a weak reference to this state
-        std::shared_ptr<detail::continuation_state<T>> state;
+        detail::continuation_state<T>* state;
     };
 
     /**
