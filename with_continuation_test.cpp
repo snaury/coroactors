@@ -288,19 +288,10 @@ TEST(WithContinuationTest, CompleteWithException) {
 }
 
 struct test_scheduler : public actor_scheduler {
-    struct continuation_t {
-        std::coroutine_handle<> h;
-        actor_context c;
+    std::deque<execute_callback_type> queue;
 
-        void resume() {
-            c.manager().resume(h);
-        }
-    };
-
-    std::deque<continuation_t> queue;
-
-    void post(std::coroutine_handle<> h, actor_context&& c) override {
-        queue.push_back({ h, std::move(c) });
+    void post(execute_callback_type c) override {
+        queue.push_back(std::move(c));
     }
 
     bool preempt() const override {
@@ -310,7 +301,7 @@ struct test_scheduler : public actor_scheduler {
     void run_next() {
         auto cont = std::move(queue.front());
         queue.pop_front();
-        cont.resume();
+        cont();
     }
 };
 

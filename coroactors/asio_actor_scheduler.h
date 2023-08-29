@@ -18,6 +18,7 @@ namespace coroactors {
         using typename actor_scheduler::clock_type;
         using typename actor_scheduler::time_point;
         using typename actor_scheduler::duration;
+        using typename actor_scheduler::execute_callback_type;
         using typename actor_scheduler::schedule_callback_type;
 
         asio_actor_scheduler(
@@ -36,15 +37,15 @@ namespace coroactors {
             return true;
         }
 
-        void post(std::coroutine_handle<> h, actor_context&& c) override {
-            boost::asio::post(executor_, [h, c = std::move(c), d = preempt_duration_]() noexcept {
-                resume_with_preemption(h, c, d);
+        void post(execute_callback_type c) override {
+            boost::asio::post(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
+                resume_with_preemption(std::move(c), d);
             });
         }
 
-        void defer(std::coroutine_handle<> h, actor_context&& c) override {
-            boost::asio::defer(executor_, [h, c = std::move(c), d = preempt_duration_]() noexcept {
-                resume_with_preemption(h, c, d);
+        void defer(execute_callback_type c) override {
+            boost::asio::defer(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
+                resume_with_preemption(std::move(c), d);
             });
         }
 
@@ -61,16 +62,16 @@ namespace coroactors {
         }
 
     private:
-        static void resume_with_preemption(std::coroutine_handle<> h,
-                const actor_context& c, duration preempt_duration)
+        static void resume_with_preemption(execute_callback_type&& c,
+                duration preempt_duration)
         {
             if (!preempt_deadline) {
                 time_point deadline = clock_type::now() + preempt_duration;
                 preempt_deadline = &deadline;
-                c.manager().resume(h);
+                std::move(c)();
                 preempt_deadline = nullptr;
             } else {
-                c.manager().resume(h);
+                std::move(c)();
             }
         }
 

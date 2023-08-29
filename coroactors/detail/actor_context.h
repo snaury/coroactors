@@ -291,12 +291,28 @@ namespace coroactors::detail {
         /**
          * Post coroutine h to run on this context
          */
-        void post(std::coroutine_handle<> h) const;
+        void post(std::coroutine_handle<> h) const {
+            // Note: `std::function` over a lambda capture with two pointers
+            // usually doesn't allocate any additional memory. We also don't
+            // need to add_ref the state, because the coroutine must keep a
+            // reference to context while it's running.
+            ptr->scheduler.post([h, ptr = ptr] {
+                actor_context_manager(ptr).resume(h);
+            });
+        }
 
         /**
          * Defer coroutine h to run on this context
          */
-        void defer(std::coroutine_handle<> h) const;
+        void defer(std::coroutine_handle<> h) const {
+            // Note: `std::function` over a lambda capture with two pointers
+            // usually doesn't allocate any additional memory. We also don't
+            // need to add_ref the state, because the coroutine must keep a
+            // reference to context while it's running.
+            ptr->scheduler.defer([h, ptr = ptr] {
+                actor_context_manager(ptr).resume(h);
+            });
+        }
 
         /**
          * Returns true when switches to this context should be preempted

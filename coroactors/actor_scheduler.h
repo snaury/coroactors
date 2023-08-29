@@ -7,8 +7,6 @@
 
 namespace coroactors {
 
-    class actor_context;
-
     /**
      * A generic actor scheduler interface
      */
@@ -21,18 +19,18 @@ namespace coroactors {
         using time_point = clock_type::time_point;
         using duration = clock_type::duration;
 
+        using execute_callback_type = std::function<void()>;
         using schedule_callback_type = std::function<void(bool)>;
 
         /**
          * Returns true when task switch should preempt
          */
         virtual bool preempt() const {
-            // By default we preempt on every context switch
-            return true;
+            return true; // preempt on every context switch by default
         }
 
         /**
-         * Post h to resume with context c
+         * Post a callback c to run in the scheduler
          *
          * Should be used when tasks fork, e.g. when it is desirable for h to
          * run in parallel with the current activity.
@@ -41,10 +39,10 @@ namespace coroactors {
          *
          * May cause an additional thread to wake up, so usually slow.
          */
-        virtual void post(std::coroutine_handle<> h, actor_context&& c) = 0;
+        virtual void post(execute_callback_type c) = 0;
 
         /**
-         * Defer h to resume with context c
+         * Defer a callback c to run in the scheduler
          *
          * Should be used when current task is replacing itself with another
          * task, i.e. it's a continuation via a scheduler.
@@ -55,8 +53,8 @@ namespace coroactors {
          * so it must be used with care. The upside is no waking up threads,
          * since there is no additional useful work.
          */
-        virtual void defer(std::coroutine_handle<> h, actor_context&& c) {
-            post(h, std::move(c)); // default to post
+        virtual void defer(execute_callback_type c) {
+            post(std::move(c)); // default to post
         }
 
         /**

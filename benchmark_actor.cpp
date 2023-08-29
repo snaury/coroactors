@@ -8,8 +8,8 @@ using namespace coroactors;
 
 class TSimpleScheduler : public actor_scheduler {
 public:
-    void post(std::coroutine_handle<> h, actor_context&& c) override {
-        queue.push_back({ h, std::move(c) });
+    void post(execute_callback_type c) override {
+        queue.push_back(std::move(c));
     }
 
     bool preempt() const override {
@@ -21,7 +21,7 @@ public:
             ++processed;
             auto cont = std::move(queue.front());
             queue.pop_front();
-            cont.resume();
+            cont();
         }
     }
 
@@ -29,16 +29,7 @@ public:
     size_t processed = 0;
 
 private:
-    struct continuation_t {
-        std::coroutine_handle<> h;
-        actor_context c;
-
-        void resume() {
-            c.manager().resume(h);
-        }
-    };
-
-    std::deque<continuation_t> queue;
+    std::deque<execute_callback_type> queue;
 };
 
 class TCounterServiceActor {

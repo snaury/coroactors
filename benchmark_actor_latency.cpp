@@ -348,23 +348,23 @@ public:
     {
         switch (queueType) {
             case ESchedulerQueue::LockFree: {
-                Queue.emplace<detail::blocking_queue<continuation_t>>();
+                Queue.emplace<detail::blocking_queue<execute_callback_type>>();
                 break;
             }
             case ESchedulerQueue::AbslMutex: {
-                Queue.emplace<TBlockingQueueWithAbslMutex<continuation_t>>();
+                Queue.emplace<TBlockingQueueWithAbslMutex<execute_callback_type>>();
                 break;
             }
             case ESchedulerQueue::StdMutex: {
-                Queue.emplace<TBlockingQueueWithStdMutex<continuation_t>>();
+                Queue.emplace<TBlockingQueueWithStdMutex<execute_callback_type>>();
                 break;
             }
             case ESchedulerQueue::AbslMailbox: {
-                Queue.emplace<TBlockingQueueWithAbslMailbox<continuation_t>>();
+                Queue.emplace<TBlockingQueueWithAbslMailbox<execute_callback_type>>();
                 break;
             }
             case ESchedulerQueue::StdMailbox: {
-                Queue.emplace<TBlockingQueueWithStdMailbox<continuation_t>>();
+                Queue.emplace<TBlockingQueueWithStdMailbox<execute_callback_type>>();
                 break;
             }
         }
@@ -389,9 +389,9 @@ public:
         }
     }
 
-    void post(std::coroutine_handle<> h, actor_context&& c) override {
-        assert(h && "Cannot schedule a null coroutine");
-        Queue.push({ h, std::move(c) });
+    void post(execute_callback_type c) override {
+        assert(c && "Cannot schedule an empty callback");
+        Queue.push(std::move(c));
     }
 
     bool preempt() const override {
@@ -409,28 +409,14 @@ private:
         thread_deadline = &deadline;
         while (auto cont = Queue.pop()) {
             deadline = TClock::now() + PreemptUs;
-            cont.resume();
+            cont();
         }
         thread_deadline = nullptr;
     }
 
 private:
-    struct continuation_t {
-        std::coroutine_handle<> h;
-        actor_context c;
-
-        explicit operator bool() const {
-            return bool(h);
-        }
-
-        void resume() {
-            c.manager().resume(h);
-        }
-    };
-
-private:
     std::chrono::microseconds PreemptUs;
-    TBlockingQueue<continuation_t> Queue;
+    TBlockingQueue<execute_callback_type> Queue;
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };

@@ -225,15 +225,3 @@ namespace coroactors {
     inline const actor_context no_actor_context{};
 
 } // namespace coroactors
-
-namespace coroactors::detail {
-
-    inline void actor_context_manager::post(std::coroutine_handle<> h) const {
-        ptr->scheduler.post(h, actor_context(ptr));
-    }
-
-    inline void actor_context_manager::defer(std::coroutine_handle<> h) const {
-        ptr->scheduler.defer(h, actor_context(ptr));
-    }
-
-} // namespace coroactors::detail

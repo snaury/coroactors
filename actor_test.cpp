@@ -10,24 +10,27 @@ using namespace coroactors;
 struct test_scheduler : public actor_scheduler {
     using clock_type = actor_scheduler::clock_type;
     using time_point = actor_scheduler::time_point;
-    using schedule_callback_t = actor_scheduler::schedule_callback_type;
 
     struct continuation_t {
-        std::coroutine_handle<> h;
-        actor_context c;
+        execute_callback_type callback;
         bool deferred;
 
-        void resume() {
-            c.manager().resume(h);
+        explicit continuation_t(execute_callback_type&& callback, bool deferred)
+            : callback(std::move(callback))
+            , deferred(deferred)
+        {}
+
+        void operator()() {
+            callback();
         }
     };
 
     struct timer_t {
-        schedule_callback_t callback;
+        schedule_callback_type callback;
         std::optional<stop_callback<std::function<void()>>> stop;
         bool cancelled = false;
 
-        explicit timer_t(schedule_callback_t&& callback)
+        explicit timer_t(schedule_callback_type&& callback)
             : callback(std::move(callback))
         {}
     };
@@ -36,15 +39,15 @@ struct test_scheduler : public actor_scheduler {
         return false;
     }
 
-    void post(std::coroutine_handle<> h, actor_context&& c) override {
-        queue.push_back(continuation_t{ h, std::move(c), false });
+    void post(execute_callback_type c) override {
+        queue.emplace_back(std::move(c), false);
     }
 
-    void defer(std::coroutine_handle<> h, actor_context&& c) override {
-        queue.push_back(continuation_t{ h, std::move(c), true });
+    void defer(execute_callback_type c) override {
+        queue.emplace_back(std::move(c), true);
     }
 
-    void schedule(schedule_callback_t c, time_point d, stop_token t) override {
+    void schedule(schedule_callback_type c, time_point d, stop_token t) override {
         if (!timers_enabled) {
             c(false);
             return;
@@ -79,7 +82,7 @@ struct test_scheduler : public actor_scheduler {
         assert(!queue.empty());
         auto cont = queue.front();
         queue.pop_front();
-        cont.resume();
+        cont();
     }
 
     void wake_next() {
