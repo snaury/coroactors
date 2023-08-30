@@ -1,4 +1,5 @@
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <cstdio>
 
@@ -13,10 +14,10 @@ private:
 
 struct test_relaxed {
     static constexpr size_t thread_count = 8;
-    static constexpr int iteration_count = 1000000;
+    static constexpr int iteration_count = 300000;
 
     struct node_t {
-        std::atomic<int> value;
+        padded<std::atomic<int>> value;
 
         explicit node_t(int value)
             : value(value)
@@ -24,13 +25,17 @@ struct test_relaxed {
     };
 
     struct thread_stat {
-        int increments = 0;
+        int increments;
+
+        void init() {
+            increments = 0;
+        }
     };
 
-    padded<node_t> node{ 0 };
-    padded<std::atomic<node_t*>> head{ &node };
+    padded<std::atomic<int>> ready;
 
-    padded<std::atomic<int>> ready{ 0 };
+    padded<std::atomic<node_t*>> head;
+
     padded<thread_stat> thread_stats[thread_count];
 
     void enter_barrier() {
@@ -75,6 +80,13 @@ struct test_relaxed {
     }
 
     void run() {
+        ready.store(0);
+        node_t* node = new node_t(0);
+        head.store(node);
+        for (auto& stats : thread_stats) {
+            stats.init();
+        }
+
         std::vector<std::thread> threads;
         threads.reserve(thread_count);
         for (size_t i = 0; i < thread_count; ++i) {
@@ -90,12 +102,22 @@ struct test_relaxed {
         }
         printf("there have been %d total increments\n", total);
         assert(total == iteration_count);
+
+        delete node;
     }
 };
 
 int main() {
-    test_relaxed* t = new test_relaxed;
-    t->run();
+    auto* t = new test_relaxed;
+    for (int i = 0; ; ++i) {
+        printf("Running iteration %d...\n", i);
+        auto start = std::chrono::steady_clock::now();
+        t->run();
+        auto end = std::chrono::steady_clock::now();
+        auto elapsed = end - start;
+        printf("... finished in %dms\n",
+            (int)std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+    }
     delete t;
     return 0;
 }
