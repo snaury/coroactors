@@ -1,3 +1,4 @@
+#pragma once
 #include <coroactors/with_continuation.h>
 #include <deque>
 #include <mutex>

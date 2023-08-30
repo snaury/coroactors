@@ -8,6 +8,7 @@ if(GTest_FOUND)
         test_stop_token.cpp
         test_task_group.cpp
         test_with_continuation.cpp
+        test_with_task_group.cpp
     )
 
     target_link_libraries(coroactors_test

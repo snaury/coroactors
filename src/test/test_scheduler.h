@@ -1,3 +1,4 @@
+#pragma once
 #include <coroactors/actor_scheduler.h>
 #include <deque>
 #include <map>
