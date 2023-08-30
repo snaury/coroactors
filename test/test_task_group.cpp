@@ -1,7 +1,13 @@
 #include <coroactors/task_group.h>
+#include <gtest/gtest.h>
+
+#include "test_channel.h"
+#include "test_scheduler.h"
 #include <coroactors/actor.h>
 #include <coroactors/packaged_awaitable.h>
 #include <coroactors/with_task_group.h>
+#include <coroactors/with_continuation.h>
+
 #include <deque>
 #include <vector>
 #include <functional>
@@ -9,146 +15,18 @@
 #include <mutex>
 #include <thread>
 #include <latch>
-#include <gtest/gtest.h>
 
 using namespace coroactors;
 
-template<class T>
-class continuation {
-public:
-    continuation(std::optional<T>* result, std::coroutine_handle<> handle, stop_token token) noexcept
-        : result(result)
-        , handle(handle)
-        , token(token)
-    {}
-
-    continuation(continuation&& rhs) noexcept
-        : result(rhs.result)
-        , handle(std::exchange(rhs.handle, {}))
-        , token(std::move(rhs.token))
-    {}
-
-    ~continuation() noexcept {
-        if (handle) {
-            // resume without setting a value
-            handle.resume();
-        }
-    }
-
-    continuation& operator=(continuation&& rhs) noexcept {
-        if (this != &rhs) {
-            auto prev_handle = handle;
-            result = rhs.result;
-            handle = std::exchange(rhs.handle, {});
-            token = std::move(rhs.token);
-            if (prev_handle) {
-                // resume without setting a value
-                prev_handle.resume();
-            }
-        }
-        return *this;
-    }
-
-    void resume(T value) {
-        assert(handle);
-        result->emplace(std::move(value));
-        std::exchange(handle, {}).resume();
-    }
-
-    void resume() {
-        assert(handle);
-        std::exchange(handle, {}).resume();
-    }
-
-    void destroy() {
-        assert(handle);
-        std::exchange(handle, {}).destroy();
-    }
-
-    const stop_token& get_stop_token() const {
-        return token;
-    }
-
-private:
-    std::optional<T>* result;
-    std::coroutine_handle<> handle;
-    stop_token token;
-};
+namespace {
 
 class no_value_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
-};
 
-template<class T>
-struct value_provider {
-    std::mutex lock;
-    std::deque<continuation<T>> queue;
-    std::deque<T> results;
-
-    struct awaiter {
-        value_provider& provider;
-        std::optional<T> result;
-        stop_token token;
-
-        awaiter(value_provider& provider)
-            : provider(provider)
-        {}
-
-        bool await_ready(stop_token t = {}) noexcept {
-            std::unique_lock l(provider.lock);
-            if (!provider.results.empty()) {
-                result = std::move(provider.results.front());
-                provider.results.pop_front();
-            } else {
-                token = std::move(t);
-            }
-            return bool(result);
-        }
-
-        void await_suspend(std::coroutine_handle<> c) noexcept {
-            std::unique_lock l(provider.lock);
-            provider.queue.emplace_back(&result, c, std::move(token));
-        }
-
-        T await_resume() {
-            if (!result) {
-                throw no_value_error("resumed without a value");
-            }
-            return std::move(*result);
-        }
-    };
-
-    awaiter get() {
-        return awaiter{ *this };
-    }
-
-    void provide(T value) {
-        results.push_back(std::move(value));
-    }
-
-    continuation<T> take() {
-        assert(!queue.empty());
-        auto c = std::move(queue.front());
-        queue.pop_front();
-        return c;
-    }
-
-    continuation<T> take_at(size_t index) {
-        assert(index <= queue.size());
-        auto it = queue.begin() + index;
-        auto c = std::move(*it);
-        queue.erase(it);
-        return c;
-    }
-
-    void resume(T value) {
-        take().resume(std::move(value));
-    }
-
-    void resume_at(size_t index, T value) {
-        take_at(index).resume(std::move(value));
-    }
+    no_value_error()
+        : runtime_error("resumed without value")
+    {}
 };
 
 enum class EAction {
@@ -159,7 +37,7 @@ enum class EAction {
     Return,
 };
 
-actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::function<EAction()> next) {
+actor<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<EAction()> next) {
     co_await no_actor_context();
     std::vector<int> results;
     task_group<int> group;
@@ -195,9 +73,11 @@ actor<std::vector<int>> run_scenario(value_provider<int>& provider, std::functio
     }
 }
 
+} // namespace
+
 TEST(TaskGroupTest, SimpleAsync) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -211,11 +91,11 @@ TEST(TaskGroupTest, SimpleAsync) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 3u);
+    ASSERT_EQ(provider.awaiters(), 3u);
     provider.resume(1);
     provider.resume(2);
     provider.resume(3);
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, 2, 3 };
     EXPECT_EQ(*result, expected);
@@ -223,7 +103,7 @@ TEST(TaskGroupTest, SimpleAsync) {
 
 TEST(TaskGroupTest, SimpleSync) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     provider.provide(1);
     provider.provide(2);
@@ -241,7 +121,7 @@ TEST(TaskGroupTest, SimpleSync) {
             return EAction::Return;
         }));
 
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, 2, 3 };
     EXPECT_EQ(*result, expected);
@@ -249,7 +129,7 @@ TEST(TaskGroupTest, SimpleSync) {
 
 TEST(TaskGroupTest, SimpleMultiThreaded) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -263,7 +143,7 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 10u);
+    ASSERT_EQ(provider.awaiters(), 10u);
     std::latch barrier(10);
     std::vector<std::thread> threads;
     for (int i = 1; i <= 10; ++i) {
@@ -286,7 +166,7 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
 
 TEST(TaskGroupTest, CompleteOutOfOrder) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -300,11 +180,11 @@ TEST(TaskGroupTest, CompleteOutOfOrder) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 3u);
+    ASSERT_EQ(provider.awaiters(), 3u);
     provider.resume_at(1, 2);
     provider.resume(1);
     provider.resume(3);
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 2, 1, 3 };
     EXPECT_EQ(*result, expected);
@@ -312,7 +192,7 @@ TEST(TaskGroupTest, CompleteOutOfOrder) {
 
 TEST(TaskGroupTest, CompleteBeforeAwaited) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -329,12 +209,12 @@ TEST(TaskGroupTest, CompleteBeforeAwaited) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 4u);
+    ASSERT_EQ(provider.awaiters(), 4u);
     provider.resume(1);
     provider.resume(2);
     provider.resume(3);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 1u);
+    ASSERT_EQ(provider.awaiters(), 1u);
     provider.resume(4);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 4, 1, 2, 3 };
@@ -343,7 +223,7 @@ TEST(TaskGroupTest, CompleteBeforeAwaited) {
 
 TEST(TaskGroupTest, LocalReadyQueue) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -366,14 +246,14 @@ TEST(TaskGroupTest, LocalReadyQueue) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 4u);
+    ASSERT_EQ(provider.awaiters(), 4u);
     // Arrange for two tasks to be ready
     provider.resume(1);
     provider.resume(2);
     // Unblock coroutine, it will grab value 4 and value 1 and block again
     provider.resume_at(1, 4);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     // Unblock the last task, now we have both ready queue and atomic queue
     provider.resume(3);
     // Unblock coroutine again, it will grab value 5 and finally values 2 and 3
@@ -386,7 +266,7 @@ TEST(TaskGroupTest, LocalReadyQueue) {
 
 TEST(TaskGroupTest, DetachAll) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -399,13 +279,13 @@ TEST(TaskGroupTest, DetachAll) {
 
     ASSERT_TRUE(result.success());
     EXPECT_EQ(result->size(), 0u);
-    EXPECT_EQ(provider.queue.size(), 3u);
-    // Note: value_provider destructor will fail all tasks
+    EXPECT_EQ(provider.awaiters(), 3u);
+    // Note: test_channel destructor will fail all tasks
 }
 
 TEST(TaskGroupTest, ResumeException) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -419,17 +299,17 @@ TEST(TaskGroupTest, ResumeException) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 3u);
+    ASSERT_EQ(provider.awaiters(), 3u);
     provider.resume(1);
-    provider.take().resume();
+    provider.resume_with_exception(no_value_error());
     provider.resume(3);
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.has_exception());
 }
 
 TEST(TaskGroupTest, ResumeExceptionIgnored) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -443,11 +323,11 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 3u);
+    ASSERT_EQ(provider.awaiters(), 3u);
     provider.resume(1);
-    provider.take().resume();
+    provider.resume_with_exception(no_value_error());
     provider.resume(3);
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, -1, 3 };
     EXPECT_EQ(*result, expected);
@@ -455,7 +335,7 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
 
 TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
     size_t last_step = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]{
@@ -469,15 +349,17 @@ TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
             return EAction::Return;
         }));
 
-    ASSERT_EQ(provider.queue.size(), 3u);
+    ASSERT_EQ(provider.awaiters(), 3u);
     provider.resume(1);
     provider.take().destroy();
     provider.resume(3);
-    EXPECT_EQ(provider.queue.size(), 0u);
+    EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());
     std::vector<int> expected{ 1, -2, 3 };
     EXPECT_EQ(*result, expected);
 }
+
+namespace {
 
 actor<void> check_stop_possible() {
     co_await no_actor_context();
@@ -508,13 +390,17 @@ actor<void> check_request_stop() {
     co_await group.next();
 }
 
+} // namespace
+
 TEST(TaskGroupTest, GroupRequestStop) {
     auto result = packaged_awaitable(
         check_request_stop());
     ASSERT_TRUE(result.success());
 }
 
-actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider) {
+namespace {
+
+actor<void> do_with_task_group_cancel(int& stage, test_channel<int>& provider) {
     co_await no_actor_context();
 
     try {
@@ -544,16 +430,18 @@ actor<void> do_with_task_group_cancel(int& stage, value_provider<int>& provider)
     stage = 5;
 }
 
+} // namespace
+
 TEST(WithTaskGroupTest, ImplicitCancel) {
     int stage = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         do_with_task_group_cancel(stage, provider));
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
@@ -568,18 +456,18 @@ TEST(WithTaskGroupTest, ImplicitCancel) {
 
 TEST(WithTaskGroupTest, ImplicitCancelException) {
     int stage = 1;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         do_with_task_group_cancel(stage, provider));
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
-    a.resume();
+    a.resume_with_exception(no_value_error());
     EXPECT_EQ(stage, 2); // group.next() thrown an exception
     EXPECT_TRUE(result.running());
     EXPECT_TRUE(b.get_stop_token().stop_requested());
@@ -590,7 +478,7 @@ TEST(WithTaskGroupTest, ImplicitCancelException) {
 
 TEST(WithTaskGroupTest, ExplicitCancel) {
     int stage = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     stop_source source;
 
@@ -601,7 +489,7 @@ TEST(WithTaskGroupTest, ExplicitCancel) {
 
     EXPECT_EQ(stage, 1); // waiting on group.next()
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
@@ -614,10 +502,12 @@ TEST(WithTaskGroupTest, ExplicitCancel) {
     b.resume(42);
     EXPECT_EQ(stage, 3); // returned from group.next()
     EXPECT_TRUE(result.running());
-    a.resume();
+    a.resume_with_exception(no_value_error());
     EXPECT_EQ(stage, 5); // returned from with_task_group
     EXPECT_TRUE(result.success());
 }
+
+namespace {
 
 struct move_only_int {
     int value;
@@ -634,7 +524,7 @@ struct move_only_int {
     {}
 };
 
-actor<void> do_with_task_group_result_type(int& stage, value_provider<int>& provider) {
+actor<void> do_with_task_group_result_type(int& stage, test_channel<int>& provider) {
     co_await no_actor_context();
 
     auto result = co_await with_task_group<int>(
@@ -662,16 +552,18 @@ actor<void> do_with_task_group_result_type(int& stage, value_provider<int>& prov
     EXPECT_EQ(result.value, 100);
 }
 
+} // namespace
+
 TEST(WithTaskGroupTest, ResultType) {
     int stage = 0;
-    value_provider<int> provider;
+    test_channel<int> provider;
 
     auto result = packaged_awaitable(
         do_with_task_group_result_type(stage, provider));
 
     EXPECT_EQ(stage, 1);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     a.resume(42);
@@ -682,25 +574,9 @@ TEST(WithTaskGroupTest, ResultType) {
     EXPECT_TRUE(result.success());
 }
 
-struct test_scheduler : public actor_scheduler {
-    std::deque<execute_callback_type> queue;
+namespace {
 
-    void post(execute_callback_type c) override {
-        queue.push_back(std::move(c));
-    }
-
-    bool preempt() const override {
-        return false;
-    }
-
-    void run_next() {
-        auto cont = std::move(queue.front());
-        queue.pop_front();
-        cont();
-    }
-};
-
-actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, value_provider<int>& provider) {
+actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, test_channel<int>& provider) {
     actor_context context(scheduler);
 
     stage = 1;
@@ -739,10 +615,12 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, va
     EXPECT_TRUE((co_await actor_context::current_stop_token).stop_requested());
 }
 
+} // namespace
+
 TEST(WithTaskGroupTest, WithStopTokenContext) {
     int stage = 0;
     test_scheduler scheduler;
-    value_provider<int> provider;
+    test_channel<int> provider;
     stop_source source;
 
     auto result = packaged_awaitable(
@@ -751,7 +629,7 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
             do_with_stop_token_context(stage, scheduler, provider)));
 
     EXPECT_EQ(stage, 4); // waiting for the first value
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
     EXPECT_FALSE(a.get_stop_token().stop_requested());
@@ -778,8 +656,10 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
 
+namespace {
+
 template<class WhenReadyCall>
-actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, value_provider<int>& provider,
+actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, test_channel<int>& provider,
         WhenReadyCall when_ready, bool expected)
 {
     stage = 1;
@@ -818,10 +698,12 @@ actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, val
     EXPECT_EQ(result, 100);
 }
 
+} // namespace
+
 TEST(WithTaskGroupTest, WaitReadySuccess) {
     int stage = 0;
     test_scheduler scheduler;
-    value_provider<int> provider;
+    test_channel<int> provider;
     stop_source source;
 
     auto when_ready = [&](auto& group) {
@@ -832,7 +714,7 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
         do_when_ready_with_token(stage, scheduler, provider, when_ready, true));
 
     EXPECT_EQ(stage, 4); // waiting in wait_next
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
 
@@ -855,7 +737,7 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
 TEST(WithTaskGroupTest, WaitReadyCancelled) {
     int stage = 0;
     test_scheduler scheduler;
-    value_provider<int> provider;
+    test_channel<int> provider;
     stop_source source;
 
     auto when_ready = [&](auto& group) {
@@ -866,7 +748,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
     EXPECT_EQ(stage, 4); // waiting in wait_next
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
 
@@ -895,7 +777,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
 TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
     int stage = 0;
     test_scheduler scheduler;
-    value_provider<int> provider;
+    test_channel<int> provider;
     stop_source source;
 
     auto when_ready = [&](auto& group) {
@@ -907,7 +789,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
     EXPECT_EQ(stage, 5); // waiting for the first value
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
 
@@ -926,6 +808,8 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
 
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
+
+namespace {
 
 template<class Awaiter, class Hook>
 struct await_suspend_hook {
@@ -949,10 +833,12 @@ struct await_suspend_hook {
 template<class Awaiter, class Hook>
 await_suspend_hook(Awaiter, Hook) -> await_suspend_hook<Awaiter, Hook>;
 
+} // namespace
+
 TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
     int stage = 0;
     test_scheduler scheduler;
-    value_provider<int> provider;
+    test_channel<int> provider;
     stop_source source;
 
     auto when_ready = [&](auto& group) {
@@ -967,7 +853,7 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
     auto result = packaged_awaitable(
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
 
-    ASSERT_EQ(provider.queue.size(), 2u);
+    ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
     auto b = provider.take();
 

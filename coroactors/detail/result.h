@@ -39,8 +39,13 @@ namespace coroactors::detail {
             result_.template emplace<1>(std::forward<Args>(args)...);
         }
 
-        void set_exception(std::exception_ptr&& e) noexcept {
+        void set_exception(std::exception_ptr e) noexcept {
             result_.template emplace<2>(std::move(e));
+        }
+
+        template<class E>
+        void set_exception(E&& e) noexcept {
+            set_exception(std::make_exception_ptr(std::forward<E>(e)));
         }
 
         explicit operator bool() const {
@@ -87,7 +92,7 @@ namespace coroactors::detail {
             throw result_error("result has neither value nor exception");
         }
 
-        std::add_rvalue_reference_t<T> take_value() {
+        T take_value() {
             switch (result_.index()) {
                 case 1: {
                     if constexpr (std::is_void_v<T>) {
@@ -103,7 +108,7 @@ namespace coroactors::detail {
             throw result_error("result has neither value nor exception");
         }
 
-        std::exception_ptr get_exception() const {
+        const std::exception_ptr& get_exception() const {
             if (result_.index() != 2) {
                 [[unlikely]];
                 throw result_error("result does not have an exception");

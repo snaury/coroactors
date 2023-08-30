@@ -342,7 +342,7 @@ namespace coroactors::detail {
         template<class... Args>
         void operator()(const boost::system::error_code& ec, Args&&... args) {
             if (ec) {
-                this->result->set_exception(std::make_exception_ptr(boost::system::system_error(ec)));
+                this->result->set_exception(boost::system::system_error(ec));
             } else {
                 this->result->emplace_value(std::forward<Args>(args)...);
             }

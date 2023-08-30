@@ -12,14 +12,11 @@ namespace coroactors {
     [[nodiscard]] std::coroutine_handle<>
     with_resume_callback(Callback&& callback)
         requires (
-            detail::is_resume_callback_void<Callback> ||
-            detail::is_resume_callback_handle<Callback>)
+            detail::is_resume_callback_void<std::decay_t<Callback>> ||
+            detail::is_resume_callback_handle<std::decay_t<Callback>>)
     {
-        // Note: if callback is an rvalue then Callback will not be a reference
-        // and we will move the object to coroutine frame. However in cases
-        // where callback is an lvalue reference Callback will be a reference
-        // and we will store that reference in the frame, not an object copy.
-        return detail::make_resume_callback_coroutine<Callback>(std::forward<Callback>(callback)).handle;
+        // Note: the internal coroutine stores callback in its arguments
+        return detail::make_resume_callback_coroutine(std::forward<Callback>(callback)).handle;
     }
 
 } // namespace coroactors

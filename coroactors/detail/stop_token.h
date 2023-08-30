@@ -61,9 +61,9 @@ namespace coroactors::detail {
     public:
         using wrapped_awaiter_type = awaiter_unwrap_awaiter_type<Awaiter>;
 
-        with_stop_token_awaiter(Awaitable&& awaitable, const stop_token& token)
+        with_stop_token_awaiter(stop_token token, Awaitable&& awaitable)
             : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
-            , token(token)
+            , token(std::move(token))
         {}
 
         with_stop_token_awaiter(const with_stop_token_awaiter&) = delete;
@@ -71,13 +71,13 @@ namespace coroactors::detail {
 
         with_stop_token_awaiter(with_stop_token_awaiter&& rhs)
             : awaiter(std::move(rhs.awaiter))
-            , token(rhs.token)
+            , token(std::move(rhs.token))
         {}
 
         bool await_ready()
             noexcept(has_noexcept_await_ready_stop_token<Awaiter>)
         {
-            return awaiter.await_ready(token);
+            return awaiter.await_ready(std::move(token));
         }
 
         template<class Promise>
@@ -97,7 +97,7 @@ namespace coroactors::detail {
 
     private:
         Awaiter awaiter;
-        const stop_token& token;
+        stop_token token;
     };
 
 } // namespace coroactors::detail

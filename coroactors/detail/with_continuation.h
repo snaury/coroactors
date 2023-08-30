@@ -19,8 +19,8 @@ namespace coroactors {
 namespace coroactors::detail {
 
     template<class Callback, class T>
-    concept is_with_continuation_callback = requires(Callback& callback) {
-        { std::forward<Callback>(callback)(std::declval<continuation<T>>()) } -> std::same_as<void>;
+    concept is_with_continuation_callback = requires(std::decay_t<Callback> callback) {
+        { std::move(callback)(std::declval<continuation<T>>()) } -> std::same_as<void>;
     };
 
     template<class T>
@@ -73,9 +73,25 @@ namespace coroactors::detail {
         }
 
         void destroy_strong() noexcept {
+            destroy_continuation();
+
+            // Remove the additional reference to the object
+            if (release_ref() == 0) {
+                delete this;
+            }
+        }
+
+        bool destroy_continuation() noexcept {
             void* addr = continuation.load(std::memory_order_relaxed);
-            while (addr != reinterpret_cast<void*>(MarkerFinished)) {
-                assert(addr != reinterpret_cast<void*>(MarkerDestroyed));
+            for (;;) {
+                if (addr == reinterpret_cast<void*>(MarkerFinished)) {
+                    // finish() has been called already
+                    return false;
+                }
+                if (addr == reinterpret_cast<void*>(MarkerDestroyed)) {
+                    // destroy() has been called already
+                    return false;
+                }
                 // Note: we need memory_order_acq_rel on success here, because
                 // we need set_continuation to happen before the destruction,
                 // but also we need everything else to happen before destroy
@@ -88,13 +104,8 @@ namespace coroactors::detail {
                     if (addr) {
                         std::coroutine_handle<>::from_address(addr).destroy();
                     }
-                    break;
+                    return true;
                 }
-            }
-
-            // Remove the additional reference to the object
-            if (release_ref() == 0) {
-                delete this;
             }
         }
 
@@ -133,11 +144,12 @@ namespace coroactors::detail {
             result_ptr->set_value(std::forward<TArgs>(args)...);
         }
 
-        void set_exception(std::exception_ptr&& e) {
+        template<class E>
+        void set_exception(E&& e) {
             if (!result_ptr) {
                 throw std::logic_error("coroutine frame resumed or destroyed already");
             }
-            result_ptr->set_exception(std::move(e));
+            result_ptr->set_exception(std::forward<E>(e));
         }
 
         std::coroutine_handle<> finish() noexcept {
@@ -186,8 +198,8 @@ namespace coroactors::detail {
         using status = typename continuation_state<T>::status;
 
     public:
-        with_continuation_awaiter(Callback& callback) noexcept
-            : callback(callback)
+        with_continuation_awaiter(Callback&& callback) noexcept
+            : callback(std::forward<Callback>(callback))
         {}
 
         with_continuation_awaiter(const with_continuation_awaiter&) = delete;
@@ -196,7 +208,7 @@ namespace coroactors::detail {
         // Awaiter may be moved by some wrappers, but only before the await
         // starts, so all we have to "move" is a reference to the callback
         with_continuation_awaiter(with_continuation_awaiter&& rhs) noexcept
-            : callback(rhs.callback)
+            : callback(std::move(rhs.callback))
         {}
 
         ~with_continuation_awaiter() noexcept {
@@ -208,7 +220,7 @@ namespace coroactors::detail {
         bool await_ready(stop_token token = {}) noexcept {
             state_.reset(new continuation_state<T>(
                 static_cast<result<T>*>(this), std::move(token)));
-            std::forward<Callback>(callback)(continuation<T>(state_.get()));
+            std::move(callback)(continuation<T>(state_.get()));
             // Avoid suspending when the result is ready
             return state_->ready();
         }
@@ -243,7 +255,7 @@ namespace coroactors::detail {
 
     private:
         intrusive_ptr<continuation_state<T>> state_;
-        Callback& callback;
+        std::decay_t<Callback> callback;
     };
 
 } // namespace coroactors::detail

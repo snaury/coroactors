@@ -1,14 +1,18 @@
 #include <coroactors/with_continuation.h>
+#include <gtest/gtest.h>
+
+#include "test_scheduler.h"
 #include <coroactors/actor.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/packaged_awaitable.h>
+
 #include <exception>
 #include <functional>
-#include <gtest/gtest.h>
 #include <type_traits>
-#include <deque>
 
 using namespace coroactors;
+
+namespace {
 
 static thread_local int await_ready_count{ 0 };
 static thread_local int await_suspend_count{ 0 };
@@ -105,9 +109,11 @@ struct autostart {
 template<class Callback>
 autostart run_with_continuation(int* stage, Callback callback) {
     *stage = 1;
-    co_await with_continuation(callback);
+    co_await with_continuation(std::move(callback));
     *stage = 2;
 }
+
+} // namespace
 
 TEST(WithContinuationTest, CompleteSync) {
     clear_await_count();
@@ -235,6 +241,8 @@ TEST(WithContinuationTest, CompleteRaceWithoutState) {
     EXPECT_EQ(await_resume_count, 1);
 }
 
+namespace {
+
 template<class Callback>
 autostart run_with_continuation_int(int* stage, Callback callback) {
     *stage = 1;
@@ -246,6 +254,8 @@ autostart run_with_continuation_int(int* stage, Callback callback) {
         *stage = 3;
     }
 }
+
+} // namespace
 
 TEST(WithContinuationTest, CompleteWithValue) {
     clear_await_count();
@@ -287,23 +297,7 @@ TEST(WithContinuationTest, CompleteWithException) {
     EXPECT_EQ(await_resume_count, 1);
 }
 
-struct test_scheduler : public actor_scheduler {
-    std::deque<execute_callback_type> queue;
-
-    void post(execute_callback_type c) override {
-        queue.push_back(std::move(c));
-    }
-
-    bool preempt() const override {
-        return false;
-    }
-
-    void run_next() {
-        auto cont = std::move(queue.front());
-        queue.pop_front();
-        cont();
-    }
-};
+namespace {
 
 template<class Callback>
 actor<void> actor_with_continuation(const actor_context& context, int& stage, Callback callback) {
@@ -311,7 +305,7 @@ actor<void> actor_with_continuation(const actor_context& context, int& stage, Ca
     stage = 1;
     co_await actor_context::preempt;
     stage = 2;
-    co_await with_continuation(callback);
+    co_await with_continuation(std::move(callback));
     stage = 3;
 }
 
@@ -320,6 +314,8 @@ actor<int> actor_with_result(const actor_context& context, int& stage, int resul
     stage = 1;
     co_return result;
 }
+
+} // namespace
 
 TEST(WithContinuationTest, ActorCompleteSync) {
     int stage = 0;
@@ -412,6 +408,8 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(scheduler.queue.size(), 0u);
 }
 
+namespace {
+
 class count_refs_guard {
 public:
     explicit count_refs_guard(int* refs)
@@ -440,6 +438,8 @@ actor<void> actor_wrapper(actor<void> nested, int* refs) {
     co_await std::move(nested);
 }
 
+} // namespace
+
 TEST(WithContinuationTest, DestroyUnwind) {
     int stage = 0;
     int refs = 0;
@@ -451,7 +451,12 @@ TEST(WithContinuationTest, DestroyUnwind) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 3);
+                    // Expected refs:
+                    // - in actor_wrapper (local variable)
+                    // - in actor_with_continuation (lambda argument)
+                    // - in with_continuation_awaiter (callback member)
+                    // - the original lambda temporary is not destroyed yet!
+                    EXPECT_EQ(refs, 4);
                     suspended = c;
                 }),
             &refs));
@@ -459,7 +464,8 @@ TEST(WithContinuationTest, DestroyUnwind) {
     EXPECT_EQ(stage, 2);
     ASSERT_TRUE(suspended);
     EXPECT_TRUE(result.running());
-    ASSERT_EQ(refs, 2);
+    // One less expected ref (lambda temporary destroyed)
+    ASSERT_EQ(refs, 3);
 
     // Destroy continuation
     suspended.reset();
@@ -479,7 +485,7 @@ TEST(WithContinuationTest, DestroyFromCallback) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<>&& c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 3);
+                    EXPECT_EQ(refs, 4);
                     c.reset();
                 }),
             &refs));
@@ -501,13 +507,13 @@ TEST(WithContinuationTest, DestroyBottomUp) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 3);
+                    EXPECT_EQ(refs, 4);
                     suspended = c;
                 }),
             &refs));
 
     EXPECT_EQ(stage, 2);
-    EXPECT_EQ(refs, 2);
+    EXPECT_EQ(refs, 3);
     ASSERT_TRUE(suspended);
 
     result.destroy();
@@ -534,6 +540,7 @@ TEST(WithContinuationTest, StopToken) {
                 &refs)));
 
     EXPECT_EQ(stage, 2);
+    // Expect only one ref in actor_wrapper
     EXPECT_EQ(refs, 1);
     ASSERT_TRUE(suspended);
     EXPECT_TRUE(suspended.get_stop_token().stop_possible());
@@ -543,4 +550,5 @@ TEST(WithContinuationTest, StopToken) {
     EXPECT_TRUE(result.running());
     suspended.resume();
     EXPECT_TRUE(result.success());
+    EXPECT_EQ(refs, 0);
 }

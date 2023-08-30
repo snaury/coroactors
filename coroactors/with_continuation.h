@@ -80,6 +80,15 @@ namespace coroactors {
         }
 
         /**
+         * Destroys continuation without resuming
+         */
+        void destroy() {
+            if (!state->destroy_continuation()) {
+                throw std::logic_error("coroutine frame resumed or destroyed already");
+            }
+        }
+
+        /**
          * Returns a coroutine handle that may be resumed manually with the
          * result constructed from args
          */
@@ -97,8 +106,9 @@ namespace coroactors {
          * Returns a coroutine handle that may be resumed manually and will
          * throw the provided exception
          */
-        std::coroutine_handle<> release_with_exception(std::exception_ptr&& e) {
-            state->set_exception(std::move(e));
+        template<class E>
+        std::coroutine_handle<> release_with_exception(E&& e) {
+            state->set_exception(std::forward<E>(e));
             if (auto c = state->finish()) {
                 return c;
             } else {
@@ -129,8 +139,9 @@ namespace coroactors {
          * Returns true if suspended continuation was resumed
          * Returns false if continuation will continue without suspending
          */
-        bool resume_with_exception(std::exception_ptr&& e) {
-            state->set_exception(std::move(e));
+        template<class E>
+        bool resume_with_exception(E&& e) {
+            state->set_exception(std::forward<E>(e));
             if (auto c = state->finish()) {
                 c.resume();
                 return true;
@@ -153,18 +164,17 @@ namespace coroactors {
     /**
      * Provides arbitrary suspension points for coroutines
      *
-     * When the result is co_awaited (which must happen in the same expression
-     * as the call to with_continuation) callback will be called with some
-     * std::coroutine_handle<> that will resume the awaiting coroutine. The
-     * awaiting coroutine might not suspend if the provided handle is resumed
-     * before the callback returns.
+     * When the result is co_awaited the provided callback will be called with
+     * with a continuation<T> object that can be used to resume the awaiting
+     * coroutine. The awaiting coroutine will not suspend and continue directly
+     * when the provided object is resumed before the callback returns.
      */
     template<class T, class Callback>
     detail::with_continuation_awaiter<T, Callback>
     with_continuation(Callback&& callback) noexcept
         requires (detail::is_with_continuation_callback<Callback, T>)
     {
-        return detail::with_continuation_awaiter<T, Callback>(callback);
+        return detail::with_continuation_awaiter<T, Callback>(std::forward<Callback>(callback));
     }
 
     template<class Callback>
@@ -172,7 +182,7 @@ namespace coroactors {
     with_continuation(Callback&& callback) noexcept
         requires (detail::is_with_continuation_callback<Callback, void>)
     {
-        return detail::with_continuation_awaiter<void, Callback>(callback);
+        return detail::with_continuation_awaiter<void, Callback>(std::forward<Callback>(callback));
     }
 
 } // namespace coroactors

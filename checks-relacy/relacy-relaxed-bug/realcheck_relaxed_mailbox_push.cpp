@@ -55,6 +55,7 @@ struct test_mailbox_push_relaxed {
         for (int i = 0; i < iterations_per_thread; ++i) {
             node_t* next = allocate(thread_index, i);
             // perform a push operation with a relaxed tail exchange
+            // note: tsan correctly identifies the problem when this is not acq_rel
             node_t* prev = tail.exchange(next, std::memory_order_relaxed);
             // note: even though we must have a correct node pointer (there's
             // a total order of atomic operations on tail itself), the prev

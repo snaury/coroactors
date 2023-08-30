@@ -1,10 +1,11 @@
 #include <coroactors/detail/stop_token_polyfill.h>
+#include <gtest/gtest.h>
+
 #include <any>
 #include <functional>
 #include <optional>
 #include <thread>
 #include <mutex>
-#include <gtest/gtest.h>
 
 using namespace coroactors::detail;
 

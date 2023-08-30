@@ -14,8 +14,8 @@ namespace coroactors {
      * Wraps awaitable with the specified stop token override
      */
     template<detail::awaitable_with_stop_token_propagation Awaitable>
-    auto with_stop_token(const stop_token& token, Awaitable&& awaitable) {
-        return detail::with_stop_token_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), token);
+    auto with_stop_token(stop_token token, Awaitable&& awaitable) {
+        return detail::with_stop_token_awaiter<Awaitable>(std::move(token), std::forward<Awaitable>(awaitable));
     }
 
 } // namespace coroactors

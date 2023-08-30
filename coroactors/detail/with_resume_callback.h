@@ -6,12 +6,12 @@ namespace coroactors::detail {
 
     template<class Callback>
     concept is_resume_callback_void = requires(Callback& callback) {
-        { callback() } noexcept -> std::same_as<void>;
+        { std::move(callback)() } noexcept -> std::same_as<void>;
     };
 
     template<class Callback>
     concept is_resume_callback_handle = requires(Callback& callback) {
-        { callback() } noexcept -> std::convertible_to<std::coroutine_handle<>>;
+        { std::move(callback)() } noexcept -> std::convertible_to<std::coroutine_handle<>>;
     };
 
     template<class Callback>
@@ -58,7 +58,8 @@ namespace coroactors::detail {
                 requires (is_resume_callback_void<Callback>)
             {
                 auto& self = h.promise();
-                self.callback();
+                std::move(self.callback)();
+                h.destroy();
             }
 
             __attribute__((__noinline__))
@@ -66,7 +67,7 @@ namespace coroactors::detail {
                 requires (is_resume_callback_handle<Callback>)
             {
                 auto& self = h.promise();
-                std::coroutine_handle<> c = self.callback();
+                std::coroutine_handle<> c = std::move(self.callback)();
                 h.destroy();
                 return c;
             }
