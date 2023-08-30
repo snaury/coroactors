@@ -31,7 +31,7 @@ namespace coroactors {
         }
 
         using Result = detail::with_task_group_result_t<T, Callback>;
-        detail::result<Result> r;
+        result<Result> r;
 
         try {
             if constexpr (std::is_void_v<Result>) {

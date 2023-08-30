@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/result.h>
+#include <coroactors/result.h>
 
 namespace coroactors::detail {
 

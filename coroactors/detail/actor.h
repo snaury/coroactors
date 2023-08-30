@@ -1,7 +1,7 @@
 #pragma once
 #include <coroactors/actor_context.h>
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/result.h>
+#include <coroactors/result.h>
 #include <coroactors/stop_token.h>
 #include <coroactors/with_resume_callback.h>
 #include <cassert>

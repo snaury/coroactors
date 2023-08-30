@@ -20,7 +20,7 @@ namespace coroactors {
         using sink_ptr = detail::intrusive_ptr<sink_type>;
 
     public:
-        using result_type = detail::task_group_result<T>;
+        using result_type = task_group_result<T>;
         using value_type = T;
 
         task_group() = default;

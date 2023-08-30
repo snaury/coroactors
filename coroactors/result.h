@@ -4,8 +4,11 @@
 #include <type_traits>
 #include <variant>
 
-namespace coroactors::detail {
+namespace coroactors {
 
+    /**
+     * Exception thrown when result is used incorrectly
+     */
     class result_error : public std::logic_error {
     public:
         result_error(const char* message)
@@ -130,4 +133,4 @@ namespace coroactors::detail {
         std::variant<std::monostate, Result, std::exception_ptr> result_;
     };
 
-} // namespace coroactors::detail
+} // namespace coroactors

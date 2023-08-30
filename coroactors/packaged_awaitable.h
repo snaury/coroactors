@@ -16,10 +16,11 @@ namespace coroactors {
      * is for testing and running coroutines in a controlled way.
      */
     template<class T>
-    class packaged_awaitable : public detail::result<T> {
-        using result_type = detail::result<T>;
-
+    class packaged_awaitable : public result<T> {
     public:
+        using result_type = result<T>;
+        using value_type = T;
+
         template<detail::awaitable Awaitable>
         explicit packaged_awaitable(Awaitable&& awaitable)
             : handle(detail::make_packaged_awaitable<T>(std::forward<Awaitable>(awaitable)).handle)

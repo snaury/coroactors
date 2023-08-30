@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/detail/intrusive_ptr.h>
-#include <coroactors/detail/result.h>
+#include <coroactors/result.h>
 #include <coroactors/stop_token.h>
 #include <atomic>
 #include <cassert>

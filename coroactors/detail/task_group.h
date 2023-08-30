@@ -1,7 +1,7 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/intrusive_ptr.h>
-#include <coroactors/detail/result.h>
+#include <coroactors/result.h>
 #include <coroactors/stop_token.h>
 #include <atomic>
 #include <cassert>
@@ -17,10 +17,6 @@ namespace coroactors {
         using std::logic_error::logic_error;
     };
 
-} // namespace coroactors
-
-namespace coroactors::detail {
-
     /**
      * Encapsulates a single result in a task group
      */
@@ -32,6 +28,10 @@ namespace coroactors::detail {
     public:
         size_t index{ size_t(-1) };
     };
+
+} // namespace coroactors
+
+namespace coroactors::detail {
 
     template<class T>
     class task_group_sink;
