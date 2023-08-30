@@ -48,7 +48,7 @@ public:
                 assert(!result.has_exception());
 
                 co_return Response{
-                    result.index,
+                    result.index(),
                     result.take_value(),
                 };
             });

@@ -3,33 +3,14 @@
 #include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
+#include <coroactors/task_group_error.h>
+#include <coroactors/task_group_result.h>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
 #include <memory>
 #include <optional>
 #include <utility>
-
-namespace coroactors {
-
-    class task_group_error : public std::logic_error {
-    public:
-        using std::logic_error::logic_error;
-    };
-
-    /**
-     * Encapsulates a single result in a task group
-     */
-    template<class T>
-    class task_group_result : public result<T> {
-    public:
-        task_group_result() noexcept = default;
-
-    public:
-        size_t index{ size_t(-1) };
-    };
-
-} // namespace coroactors
 
 namespace coroactors::detail {
 
@@ -566,7 +547,7 @@ namespace coroactors::detail {
             sink_ = sink;
             token_ = std::move(token);
             running = true;
-            this->result_->index = index;
+            this->result_->set_index(index);
             task_group_handle<T>::from_promise(*this).resume();
             return index;
         }

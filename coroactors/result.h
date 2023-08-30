@@ -1,20 +1,10 @@
 #pragma once
+#include <coroactors/result_error.h>
 #include <exception>
-#include <stdexcept>
 #include <type_traits>
 #include <variant>
 
 namespace coroactors {
-
-    /**
-     * Exception thrown when result is used incorrectly
-     */
-    class result_error : public std::logic_error {
-    public:
-        result_error(const char* message)
-            : logic_error(message)
-        {}
-    };
 
     /**
      * Encapsulates a result of computation which may fail with an exception

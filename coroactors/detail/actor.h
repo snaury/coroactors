@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/actor_context.h>
+#include <coroactors/actor_error.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -10,11 +11,6 @@
 #include <utility>
 
 namespace coroactors {
-
-    class actor_error : public std::logic_error {
-    public:
-        using std::logic_error::logic_error;
-    };
 
     template<class T>
     class actor;
