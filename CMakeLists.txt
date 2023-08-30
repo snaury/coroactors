@@ -27,11 +27,7 @@ endif()
 add_library(coroactors INTERFACE)
 target_include_directories(coroactors INTERFACE ${PROJECT_SOURCE_DIR})
 
-find_package(GTest REQUIRED)
-
-include(CTest)
-include(GoogleTest)
-
 enable_testing()
 
+add_subdirectory(examples)
 add_subdirectory(test)
