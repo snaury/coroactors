@@ -31,6 +31,4 @@ enable_testing()
 
 add_custom_target(check ${CMAKE_CTEST_COMMAND})
 
-add_subdirectory(test)
-add_subdirectory(examples)
-add_subdirectory(benchmarks)
+add_subdirectory(src)
