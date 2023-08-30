@@ -22,7 +22,7 @@ namespace coroactors {
 
     public:
         using promise_type = detail::actor_promise<T>;
-        using result_type = result<T>;
+        using result_type = class result<T>;
         using value_type = T;
 
     public:
