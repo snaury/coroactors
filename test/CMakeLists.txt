@@ -15,6 +15,8 @@ if(GTest_FOUND)
         GTest::gtest
     )
 
+    add_dependencies(check coroactors_test)
+
     include(GoogleTest)
     gtest_discover_tests(coroactors_test)
 

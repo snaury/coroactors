@@ -29,6 +29,8 @@ target_include_directories(coroactors INTERFACE ${PROJECT_SOURCE_DIR})
 
 enable_testing()
 
+add_custom_target(check ${CMAKE_CTEST_COMMAND})
+
 add_subdirectory(test)
 add_subdirectory(examples)
 add_subdirectory(benchmarks)
