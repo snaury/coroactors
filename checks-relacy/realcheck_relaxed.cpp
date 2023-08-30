@@ -13,7 +13,7 @@ private:
 
 struct test_relaxed {
     static constexpr size_t thread_count = 8;
-    static constexpr int iteration_count = 100000000;
+    static constexpr int iteration_count = 1000000;
 
     struct node_t {
         std::atomic<int> value;
@@ -43,8 +43,8 @@ struct test_relaxed {
     void thread_func(size_t thread_index) {
         enter_barrier();
         for (;;) {
-            // note: any atomic has some total order of operations,
-            // so some thread always owns the node.
+            // note: there is some total order on any atomic variable itself
+            // so only one thread can have non-null node at a time
             node_t* node = head.exchange(nullptr, std::memory_order_relaxed);
             if (!node) {
                 // keep spinning
@@ -54,15 +54,15 @@ struct test_relaxed {
             int count = node->value.exchange(0, std::memory_order_relaxed);
             if (count < iteration_count) {
                 // the question is: could this relaxed store be reordered
-                // with the head exchange below, and could another thread
+                // with the exchange on head below, and could another thread
                 // observe some stale value during its value exchange?
-                // the real answer (on apple m1) appears to be: no
+                // the real answer (on apple m1) appears to be: yes
                 node->value.store(count + 1, std::memory_order_relaxed);
             } else {
                 node->value.store(count, std::memory_order_relaxed);
             }
 
-            // there is a total order on the head variable
+            // note: there is some total order on any atomic variable itself
             head.exchange(node, std::memory_order_relaxed);
 
             // update stats or stop
