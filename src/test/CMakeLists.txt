@@ -2,24 +2,34 @@ find_package(GTest)
 
 if(GTest_FOUND)
 
-    add_executable(coroactors_test
-        main.cpp
-        test_actor.cpp
-        test_stop_token.cpp
-        test_task_group.cpp
-        test_with_continuation.cpp
-        test_with_task_group.cpp
+    set(SIMPLE_TESTS
+        test_actor
+        test_stop_token
+        test_task_group
+        test_with_continuation
+        test_with_task_group
     )
 
-    target_link_libraries(coroactors_test
+    # Common files and dependencies (compile once)
+    add_library(test_common main.cpp)
+    target_link_libraries(test_common PUBLIC
         coroactors
         GTest::gtest
     )
 
-    add_dependencies(check coroactors_test)
+    foreach(TEST ${SIMPLE_TESTS})
+        # Make a separate executable for each test
+        add_executable(${TEST} ${TEST}.cpp)
+        target_link_libraries(${TEST} test_common)
+
+        # Build tests before running them with `make check`
+        add_dependencies(check ${TEST})
+    endforeach()
 
     include(GoogleTest)
-    gtest_discover_tests(coroactors_test)
+    foreach(TEST ${SIMPLE_TESTS})
+        gtest_discover_tests(${TEST})
+    endforeach()
 
 else()
 

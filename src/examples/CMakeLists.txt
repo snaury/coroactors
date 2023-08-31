@@ -1,11 +1,11 @@
-add_library(coroactors_examples
+add_library(examples
     counter.cpp
     fast_service.cpp
     queue.cpp
     timeout.cpp
 )
 
-target_link_libraries(coroactors_examples
+target_link_libraries(examples
     coroactors
 )
 
