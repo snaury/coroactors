@@ -42,7 +42,11 @@ endif()
 
 enable_testing()
 
-# Support for `make check` which builds tests first
+# Support for `make all-tests` which builds all tests
+add_custom_target(all-tests)
+
+# Support for `make check` which builds all tests first
 add_custom_target(check ${CMAKE_CTEST_COMMAND})
+add_dependencies(check all-tests)
 
 add_subdirectory(src)

@@ -23,7 +23,7 @@ if(GTest_FOUND)
         target_link_libraries(${TEST} test_common)
 
         # Build tests before running them with `make check`
-        add_dependencies(check ${TEST})
+        add_dependencies(all-tests ${TEST})
     endforeach()
 
     include(GoogleTest)
