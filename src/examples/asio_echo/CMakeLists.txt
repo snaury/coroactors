@@ -1,6 +1,4 @@
-find_package(Boost COMPONENTS headers)
-
-if(Boost_FOUND)
+if(asio_FOUND)
 
     add_executable(asio_echo
         asio_echo.cpp
@@ -8,7 +6,7 @@ if(Boost_FOUND)
 
     target_link_libraries(asio_echo
         coroactors
-        Boost::headers
+        PkgConfig::asio
     )
 
 endif()

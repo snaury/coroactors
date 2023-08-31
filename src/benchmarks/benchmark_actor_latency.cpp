@@ -3,7 +3,7 @@
 #include <coroactors/detail/blocking_queue.h>
 #include <coroactors/asio_actor_scheduler.h>
 #include <absl/synchronization/mutex.h>
-#include <boost/asio/thread_pool.hpp>
+#include <asio/thread_pool.hpp>
 #include <deque>
 #include <iostream>
 #include <string>
@@ -434,7 +434,7 @@ public:
     }
 
 private:
-    boost::asio::thread_pool pool;
+    asio::thread_pool pool;
     asio_actor_scheduler scheduler;
 };
 

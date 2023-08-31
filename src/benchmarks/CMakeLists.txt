@@ -1,6 +1,5 @@
 find_package(absl COMPONENTS synchronization)
 find_package(benchmark)
-find_package(Boost COMPONENTS headers)
 
 if(absl_FOUND AND benchmark_FOUND)
 
@@ -14,14 +13,14 @@ if(absl_FOUND AND benchmark_FOUND)
 
 endif()
 
-if(absl_FOUND AND Boost_FOUND)
+if(absl_FOUND AND asio_FOUND)
 
     add_executable(benchmark_actor_latency benchmark_actor_latency.cpp)
 
     target_link_libraries(benchmark_actor_latency
         coroactors
         absl::synchronization
-        Boost::headers
+        PkgConfig::asio
     )
 
 endif()

@@ -1,10 +1,10 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/intrusive_ptr.h>
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/defer.hpp>
+#include <asio/any_io_executor.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/post.hpp>
+#include <asio/defer.hpp>
 #include <optional>
 
 namespace coroactors {
@@ -14,7 +14,7 @@ namespace coroactors {
      */
     class asio_actor_scheduler : public actor_scheduler {
     public:
-        using executor_type = boost::asio::any_io_executor;
+        using executor_type = asio::any_io_executor;
         using typename actor_scheduler::clock_type;
         using typename actor_scheduler::time_point;
         using typename actor_scheduler::duration;
@@ -38,13 +38,13 @@ namespace coroactors {
         }
 
         void post(execute_callback_type c) override {
-            boost::asio::post(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
+            asio::post(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
                 resume_with_preemption(std::move(c), d);
             });
         }
 
         void defer(execute_callback_type c) override {
-            boost::asio::defer(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
+            asio::defer(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
                 resume_with_preemption(std::move(c), d);
             });
         }
@@ -97,7 +97,7 @@ namespace coroactors {
 
             void start(stop_token&& token) {
                 timer.async_wait(
-                    [p = detail::intrusive_ptr<timer_t>(this)](const boost::system::error_code& ec) {
+                    [p = detail::intrusive_ptr<timer_t>(this)](const asio::error_code& ec) {
                         p->finish(ec);
                     });
                 // Install stop_callback after the call to async_wait, in case
@@ -110,7 +110,7 @@ namespace coroactors {
             }
 
         private:
-            void finish(const boost::system::error_code& ec) noexcept {
+            void finish(const asio::error_code& ec) noexcept {
                 callback(ec ? false : true);
             }
 
@@ -132,7 +132,7 @@ namespace coroactors {
 
         private:
             std::atomic<size_t> refcount{ 0 };
-            boost::asio::steady_timer timer;
+            asio::steady_timer timer;
             schedule_callback_type callback;
             std::optional<stop_callback<cancel_t>> cancel;
         };

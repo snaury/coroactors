@@ -1,6 +1,6 @@
 #pragma once
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/cancellation_type.hpp>
+#include <asio/any_io_executor.hpp>
+#include <asio/cancellation_type.hpp>
 #include <type_traits>
 
 namespace coroactors {
@@ -10,8 +10,8 @@ namespace coroactors {
      *
      * Also stores options that may modify the way operations perform.
      */
-    template<class Executor = boost::asio::any_io_executor,
-        boost::asio::cancellation_type CancelType = boost::asio::cancellation_type::all>
+    template<class Executor = asio::any_io_executor,
+        asio::cancellation_type CancelType = asio::cancellation_type::all>
     struct asio_awaitable_t {
         /**
          * Wrapped executor with asio_awaitable_t as the default completion token
@@ -49,9 +49,9 @@ namespace coroactors {
         /**
          * Specifies cancellation type used for stop token propagation
          */
-        static constexpr boost::asio::cancellation_type cancel_type = CancelType;
+        static constexpr asio::cancellation_type cancel_type = CancelType;
 
-        template<boost::asio::cancellation_type OtherCancelType>
+        template<asio::cancellation_type OtherCancelType>
         using with_cancel_type_t = asio_awaitable_t<Executor, OtherCancelType>;
     };
 

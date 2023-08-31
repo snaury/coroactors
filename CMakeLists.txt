@@ -31,6 +31,15 @@ endif()
 add_library(coroactors INTERFACE)
 target_include_directories(coroactors INTERFACE ${PROJECT_SOURCE_DIR})
 
+# Some targets require asio to build
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    # We need 1.23 and it is also the first version with pkg-config support
+    pkg_check_modules(asio QUIET IMPORTED_TARGET asio>=1.23)
+else()
+    set(asio_FOUND 0)
+endif()
+
 enable_testing()
 
 # Support for `make check` which builds tests first

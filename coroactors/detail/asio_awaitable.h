@@ -1,9 +1,9 @@
 #pragma once
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detail/awaiters.h>
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/async_result.hpp>
-#include <boost/asio/cancellation_signal.hpp>
+#include <asio/any_io_executor.hpp>
+#include <asio/async_result.hpp>
+#include <asio/cancellation_signal.hpp>
 #include <tuple>
 #include <utility>
 
@@ -82,7 +82,7 @@ namespace coroactors::detail {
             }
         }
 
-        boost::asio::cancellation_slot slot() noexcept {
+        asio::cancellation_slot slot() noexcept {
             if (cs) {
                 return cs->slot();
             } else {
@@ -124,7 +124,7 @@ namespace coroactors::detail {
          * Emits the specified cancellation type, can be done as long as no
          * other thread potentially calls methods on the same io object.
          */
-        void emit_cancellation(boost::asio::cancellation_type ct) noexcept {
+        void emit_cancellation(asio::cancellation_type ct) noexcept {
             cs->emit(ct);
         }
 
@@ -217,7 +217,7 @@ namespace coroactors::detail {
     private:
         std::atomic<size_t> refcount{ 0 };
         std::atomic<void*> continuation{ nullptr };
-        std::optional<boost::asio::cancellation_signal> cs;
+        std::optional<asio::cancellation_signal> cs;
     };
 
     template<class... Ts>
@@ -243,7 +243,7 @@ namespace coroactors::detail {
     public:
         using result_type = asio_awaitable_handler_result_t<Ts...>;
         using continuation_type = asio_continuation<result_type>;
-        using cancellation_slot_type = boost::asio::cancellation_slot;
+        using cancellation_slot_type = asio::cancellation_slot;
 
         explicit asio_awaitable_handler_base(continuation_type* r)
             : result(r)
@@ -280,16 +280,16 @@ namespace coroactors::detail {
      * The error code handler, transform it into an optional exception
      */
     template<class... Ts>
-    class asio_awaitable_handler<boost::system::error_code, Ts...>
+    class asio_awaitable_handler<asio::error_code, Ts...>
         : public asio_awaitable_handler_base<Ts...>
     {
     public:
         using asio_awaitable_handler_base<Ts...>::asio_awaitable_handler_base;
 
         template<class... Args>
-        void operator()(const boost::system::error_code& ec, Args&&... args) {
+        void operator()(const asio::error_code& ec, Args&&... args) {
             if (ec) {
-                this->result->set_exception(boost::system::system_error(ec));
+                this->result->set_exception(asio::system_error(ec));
             } else {
                 this->result->emplace_value(std::forward<Args>(args)...);
             }
@@ -436,13 +436,13 @@ namespace coroactors::detail {
 
 } // namespace coroactors::detail
 
-namespace boost::asio {
+namespace asio {
 
     /**
      * Customizes async_result to transform async operations into awaitables
      */
     template<class Executor,
-        boost::asio::cancellation_type CancelType,
+        asio::cancellation_type CancelType,
         class R, class... Ts>
     class async_result<
         ::coroactors::asio_awaitable_t<Executor, CancelType>,
@@ -465,4 +465,4 @@ namespace boost::asio {
         }
     };
 
-} // namespace boost::asio
+} // namespace asio

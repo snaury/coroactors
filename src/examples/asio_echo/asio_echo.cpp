@@ -2,14 +2,13 @@
 #include <coroactors/asio_actor_scheduler.h>
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detach_awaitable.h>
-#include <boost/asio/thread_pool.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/write.hpp>
+#include <asio/thread_pool.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/write.hpp>
 #include <iostream>
 
 using namespace coroactors;
 
-namespace asio = boost::asio;
 using asio::ip::tcp;
 using asio::any_io_executor;
 
@@ -48,7 +47,7 @@ actor<void> listener(actor_scheduler& scheduler, any_io_executor executor) {
 }
 
 int main() {
-    boost::asio::thread_pool pool(4);
+    asio::thread_pool pool(4);
     asio_actor_scheduler scheduler(pool.executor());
 
     stop_source source;
