@@ -69,39 +69,28 @@ namespace coroactors::detail {
     };
 
     /**
-     * Sets suspended to false and destroys coroutine handle on exceptions
+     * Sets suspended to true at the start and to false on exceptions
      */
-    template<bool is_noexcept = false>
-    class destroy_on_exceptions_guard {
+    class suspended_guard {
     public:
-        destroy_on_exceptions_guard(std::coroutine_handle<> k, bool& suspended) noexcept
-            : k(k)
-            , suspended(suspended)
-        {}
+        explicit suspended_guard(bool& suspended) noexcept
+            : suspended(suspended)
+        {
+            suspended = true;
+        }
 
-        destroy_on_exceptions_guard(const destroy_on_exceptions_guard&) = delete;
-        destroy_on_exceptions_guard& operator=(const destroy_on_exceptions_guard&) = delete;
+        suspended_guard(const suspended_guard&) = delete;
+        suspended_guard& operator=(const suspended_guard&) = delete;
 
-        ~destroy_on_exceptions_guard() noexcept {
-            if (suspended && count != std::uncaught_exceptions()) [[unlikely]] {
+        ~suspended_guard() noexcept {
+            if (count != std::uncaught_exceptions()) [[unlikely]] {
                 suspended = false;
-                k.destroy();
             }
         }
 
     private:
-        std::coroutine_handle<> k;
         bool& suspended;
         int count = std::uncaught_exceptions();
-    };
-
-    /**
-     * Specialization that does nothing when await_suspend is noexcept
-     */
-    template<>
-    class destroy_on_exceptions_guard<true> {
-    public:
-        destroy_on_exceptions_guard(std::coroutine_handle<>, bool&) noexcept {}
     };
 
     /**
@@ -133,6 +122,7 @@ namespace coroactors::detail {
                 // Callback was not invoked, but we are supposed to resume
                 // our continuation. All we can do now is destroy it and
                 // hope it unwinds its stack correctly.
+                suspended = false;
                 c.destroy();
             }
         }
@@ -492,6 +482,22 @@ namespace coroactors::detail {
             same_context_wrapped_awaiter(const same_context_wrapped_awaiter&) = delete;
             same_context_wrapped_awaiter& operator=(const same_context_wrapped_awaiter&) = delete;
 
+            ~same_context_wrapped_awaiter() noexcept {
+                // Note: there are three ways this awaiter can be destroyed
+                // with a valid wrapped continuation:
+                // - it was resumed normally, then suspended == false and it
+                //   will destroy itself later, we must not double free
+                // - it was destroyed and forwarded destruction to us, but
+                //   first sets suspended = false, we must not double free
+                // - our parent frame was destroyed (bottom-up), and we still
+                //   have suspended == true, we need to set suspended = false
+                //   and destroy the wrapper to avoid a memory leak.
+                if (suspended && wrapped) {
+                    suspended = false;
+                    wrapped.destroy();
+                }
+            }
+
             bool await_ready()
                 noexcept(has_await_ready_stop_token<Awaiter>
                     ? has_noexcept_await_ready_stop_token<Awaiter>
@@ -509,13 +515,12 @@ namespace coroactors::detail {
                 // Note: we allocate a wrapper in this method, so not noexcept
                 // noexcept(has_noexcept_await_suspend<Awaiter>)
             {
+                // This will make sure suspended is set to false on exceptions
+                suspended_guard guard(suspended);
+
                 // The wrapped handle restores context before resuming
-                std::coroutine_handle<> k = actor_restore_context_callback::wrap(self.context, c, suspended);
-
-                // This will make sure wrapper does not leak on exceptions
-                destroy_on_exceptions_guard<has_noexcept_await_suspend<Awaiter>> guard(k, suspended);
-
-                suspended = true;
+                std::coroutine_handle<> k = wrapped =
+                    actor_restore_context_callback::wrap(self.context, c, suspended);
 
                 // Note: we still have context locked, but after the call to
                 // Awaiter's await_suspend our frame may be destroyed and we
@@ -528,6 +533,7 @@ namespace coroactors::detail {
                     if (!awaiter.await_suspend(std::move(k))) {
                         // Awaiter did not suspend, unwrap and resume
                         suspended = false;
+                        wrapped = {};
                         k.destroy();
                         return c;
                     }
@@ -558,6 +564,7 @@ namespace coroactors::detail {
         private:
             Awaiter awaiter;
             actor_promise& self;
+            std::coroutine_handle<> wrapped;
             bool suspended = false;
         };
 
@@ -599,6 +606,22 @@ namespace coroactors::detail {
             change_context_wrapped_awaiter(const change_context_wrapped_awaiter&) = delete;
             change_context_wrapped_awaiter& operator=(const change_context_wrapped_awaiter&) = delete;
 
+            ~change_context_wrapped_awaiter() noexcept {
+                // Note: there are three ways this awaiter can be destroyed
+                // with a valid wrapped continuation:
+                // - it was resumed normally, then suspended == false and it
+                //   will destroy itself later, we must not double free
+                // - it was destroyed and forwarded destruction to us, but
+                //   first sets suspended = false, we must not double free
+                // - our parent frame was destroyed (bottom-up), and we still
+                //   have suspended == true, we need to set suspended = false
+                //   and destroy the wrapper to avoid a memory leak.
+                if (suspended && wrapped) {
+                    suspended = false;
+                    wrapped.destroy();
+                }
+            }
+
             bool await_ready()
                 noexcept(has_await_ready_stop_token<Awaiter>
                     ? has_noexcept_await_ready_stop_token<Awaiter>
@@ -617,6 +640,9 @@ namespace coroactors::detail {
                 // Note: we allocate a wrapper in this method, so not noexcept
                 // noexcept(has_noexcept_await_suspend<Awaiter>)
             {
+                // This will make sure suspended is set to false on exceptions
+                suspended_guard guard(suspended);
+
                 if (ready) {
                     // Awaiter's await_ready returned true, so we perform a
                     // context switch here, as if returning from the awaiter.
@@ -627,18 +653,13 @@ namespace coroactors::detail {
                     assert(self.context != new_context);
                     auto context = std::move(self.context);
                     self.context = new_context;
-                    suspended = true;
                     return self.context.manager().switch_from(
                         context.manager(), c, /* returning */ true);
                 }
 
                 // The wrapped handle restores context before resuming
-                std::coroutine_handle<> k = actor_restore_context_callback::wrap(new_context, c, suspended);
-
-                // This will make sure wrapper does not leak on exceptions
-                destroy_on_exceptions_guard<has_noexcept_await_suspend<Awaiter>> guard(k, suspended);
-
-                suspended = true;
+                std::coroutine_handle<> k = wrapped =
+                    actor_restore_context_callback::wrap(new_context, c, suspended);
 
                 // Note: we still have context locked, but after the call to
                 // Awaiter's await_suspend our frame may be destroyed and we
@@ -653,6 +674,7 @@ namespace coroactors::detail {
                     if (!awaiter.await_suspend(std::move(k))) {
                         // Awaiter did not suspend, unwrap and resume
                         suspended = false;
+                        wrapped = {};
                         k.destroy();
                         return c;
                     }
@@ -684,6 +706,7 @@ namespace coroactors::detail {
             Awaiter awaiter;
             const actor_context& new_context;
             actor_promise& self;
+            std::coroutine_handle<> wrapped;
             bool ready = false;
             bool suspended = false;
         };
