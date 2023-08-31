@@ -19,36 +19,32 @@ TEST(ActorTest, ImmediateReturn) {
 
 actor<void> actor_await_const_without_context(int value) {
     int result = co_await actor_return_const(value);
-    (void)result;
-    ADD_FAILURE() << "unexpected success";
+    EXPECT_EQ(result, value);
 }
 
 actor<void> actor_await_caller_context_without_context() {
     const actor_context& context = co_await actor_context::caller_context;
-    (void)context;
-    ADD_FAILURE() << "unexpected success";
+    EXPECT_EQ(context, no_actor_context);
 }
 
 actor<void> actor_await_current_context_without_context() {
     const actor_context& context = co_await actor_context::current_context;
-    (void)context;
-    ADD_FAILURE() << "unexpected success";
+    EXPECT_EQ(context, no_actor_context);
 }
 
 actor<void> actor_await_sleep_without_context() {
     co_await no_actor_context.sleep_for(std::chrono::milliseconds(100));
-    ADD_FAILURE() << "unexpected success";
 }
 
-TEST(ActorTest, CannotAwaitWithoutContext) {
+TEST(ActorTest, AwaitWithoutContext) {
     auto a = packaged_awaitable(actor_await_const_without_context(42));
-    EXPECT_TRUE(a.has_exception());
+    EXPECT_TRUE(a.success());
     auto b = packaged_awaitable(actor_await_caller_context_without_context());
-    EXPECT_TRUE(b.has_exception());
+    EXPECT_TRUE(b.success());
     auto c = packaged_awaitable(actor_await_current_context_without_context());
-    EXPECT_TRUE(c.has_exception());
+    EXPECT_TRUE(c.success());
     auto d = packaged_awaitable(actor_await_sleep_without_context());
-    EXPECT_TRUE(d.has_exception());
+    EXPECT_TRUE(d.success());
 }
 
 actor<void> actor_empty_context() {
@@ -80,17 +76,59 @@ actor<void> actor_with_specific_context(const actor_context& context) {
 TEST(ActorTest, StartWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    // Not nested, so runs in the same thread
+    // We are not running in the scheduler so it will preempt
     auto r = packaged_awaitable(actor_with_specific_context(context));
+    EXPECT_TRUE(r.running());
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r.success());
 }
 
 TEST(ActorTest, DetachWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    // Not nested, so runs in the same thread
+    // We are not running in the scheduler so it will preempt
     actor_with_specific_context(context).detach();
-    ASSERT_EQ(scheduler.queue.size(), 0u);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+TEST(ActorTest, ActorContextInheritance) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+
+    auto r = packaged_awaitable([](const actor_context& context) -> actor<void> {
+        EXPECT_EQ(co_await actor_context::caller_context, no_actor_context);
+        EXPECT_EQ(co_await actor_context::current_context, no_actor_context);
+        co_await context();
+        EXPECT_EQ(co_await actor_context::caller_context, no_actor_context);
+        EXPECT_EQ(co_await actor_context::current_context, context);
+        co_await [](const actor_context& context) -> actor<void> {
+            // The context is inherited when initially awaited
+            EXPECT_EQ(co_await actor_context::caller_context, context);
+            EXPECT_EQ(co_await actor_context::current_context, context);
+            // We can change it to empty context
+            co_await no_actor_context();
+            // Caller will not change, but current context will
+            EXPECT_EQ(co_await actor_context::caller_context, context);
+            EXPECT_EQ(co_await actor_context::current_context, no_actor_context);
+        }(context);
+        // Context is restored when we return
+        EXPECT_EQ(co_await actor_context::caller_context, no_actor_context);
+        EXPECT_EQ(co_await actor_context::current_context, context);
+    }(context));
+
+    EXPECT_TRUE(r.running());
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_TRUE(r.success());
 }
 
 actor<void> actor_without_context_awaits_specific_context(const actor_context& context) {
@@ -103,8 +141,13 @@ actor<void> actor_without_context_awaits_specific_context(const actor_context& c
 TEST(ActorTest, AwaitWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    // The same thread of execution, no difference to run/detach
+    // No difference to run/detach
     auto r = packaged_awaitable(actor_without_context_awaits_specific_context(context));
+    EXPECT_TRUE(r.running());
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r.success());
 }
 
@@ -123,10 +166,12 @@ TEST(ActorTest, AwaitEmptyFromSpecificContext) {
     actor_context context(scheduler);
     int stage = 0;
     auto r = packaged_awaitable(actor_with_context_awaits_empty_context(stage, context));
-    EXPECT_EQ(stage, 3); // we should defer on the return path
+    EXPECT_TRUE(r.running());
+    EXPECT_EQ(stage, 1);
     ASSERT_EQ(scheduler.queue.size(), 1u);
     EXPECT_EQ(scheduler.queue[0].deferred, true);
     scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_EQ(stage, 4);
     EXPECT_TRUE(r.success());
 }
@@ -152,6 +197,7 @@ TEST(ActorTest, StartNestedWithSpecificContext) {
     EXPECT_TRUE(r.success());
     EXPECT_TRUE(r1->running());
     ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
     scheduler.run_next();
     ASSERT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r1->success());
@@ -179,6 +225,9 @@ TEST(ActorTest, Sleep) {
     {
         SCOPED_TRACE("timers disabled");
         auto r = packaged_awaitable(actor_check_sleep(context, false));
+        ASSERT_EQ(scheduler.queue.size(), 1u);
+        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         EXPECT_TRUE(r.success());
     }
@@ -186,6 +235,9 @@ TEST(ActorTest, Sleep) {
     {
         SCOPED_TRACE("timer triggers");
         auto r = packaged_awaitable(actor_check_sleep(context, true));
+        ASSERT_EQ(scheduler.queue.size(), 1u);
+        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         scheduler.wake_next();
@@ -203,6 +255,9 @@ TEST(ActorTest, Sleep) {
             source.request_stop();
         };
         auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false, before_sleep)));
+        ASSERT_EQ(scheduler.queue.size(), 1u);
+        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 0u);
         EXPECT_TRUE(r.success());
@@ -211,6 +266,9 @@ TEST(ActorTest, Sleep) {
         SCOPED_TRACE("cancelled during sleep");
         stop_source source;
         auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false)));
+        ASSERT_EQ(scheduler.queue.size(), 1u);
+        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
         source.request_stop();
@@ -249,6 +307,8 @@ TEST(TestActor, AbortedSuspend) {
     actor_context context(scheduler);
 
     auto r = packaged_awaitable(actor_aborted_suspend(context));
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
     // Suspend is aborted, so we expect no context switch on the return path
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r.success());
@@ -279,6 +339,8 @@ TEST(TestActor, ThrowDuringSuspend) {
     actor_context context(scheduler);
 
     auto r = packaged_awaitable(actor_throw_during_suspend(context));
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
     // Suspend throws an exception, so we expect to observe it in the actor
     // without context switches, double frees or any leaks.
     EXPECT_EQ(scheduler.queue.size(), 0u);

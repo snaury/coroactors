@@ -172,7 +172,7 @@ namespace coroactors::detail {
             this->result_.set_exception(std::current_exception());
         }
 
-        static auto initial_suspend() noexcept { return std::suspend_never{}; }
+        static auto initial_suspend() noexcept { return std::suspend_always{}; }
 
         struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
@@ -181,21 +181,14 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             static std::coroutine_handle<> await_suspend(actor_continuation<T> h) noexcept {
                 auto& p = h.promise();
-                p.finished = true;
 
                 // Check if we have been co_await'ed
                 auto next = std::exchange(p.continuation, {});
                 if (!next) {
-                    if (!p.context_initialized) {
-                        // We did not reach a co_await context point
-                        // Suspend until actor is co_awaited
-                        return std::noop_coroutine();
-                    }
-
                     // Actor finished after a call to detach, see if there's
                     // some other continuation available in the same context,
                     // this would also correctly leave the context.
-                    next = p.context.manager().next();
+                    next = p.context.manager().next_coroutine();
 
                     // We have to destroy ourselves, since nobody is waiting
                     h.destroy();
@@ -204,21 +197,18 @@ namespace coroactors::detail {
                 }
 
                 if (p.continuation_context) {
+                    // We are returning to an actor, handle context switches
                     return p.continuation_context->manager().switch_from(
                         p.context.manager(), next, /* returning */ true);
+                } else {
+                    // We are returning to a non-actor coroutine
+                    p.context.manager().leave();
+                    return next;
                 }
-
-                // We are returning to a non-actor coroutine
-                p.context.manager().leave();
-                return next;
             }
         };
 
         static auto final_suspend() noexcept { return final_suspend_t{}; }
-
-        bool ready() const {
-            return finished;
-        }
 
         void set_stop_token(const stop_token& t) noexcept {
             token = t;
@@ -238,24 +228,12 @@ namespace coroactors::detail {
 
         template<class U>
         void set_continuation(actor_continuation<U> c) noexcept {
-            if (context_inherited) {
-                // We will start with the same context
-                context = c.promise().get_context();
-                context_initialized = true;
-            }
-            assert(context_initialized);
-            assert(!finished);
             continuation = c;
             continuation_context = c.promise().get_context_ptr();
+            context = *continuation_context;
         }
 
         void set_continuation(std::coroutine_handle<> c) noexcept {
-            if (context_inherited) {
-                // We will start with an empty context
-                context_initialized = true;
-            }
-            assert(context_initialized);
-            assert(!finished);
             continuation = c;
         }
 
@@ -272,37 +250,24 @@ namespace coroactors::detail {
 
             if (!continuation_context) {
                 // We are awaited by a non-actor coroutine, enter the context
-                return context.manager().enter_for_await(h);
+                return context.manager().enter(h);
             }
 
-            // Transfer directly if awaiter context is the same
-            if (context == *continuation_context) {
-                // We are awaited by an actor coroutine with the same context
-                return h;
-            }
-
-            // Switch to our context
-            return context.manager().switch_from(
-                continuation_context->manager(), h, /* returning */ false);
+            // We always inherit context when starting
+            assert(context == *continuation_context);
+            return h;
         }
 
         void start_detached(bool use_scheduler = true) noexcept {
             std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
 
-            // Destroy an already finished coroutine
-            if (finished) {
-                h.destroy();
-                return;
-            }
-
-            // Resume coroutine recursively when allowed
-            if (auto c = context.manager().enter_for_resume(h, use_scheduler)) {
-                context.manager().resume(c);
+            // Will resume coroutine recursively when allowed or required
+            if (context.manager().start(h, use_scheduler)) {
+                context.manager().resume(h);
             }
         }
 
         enum class ESwitchContext {
-            Initial,
             Ready,
             Switch,
         };
@@ -317,28 +282,12 @@ namespace coroactors::detail {
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
-                // The first time we suspend we return to caller
-                if (type == ESwitchContext::Initial) {
-                    return std::noop_coroutine();
-                }
-
                 // We are changing to a different context
                 assert(type != ESwitchContext::Ready);
                 auto& self = c.promise();
                 auto from = std::move(self.context);
                 self.context = to;
-                // Note: we set "returning" to true here to match a possible
-                // change in behavior when returning from actors without a
-                // context. On the one hand user could put code in a separate
-                // function, and the starting wait would be elided, but with
-                // this flag set it would have to defer when switching from
-                // empty to non-empty context. However the much more important
-                // difference is when this actor returns. With a separate
-                // function it would first switch to empty context and then
-                // returning to non-empty context would defer, but when we
-                // allow context switching without defer here, it would
-                // potentially run for a long time inside some unknown handler
-                // that initially resumed the context-less actor.
+                // Note: we are returning from a co_await here
                 return self.context.manager().switch_from(
                     from.manager(), c, /* returning */ true);
             }
@@ -349,50 +298,27 @@ namespace coroactors::detail {
         };
 
         switch_context_awaiter await_transform(actor_context::bind_context_t bound) {
-            if (!context_initialized) {
-                // This is the first time we suspend
-                assert(!context_inherited);
-                context = bound.context;
-                context_initialized = true;
-                return switch_context_awaiter{ bound.context, ESwitchContext::Initial };
-            }
-
             if (context == bound.context) {
-                // We are not changing context, no op
+                // We are not changing contexts, no op
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
             if (!bound.context) {
                 // Switching to an empty context, avoid suspending
-                auto from = std::move(context);
+                context.manager().switch_to_empty();
                 context = bound.context;
-                context.manager().switch_from(
-                    from.manager(), nullptr, /* returning */ false);
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
-            // We need to suspend and resume on the new context
+            // We need to suspend and resume in the new context
             return switch_context_awaiter{ bound.context, ESwitchContext::Switch };
         }
 
         auto await_transform(actor_context::caller_context_t::bind_context_t) {
-            if (!context_initialized) {
-                // This is the first time we suspend
-                assert(!context_inherited);
-                context_inherited = true;
-                return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
-            }
-
             // Reuse await_transform above for binding to a continuation context
             return await_transform(actor_context::bind_context_t{
                 continuation_context ? *continuation_context : no_actor_context
             });
-        }
-
-        void check_context_initialized() const {
-            if (!context_initialized) [[unlikely]] {
-                throw actor_error("actor must co_await context first");
-            }
         }
 
         struct return_context_awaiter_t {
@@ -404,14 +330,10 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::caller_context_t) {
-            check_context_initialized();
-
             return return_context_awaiter_t{ continuation_context ? *continuation_context : no_actor_context };
         }
 
         auto await_transform(actor_context::current_context_t) {
-            check_context_initialized();
-
             return return_context_awaiter_t{ context };
         }
 
@@ -428,8 +350,6 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::yield_t) {
-            check_context_initialized();
-
             return yield_context_awaiter_t{};
         }
 
@@ -446,8 +366,6 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::preempt_t) {
-            check_context_initialized();
-
             return preempt_context_awaiter_t{};
         }
 
@@ -460,8 +378,6 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::current_stop_token_t) {
-            check_context_initialized();
-
             return current_stop_token_awaiter_t{ token };
         }
 
@@ -530,7 +446,7 @@ namespace coroactors::detail {
                 });
 
                 // Note: we still have context locked, but after the call to
-                // Awaiter's await_suspend our frame may be destroyed and we
+                // awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
                 auto context = self.context;
                 if constexpr (has_await_suspend_void<Awaiter>) {
@@ -554,9 +470,10 @@ namespace coroactors::detail {
                         return k;
                     }
                 }
+
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return context.manager().next();
+                return context.manager().next_coroutine();
             }
 
             Result await_resume()
@@ -581,8 +498,6 @@ namespace coroactors::detail {
             static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor<T>>);
             static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor_awaiter<T>>);
             static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor_result_awaiter<T>>);
-
-            check_context_initialized();
 
             return same_context_wrapped_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
@@ -645,10 +560,6 @@ namespace coroactors::detail {
                 if (ready) {
                     // Awaiter's await_ready returned true, so we perform a
                     // context switch here, as if returning from the awaiter.
-                    // This also handles return path for a context-less actor
-                    // that wraps a trivial awaitable in a context. It would
-                    // behavior as if switching to a new context, see a large
-                    // comment in switch_context_awaiter as to why.
                     assert(self.context != new_context);
                     auto context = std::move(self.context);
                     self.context = new_context;
@@ -668,7 +579,7 @@ namespace coroactors::detail {
                 });
 
                 // Note: we still have context locked, but after the call to
-                // Awaiter's await_suspend our frame may be destroyed and we
+                // awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
                 auto context = std::move(self.context);
                 // Change promise context to new context
@@ -694,9 +605,10 @@ namespace coroactors::detail {
                         return k;
                     }
                 }
+
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return context.manager().next();
+                return context.manager().next_coroutine();
             }
 
             Result await_resume()
@@ -715,8 +627,6 @@ namespace coroactors::detail {
 
         template<awaitable Awaitable>
         auto await_transform(actor_context::bind_awaitable_t<Awaitable> bound) {
-            check_context_initialized();
-
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 bound.context,
@@ -725,8 +635,6 @@ namespace coroactors::detail {
 
         template<awaitable Awaitable>
         auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
-            check_context_initialized();
-
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 continuation_context ? *continuation_context : no_actor_context,
@@ -780,8 +688,6 @@ namespace coroactors::detail {
         // claim to support context switches directly, this includes wrappers.
         template<actor_passthru_awaitable<T> Awaitable>
         auto await_transform(Awaitable&& awaitable) {
-            check_context_initialized();
-
             return actor_passthru_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
@@ -790,9 +696,6 @@ namespace coroactors::detail {
         actor_context context;
         std::coroutine_handle<> continuation;
         const actor_context* continuation_context{ nullptr };
-        bool context_initialized = false;
-        bool context_inherited = false;
-        bool finished = false;
     };
 
     template<class T>
@@ -826,11 +729,11 @@ namespace coroactors::detail {
 
         bool await_ready(const stop_token& token) noexcept {
             handle.promise().set_stop_token(token);
-            return handle.promise().ready();
+            return false;
         }
 
         bool await_ready() noexcept {
-            return handle.promise().ready();
+            return false;
         }
 
         template<class Promise>
@@ -883,11 +786,11 @@ namespace coroactors::detail {
 
         bool await_ready(const stop_token& token) noexcept {
             handle.promise().set_stop_token(token);
-            return handle.promise().ready();
+            return false;
         }
 
         bool await_ready() noexcept {
-            return handle.promise().ready();
+            return false;
         }
 
         template<class Promise>

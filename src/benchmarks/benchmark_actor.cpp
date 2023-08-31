@@ -12,7 +12,7 @@ public:
         queue.push_back(std::move(c));
     }
 
-    bool preempt() const override {
+    bool preempt() override {
         return false;
     }
 

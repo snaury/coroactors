@@ -6,10 +6,10 @@ namespace coroactors {
     /**
      * Used as the return type of actor coroutines
      *
-     * Actor coroutines are eagerly started, but must either return the result,
-     * or co_await context() first. When bound to a context they will continue
-     * executing on that context, automatically releasing it on co_awaits and
-     * reacquiring it before they return.
+     * Actor coroutines are lazily started when co_awaited, and should usually
+     * `co_await context()` first. When bound to a context they will continue
+     * executing on that context, automatically leaving it on co_awaits and
+     * entering it before returning.
      */
     template<class T>
     class [[nodiscard]] actor {

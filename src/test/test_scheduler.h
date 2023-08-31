@@ -30,8 +30,8 @@ struct test_scheduler
         {}
     };
 
-    bool preempt() const override {
-        return false;
+    bool preempt() override {
+        return in_run_next == 0;
     }
 
     void post(execute_callback_type c) override {
@@ -77,7 +77,9 @@ struct test_scheduler
         assert(!queue.empty());
         auto cont = queue.front();
         queue.pop_front();
+        ++in_run_next;
         cont();
+        --in_run_next;
     }
 
     void wake_next() {
@@ -85,7 +87,9 @@ struct test_scheduler
         auto it = timers.begin();
         it->second.stop.reset();
         assert(!it->second.cancelled);
+        ++in_wake_next;
         it->second.callback(true);
+        --in_wake_next;
         timers.erase(it);
     }
 
@@ -105,6 +109,8 @@ struct test_scheduler
 
     std::deque<continuation_t> queue;
     std::multimap<actor_scheduler::time_point, timer_t> timers;
+    size_t in_run_next = 0;
+    size_t in_wake_next = 0;
     bool timers_enabled = false;
     bool locked = false;
 };

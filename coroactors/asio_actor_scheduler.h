@@ -28,7 +28,7 @@ namespace coroactors {
             , preempt_duration_(preempt_duration)
         {}
 
-        bool preempt() const override {
+        bool preempt() override {
             if (const time_point* deadline = preempt_deadline) {
                 return clock_type::now() >= *deadline;
             }

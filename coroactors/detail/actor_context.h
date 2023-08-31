@@ -70,32 +70,35 @@ namespace coroactors::detail {
 
     private:
         /**
-         * Add a new continuation to this actor context
+         * Run a coroutine `c` in this actor context
          *
-         * Returns a valid handle if this context becomes locked and runnable
-         * as the result of this push, or an invalid handle when it is locked
-         * and/or running, possibly in another thread.
+         * Returns true when a previously empty context is locked for exclusive
+         * access, and this would have been the first coroutine in the queue,
+         * so it may run immediately. Returns false when `c` was added to the
+         * queue, because the context is currently locked and possibly running
+         * in another thread.
          */
-        std::coroutine_handle<> push(std::coroutine_handle<> c) {
+        bool run_coroutine(std::coroutine_handle<> c) {
             assert(c && "Attempt to push a nullptr coroutine handle");
             if (mailbox_.push(c)) {
                 std::coroutine_handle<> k = mailbox_.pop_default();
                 assert(k == c);
-                return k;
+                (void)k;
+                return true;
             } else {
-                return nullptr;
+                return false;
             }
         }
 
         /**
-         * Returns the next continuation from this actor context or nullptr
+         * Returns the next coroutine in this context queue or nullptr
          *
-         * This context must be locked and running by the caller, otherwise
-         * the behavior is undefined. When an invalid handle is returned the
-         * context is unlocked and no longer runnable, which may become
-         * locked by another push, even concurrently in another thread.
+         * This context must be locked for exclusive access by the caller,
+         * otherwise the behavior is undefined. When a nullptr is returned the
+         * context is also unlocked, and may be concurrently locked in another
+         * thread.
          */
-        std::coroutine_handle<> pop() {
+        std::coroutine_handle<> next_coroutine() {
             std::coroutine_handle<> k = mailbox_.pop_default();
             return k;
         }
@@ -248,7 +251,7 @@ namespace coroactors::detail {
     };
 
     /**
-     * Continuation management APIs so we don't clutter the class itself
+     * Coroutine management APIs so we don't clutter the actor context
      */
     class actor_context_manager {
         friend class ::coroactors::actor_context;
@@ -278,9 +281,16 @@ namespace coroactors::detail {
             }
         }
 
+        /**
+         * Returns the number of currently running frames
+         */
+        static size_t running_frames() noexcept {
+            return actor_context_state::running_frames;
+        }
+
     private:
         /**
-         * Post coroutine h to run on this context
+         * Post coroutine h to run in this context
          */
         void post(std::coroutine_handle<> h) const {
             // Note: `std::function` over a lambda capture with two pointers
@@ -293,7 +303,7 @@ namespace coroactors::detail {
         }
 
         /**
-         * Defer coroutine h to run on this context
+         * Defer coroutine h to run in this context
          */
         void defer(std::coroutine_handle<> h) const {
             // Note: `std::function` over a lambda capture with two pointers
@@ -306,30 +316,42 @@ namespace coroactors::detail {
         }
 
         /**
-         * Returns true when switches to this context should be preempted
+         * Reschedules coroutine when preempted and returns true, otherwise false
          */
-        bool preempt() const {
-            if (!ptr) [[unlikely]] {
+        bool maybe_preempt(std::coroutine_handle<> h, bool running) const noexcept {
+            if (!ptr) {
                 // Cannot preempt without a scheduler
                 return false;
             }
 
-            if (actor_context_state::running_frames > 1) [[unlikely]] {
-                // More than one frame running, always preempt
+            // When running in parallel with lower frames we use post
+            if (running_frames() > (running ? 1 : 0)) [[unlikely]] {
+                if (running) {
+                    actor_context_state::leave_unconditionally(ptr);
+                }
+                post(h);
                 return true;
             }
 
-            return ptr->scheduler.preempt();
+            // When preempted by the scheduler we use defer
+            if (ptr->scheduler.preempt()) {
+                if (running) {
+                    actor_context_state::leave_unconditionally(ptr);
+                }
+                defer(h);
+                return true;
+            }
+
+            return false;
         }
 
     public:
         /**
-         * Resumes a coroutine h, which is expecting to run on this context
+         * Resumes a coroutine h, which is expecting to run in this context
          *
-         * Context must be exclusively locked to caller, e.g. by a previous
-         * call to enter. Primarily used by actor schedulers to run actor
-         * coroutines. The resumed coroutine is expected to correctly leave
-         * this context before before returning.
+         * Context must be exclusively locked to caller, e.g. by a successful
+         * call to `start`. The resumed coroutine is expected to correctly
+         * leave this context before returning.
          */
         void resume(std::coroutine_handle<> h) const {
             actor_context_state::frame_guard guard;
@@ -338,85 +360,81 @@ namespace coroactors::detail {
         }
 
         /**
-         * Tries to enter this context with a coroutine h
+         * Starts a coroutine `h` in this context
          *
          * This is called when an actor coroutine attempts to start in some
-         * datached way (e.g. `actor<T>::detach()`). When it returns a valid
-         * coroutine handle the context is locked and the result must be
-         * resumed using actor_context::resume or scheduled to a scheduler.
+         * datached way (e.g. `actor<T>::detach()`). When it returns true the
+         * context is locked and the result must be resumed using a manager's
+         * resume method.
          *
-         * When optional use_scheduler is false this method will never post
-         * provided coroutine to a scheduler, but it may still return an
-         * invalid handle when this context is currently running and cannot
-         * be locked.
+         * When optional `use_scheduler` is false this method will never post
+         * provided coroutine to the scheduler, but it may still return false
+         * when this context is currently locked and `h` is enqueued.
          */
-        std::coroutine_handle<> enter_for_resume(std::coroutine_handle<> h, bool use_scheduler = true) const {
+        bool start(std::coroutine_handle<> h, bool use_scheduler = true) const {
             if (!ptr) {
-                return h;
+                return true;
             }
 
-            // Note: when the call to push returns nullptr it may immediately
-            // start running in another thread and destroy this context.
-            if (auto next = ptr->push(h)) {
-                // Entering actors may lead to a long chain of context
-                // switches which is undesirable when a call is detached or
-                // added to a task group. This is impossible to detect with
-                // generic coroutines, however with actors we can, simply
-                // by detecting that this is done while another actor is
-                // currently running. Otherwise actor scheduler is supposed
-                // to preempt chains of context switches from happening in
-                // an unexpected state.
-                if (use_scheduler && actor_context_state::running_frames > 0) {
-                    post(next);
-                    return {};
+            // Note: when the call to run_coroutine returns false it may
+            // immediately start running in another thread and destroy this
+            // context.
+            if (!ptr->run_coroutine(h)) {
+                return false;
+            }
+
+            // Entering actors may lead to a long chain of context switches
+            // which is undesirable when a call is detached or added to a task
+            // group. This is impossible to detect with generic coroutines,
+            // however with actors we can, simply by detecting that this is
+            // done while another actor is currently running. For generic
+            // coroutines actor scheduler usually preempts context switches
+            // when they happen in unexpected threads.
+            if (use_scheduler) {
+                if (maybe_preempt(h, /* running */ false)) {
+                    return false;
                 }
-
-                return next;
             }
 
-            return {};
+            return true;
         }
 
         /**
-         * Tries to enter this context with a coroutine h
+         * Tries to enter this context with a coroutine `h`
          *
-         * This is called when an actor coroutine starts due to co_await
-         * from another non-actor coroutine. It always returns a valid
-         * coroutine handle, which should be returned from an await_suspend
-         * method. When this context is locked it also becomes running in
-         * the current thread, otherwise the returned handle is
-         * noop_coroutine and context will not be running.
+         * This is called when an actor coroutine starts due to `co_await` from
+         * a non-actor coroutine. It always returns a valid coroutine handle,
+         * which could be returned from an await_suspend method. When this
+         * context locks it also starts running in the current thread,
+         * otherwise the returned handle is noop_coroutine.
          */
-        std::coroutine_handle<> enter_for_await(std::coroutine_handle<> h) const {
-            if (auto handle = enter_for_resume(h)) {
+        std::coroutine_handle<> enter(std::coroutine_handle<> h) const {
+            if (start(h)) {
                 actor_context_state::enter_unconditionally(ptr);
-                return handle;
+                return h;
             } else {
                 return std::noop_coroutine();
             }
         }
 
         /**
-         * Tries to get the next runnable from this context without leaving
+         * Tries to get the next coroutine from this context without leaving
          *
          * Returns noop_coroutine() and leaves when nothing is available.
          */
-        std::coroutine_handle<> next() const {
-            verify_running("calling next() with a context that is not running");
+        std::coroutine_handle<> next_coroutine() const {
+            verify_running("calling next_coroutine() with a context that is not running");
 
-            // Leave first because pop() may invalidate current context
+            // Leave first because next_coroutine() may invalidate current context
             actor_context_state::leave_unconditionally(ptr);
 
             if (ptr) {
-                if (auto next = ptr->pop()) {
-                    if (!preempt()) {
+                if (auto next = ptr->next_coroutine()) {
+                    if (!maybe_preempt(next, /* running */ false)) {
                         // Re-enter and continue in the same thread
                         actor_context_state::enter_unconditionally(ptr);
                         return next;
                     }
-
-                    // We always defer because we don't create new threads of activity here
-                    defer(next);
                 }
             }
 
@@ -429,11 +447,11 @@ namespace coroactors::detail {
         void leave() const {
             verify_running("calling leave() with a context that is not running");
 
-            // Leave first becasue pop() may invalidate current context
+            // Leave first becasue next_coroutine() may invalidate current context
             actor_context_state::leave_unconditionally(ptr);
 
             if (ptr) {
-                if (auto next = ptr->pop()) {
+                if (auto next = ptr->next_coroutine()) {
                     // Run the next continuation parallel to current activity
                     post(next);
                 }
@@ -441,11 +459,11 @@ namespace coroactors::detail {
         }
 
         /**
-         * Restores this context for a resuming coroutine h
+         * Restore this context for a resuming coroutine h
          *
          * Returns the next runnable for the current thread, which may also
          * be a noop_coroutine(), in which case context is not restored and
-         * the provided coroutine will run on a scheduler.
+         * the provided coroutine will run somewhere else.
          */
         std::coroutine_handle<> restore(std::coroutine_handle<> h) const {
             if (!ptr) {
@@ -454,22 +472,20 @@ namespace coroactors::detail {
                 return h;
             }
 
-            if (auto next = ptr->push(h)) {
-                // We have returned from an async activity, but we don't
-                // want to block caller of resume(). This may include
-                // completed network calls (in which case we want to defer,
-                // as it is a continuation of the return), but also calls to
-                // continuation<T>::resume, which really start a new
-                // activity parallel to resumer. We use heuristics here to
-                // check if some actor is already running on the stack, and
-                // when it does it usually means this was a nested resume
-                // and we need to post. This may be wrong when resume is
-                // called from non-actor coroutines, but we may hope
-                // scheduler preemption would kick in.
-                if (actor_context_state::running_frames > 0) {
-                    post(next);
-                } else {
-                    defer(next);
+            if (ptr->run_coroutine(h)) {
+                // We have returned from an async activity, and usually don't
+                // want to block a caller of resume(). This includes completed
+                // network calls (in which case we want to defer, as it is a
+                // continuation of the return), but also calls to
+                // `continuation<T>::resume`, which really start a new
+                // activity parallel to resumer. We rely on common logic in
+                // maybe_preempt here and scheduler preempting in unexpected
+                // threads and handlers. This should be consistent when we
+                // return to actor directly, and when we return to actor via
+                // a context-less actor call.
+                if (!maybe_preempt(h, /* running */ false)) {
+                    actor_context_state::enter_unconditionally(ptr);
+                    return h;
                 }
             }
 
@@ -477,42 +493,61 @@ namespace coroactors::detail {
         }
 
         /**
-         * Switches to this context from context `from` with a coroutine `h`
+         * Switches from this context to an empty context
+         */
+        void switch_to_empty() const {
+            verify_running("calling switch_to_empty() with a context that is not running");
+
+            if (ptr) {
+                // We need to switch context first, because next_coroutine()
+                // may unlock this context and then free it in another thread.
+                actor_context_state::switch_unconditionally(ptr, nullptr);
+
+                if (auto next = ptr->next_coroutine()) {
+                    // This activity runs parallel to current thread
+                    post(next);
+                }
+            }
+        }
+
+        /**
+         * Switches to this context from a context `from` with a coroutine `h`
          *
          * The `returning` argument specifies the direction of switching: when
-         * it is true the switch is returning from co_await, and vice versa.
+         * it is true the switch is returning from `co_await`.
          *
-         * This is mostly equivalent to leave() followed by restore(), but
-         * it is more efficient and has subtle differences where new
-         * continuation is prioritized over additional work in the `from`
-         * context.
+         * This is mostly equivalent to leave() followed by restore(), but it
+         * is more efficient and has subtle differences where new continuation
+         * is prioritized over additional work in the `from` context.
          *
-         * Returns the next runnable for the current thread, which may also
-         * be a noop_coroutine(), in which case it's as if leave() has been
-         * called.
-         *
-         * Note: when this context is empty `h` may be an invalid handle
-         * and is simply returned after switching. Useful to avoid
-         * suspending, and when there is no h in that case.
-         *
+         * Returns the next runnable coroutine for the current thread, which
+         * may also be a noop_coroutine(), in which case it's as if leave() has
+         * been called.
          */
         std::coroutine_handle<> switch_from(actor_context_manager from,
                 std::coroutine_handle<> h, bool returning) const
         {
             from.verify_running("calling switch_from() with a context that is not running");
 
-            if (from.ptr == ptr) {
-                // Context is not changing
+            assert(h && "Switching context with an invalid handle");
+            (void)returning;
+
+            if (ptr == from.ptr) {
+                // We are not changing contexts, but we may want to preempt
+                if (maybe_preempt(h, /* running */ true)) {
+                    return std::noop_coroutine();
+                }
+
                 return h;
             }
 
             if (!ptr) {
                 // Switching to a context without a scheduler. We need to
-                // switch context first, because pop may unlock and allow
-                // current context to run in another thread.
-                actor_context_state::switch_unconditionally(from.ptr, nullptr);
+                // switch the context first, because next_coroutine() may
+                // unlock and allow it to run in another thread.
+                actor_context_state::switch_unconditionally(from.ptr, ptr);
 
-                if (auto next = from.ptr->pop()) {
+                if (auto next = from.ptr->next_coroutine()) {
                     // Run the next activity parallel to h
                     from.post(next);
                 }
@@ -521,146 +556,81 @@ namespace coroactors::detail {
                 return h;
             }
 
-            assert(h && "Switching context with an invalid handle");
-
-            if (!from.ptr) {
-                // Leave current context first
-                actor_context_state::leave_unconditionally(nullptr);
-
-                // Switching from empty to non-empty context, so it is
-                // similar to entering, but with a thread of activity
-                // inherited from the actor we are switching from. The
-                // downside is that we could be switching from some context-
-                // less wrapper around this actor, which may have been
-                // detached or added to a task group, and then it's really
-                // a parallel activity to some initial caller. We use
-                // heuristics here to detect when another actor is running
-                // underneath the current context, similar to what enter()
-                // does. But note we need to account for the current
-                // context occupying a frame.
-                if (auto next = ptr->push(h)) {
-                    // Check for one more frame besides ours on the stack
-                    if (actor_context_state::running_frames > 1) {
-                        // Post this parallel activity and return to caller
-                        post(next);
-                        return std::noop_coroutine();
-                    }
-
-                    // Similar to restore() on the return path we assume we are
-                    // returning from some async activity and don't want to
-                    // start monopolizing this thread, which is likely stuck
-                    // in resume() call in some handler.
-                    if (returning) {
-                        // Defer this activity and return to caller
-                        defer(next);
-                        return std::noop_coroutine();
-                    }
-
-                    // Enter new context without involving the scheduler
-                    actor_context_state::enter_unconditionally(ptr);
-                    return next;
-                }
-
-                // Continuation may run in another thread
-                return std::noop_coroutine();
-            }
-
-            // We need leave current context and grab the next task from it
-            // before we do anything else. This is because current context may
-            // be owned by the only reference in the current frame, which could
-            // be destroyed as soon as the continuation starts running in
-            // another thread. By leaving and potentially unlocking first we
-            // make sure we won't touch current context when it's unlocked.
-            // However when there is one more task in the current context we
-            // know it's supposed to keep itself alive.
+            // Leave current context first, because some coroutine may resume
+            // in another thread with the same context when it is unblocked.
             actor_context_state::leave_unconditionally(from.ptr);
 
-            // This will be valid only when current context is still locked
-            auto more = from.ptr->pop();
+            // Take the next runnable from the current context. It will either
+            // stay locked with more work, or will unlock and possibly run in
+            // another thread. Note: we cannot attempt running in a new context
+            // first, because when the coroutine starts running it may free
+            // local variables which are keeping contexts in memory.
+            std::coroutine_handle<> more;
+            if (from.ptr) {
+                // Note: when more != nullptr context is locked and safe
+                more = from.ptr->next_coroutine();
+            }
 
-            // We switch between two different contexts. First we need to
-            // push continuation to this context's mailbox, and note that
-            // a successful push locks this context and implies it starts
-            // running, which forks a parallel activity unless current
-            // context is empty and unlocks. When push returns nullptr
-            // however it implies this context is running somewhere else,
-            // and may immediately become invalid and free, so we cannot
-            // work with ptr after that.
-            if (auto next = ptr->push(h)) {
-                // We have both contexts locked for now
-                // Defer when preempted (it's a continuation of caller)
-                if (preempt()) {
-                    // We defer current task, because it's a continuation
-                    // of the caller and should run before other tasks
-                    // from the current context.
-                    defer(next);
-
-                    // Other activities fork from the caller
+            // Try running h in this context. It will either be the first and
+            // lock, so we will try running it in the current thread, or it
+            // will be added to the queue and we will try running some work
+            // from the original context.
+            if (ptr->run_coroutine(h)) {
+                // Check for preemption by this context
+                if (maybe_preempt(h, /* running */ false)) {
                     if (more) {
                         from.post(more);
                     }
-
                     return std::noop_coroutine();
                 }
 
-                // Other activities fork from the caller
                 if (more) {
                     from.post(more);
                 }
 
-                // Enter this context with the continuation
                 actor_context_state::enter_unconditionally(ptr);
-                return next;
+                return h;
             }
 
             if (!more) {
-                // We have nothing to run in this thread
                 return std::noop_coroutine();
             }
 
-            if (from.preempt()) {
-                // We are preempted, and we should defer, because a failed
-                // push did not introduce new threads of activity (it was
-                // running somewhere else already), and we are continuing
-                // the same activity here.
-                from.defer(more);
+            if (from.maybe_preempt(more, /* running */ false)) {
                 return std::noop_coroutine();
             }
 
-            // Re-enter and continue in the same thread
+            // Re-enter the original context with the next coroutine
             actor_context_state::enter_unconditionally(from.ptr);
             return more;
         }
 
         /**
-         * Yields to other continuations in the current context
+         * Yields to other coroutines in this context
          */
         std::coroutine_handle<> yield(std::coroutine_handle<> h) {
-            verify_running("calling yield(c) with a context that is not running");
+            verify_running("calling yield(h) with a context that is not running");
 
             if (!ptr) {
                 return h;
             }
 
             // Push current coroutine to the end of the queue
-            if (auto next = ptr->push(h)) [[unlikely]] {
-                fail("unexpected continuation when pushing to a locked context");
+            if (ptr->run_coroutine(h)) [[unlikely]] {
+                fail("unexpected run_coroutine(h) result on a locked context");
             }
 
-            // Check the front of the queue, there's at least one continuation now
-            auto next = ptr->pop();
+            // Check the front of the queue, there's at least one coroutine there
+            auto next = ptr->next_coroutine();
             if (!next) [[unlikely]] {
-                fail("unexpected unlock when removing the next continuation");
+                fail("unexpected unlock when removing the next coroutine");
             }
 
-            if (preempt()) {
-                // Leave and defer when preempted
-                actor_context_state::leave_unconditionally(ptr);
-                defer(next);
+            if (maybe_preempt(next, /* running */ true)) {
                 return std::noop_coroutine();
             }
 
-            // Run the next continuation in the same context
+            // Run the next coroutine in the same context
             return next;
         }
 
@@ -668,15 +638,18 @@ namespace coroactors::detail {
          * Forces preemption without yielding in the current context
          */
         std::coroutine_handle<> preempt(std::coroutine_handle<> h) {
-            verify_running("calling preempt() with a context that is not running");
+            verify_running("calling preempt(h) with a context that is not running");
 
             if (!ptr) {
                 return h;
             }
 
-            // Leave and defer unconditionally
             actor_context_state::leave_unconditionally(ptr);
-            defer(h);
+            if (running_frames() > 0) {
+                post(h);
+            } else {
+                defer(h);
+            }
             return std::noop_coroutine();
         }
 

@@ -239,6 +239,11 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
             source.get_token(),
             do_with_stop_token_context(stage, scheduler, provider)));
 
+    EXPECT_EQ(stage, 1); // waiting for context
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+
     EXPECT_EQ(stage, 4); // waiting for the first value
     ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
@@ -324,6 +329,11 @@ TEST(WithTaskGroupTest, WaitReadySuccess) {
     auto result = packaged_awaitable(
         do_when_ready_with_token(stage, scheduler, provider, when_ready, true));
 
+    EXPECT_EQ(stage, 1); // waiting for context
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+
     EXPECT_EQ(stage, 4); // waiting in wait_next
     ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();
@@ -357,6 +367,11 @@ TEST(WithTaskGroupTest, WaitReadyCancelled) {
 
     auto result = packaged_awaitable(
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
+
+    EXPECT_EQ(stage, 1); // waiting for context
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 
     EXPECT_EQ(stage, 4); // waiting in wait_next
     ASSERT_EQ(provider.awaiters(), 2u);
@@ -398,6 +413,11 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
 
     auto result = packaged_awaitable(
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
+
+    EXPECT_EQ(stage, 1); // waiting for context
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 
     EXPECT_EQ(stage, 5); // waiting for the first value
     ASSERT_EQ(provider.awaiters(), 2u);
@@ -463,6 +483,11 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeSuspend) {
 
     auto result = packaged_awaitable(
         do_when_ready_with_token(stage, scheduler, provider, when_ready, false));
+
+    EXPECT_EQ(stage, 1); // waiting for context
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
 
     ASSERT_EQ(provider.awaiters(), 2u);
     auto a = provider.take();

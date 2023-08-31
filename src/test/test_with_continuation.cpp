@@ -301,9 +301,8 @@ namespace {
 
 template<class Callback>
 actor<void> actor_with_continuation(const actor_context& context, int& stage, Callback callback) {
-    co_await context();
     stage = 1;
-    co_await actor_context::preempt;
+    co_await context();
     stage = 2;
     co_await with_continuation(std::move(callback));
     stage = 3;
@@ -331,7 +330,7 @@ TEST(WithContinuationTest, ActorCompleteSync) {
         EXPECT_EQ(stage, 2);
     }).detach();
 
-    // It should initially block at the preemption point
+    // It should initially block at context wait
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(scheduler.queue.size(), 1u);
 
@@ -369,7 +368,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
         suspended = c;
     }).detach();
 
-    // It should initially block at the preemption point
+    // It should initially block at context wait
     EXPECT_EQ(stage, 1);
     EXPECT_EQ(scheduler.queue.size(), 1u);
 

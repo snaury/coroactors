@@ -394,7 +394,7 @@ public:
         Queue.push(std::move(c));
     }
 
-    bool preempt() const override {
+    bool preempt() override {
         if (thread_deadline) {
             return TClock::now() >= *thread_deadline;
         }
