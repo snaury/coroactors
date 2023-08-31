@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/intrusive_ptr.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/async_result.hpp>
 #include <asio/cancellation_signal.hpp>
@@ -10,7 +11,10 @@
 namespace coroactors::detail {
 
     template<class T>
-    class asio_continuation : public result<T> {
+    class asio_continuation final
+        : public intrusive_atomic_base<asio_continuation<T>>
+        , public result<T>
+    {
     public:
         explicit asio_continuation(bool allow_cancellation) {
             if (allow_cancellation) {
@@ -28,14 +32,6 @@ namespace coroactors::detail {
                 // reference and unsets continuation in the destructor
                 std::coroutine_handle<>::from_address(addr).destroy();
             }
-        }
-
-        void add_ref() noexcept {
-            refcount.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
         bool set_continuation(std::coroutine_handle<> c) noexcept {
@@ -215,7 +211,6 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerMask = 3;
 
     private:
-        std::atomic<size_t> refcount{ 0 };
         std::atomic<void*> continuation{ nullptr };
         std::optional<asio::cancellation_signal> cs;
     };
@@ -254,7 +249,7 @@ namespace coroactors::detail {
         }
 
     protected:
-        detail::intrusive_ptr<continuation_type> result;
+        intrusive_ptr<continuation_type> result;
     };
 
     /**
@@ -429,7 +424,7 @@ namespace coroactors::detail {
     private:
         std::decay_t<Initiation> initiation;
         std::tuple<std::decay_t<Args>...> args;
-        detail::intrusive_ptr<continuation_type> result;
+        intrusive_ptr<continuation_type> result;
         std::optional<stop_callback<emit_cancellation_t>> stop;
         bool suspended = false;
     };

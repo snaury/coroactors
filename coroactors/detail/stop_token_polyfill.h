@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/detail/atomic_semaphore.h>
-#include <coroactors/detail/intrusive_ptr.h>
+#include <coroactors/intrusive_ptr.h>
 #include <atomic>
 #include <thread>
 
@@ -31,20 +31,12 @@ namespace coroactors::detail {
     /**
      * Shared state between objects
      */
-    class stop_state {
+    class stop_state final : public intrusive_atomic_base<stop_state> {
         friend class stop_source;
 
         stop_state() noexcept = default;
 
     public:
-        void add_ref() noexcept {
-            refcount.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
-        }
-
         void add_source() noexcept {
             state.fetch_add(SourceCountIncrement, std::memory_order_relaxed);
         }
@@ -317,8 +309,6 @@ namespace coroactors::detail {
         static constexpr semaphore_atomic_t::value_type SourceCountIncrement = 8;
 
     private:
-        // We use an intrusive refcount so objects are a single pointer in size
-        std::atomic<size_t> refcount;
         // Note: when state is an int (e.g. linux futex) there would be 29 bits
         // left for the sources ref count, which gives us ~500 million possible
         // sources. This should be ok, sources are not copied as often as

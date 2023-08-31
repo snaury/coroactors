@@ -17,7 +17,7 @@ namespace coroactors {
     template<class T>
     class task_group {
         using sink_type = detail::task_group_sink<T>;
-        using sink_ptr = detail::intrusive_ptr<sink_type>;
+        using sink_ptr = intrusive_ptr<sink_type>;
 
     public:
         using result_type = task_group_result<T>;

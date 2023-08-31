@@ -1,8 +1,8 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/mailbox.h>
+#include <coroactors/intrusive_ptr.h>
 #include <atomic>
 #include <cassert>
 #include <optional>
@@ -26,7 +26,7 @@ namespace coroactors::detail {
 
     class actor_context_manager;
 
-    class actor_context_state {
+    class actor_context_state final : public intrusive_atomic_base<actor_context_state> {
         friend actor_context;
         friend actor_context_manager;
 
@@ -44,14 +44,6 @@ namespace coroactors::detail {
 #if COROACTORS_EXACT_RUNNING_CONTEXT
             assert(running_top != this && !prev && !next_count);
 #endif
-        }
-
-        void add_ref() noexcept {
-            refcount.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
 #if COROACTORS_EXACT_RUNNING_CONTEXT
@@ -247,7 +239,6 @@ namespace coroactors::detail {
 #endif
 
     private:
-        std::atomic<size_t> refcount{ 0 };
         actor_scheduler& scheduler;
         mailbox<std::coroutine_handle<>> mailbox_;
 #if COROACTORS_EXACT_RUNNING_CONTEXT
@@ -693,7 +684,7 @@ namespace coroactors::detail {
         actor_context_state* const ptr;
     };
 
-    class sleep_until_context {
+    class sleep_until_context final : public intrusive_atomic_base<sleep_until_context> {
     public:
         sleep_until_context() noexcept = default;
 
@@ -709,14 +700,6 @@ namespace coroactors::detail {
                 // We still have a continuation which needs to be destroyed
                 std::coroutine_handle<>::from_address(addr).destroy();
             }
-        }
-
-        void add_ref() noexcept {
-            refcount.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
         bool set_continuation(std::coroutine_handle<> c) noexcept {
@@ -759,7 +742,6 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerFailure = 2;
 
     private:
-        std::atomic<size_t> refcount{ 0 };
         std::atomic<void*> continuation{ nullptr };
     };
 

@@ -1,5 +1,5 @@
 #pragma once
-#include <coroactors/detail/intrusive_ptr.h>
+#include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
 #include <atomic>
@@ -24,7 +24,7 @@ namespace coroactors::detail {
     };
 
     template<class T>
-    class continuation_state {
+    class continuation_state final : public intrusive_atomic_base<continuation_state<T>> {
     private:
         static constexpr uintptr_t MarkerFinished = 1;
         static constexpr uintptr_t MarkerDestroyed = 2;
@@ -37,14 +37,6 @@ namespace coroactors::detail {
 
         continuation_state(const continuation_state&) = delete;
         continuation_state& operator=(const continuation_state&) = delete;
-
-        void add_ref() noexcept {
-            refcount_.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
-        }
 
         void add_strong_ref() noexcept {
             strong_refcount_.fetch_add(1, std::memory_order_relaxed);
@@ -68,17 +60,13 @@ namespace coroactors::detail {
         }
 
         void init_strong() noexcept {
-            add_ref();
+            intrusive_ptr_add_ref(this);
             add_strong_ref();
         }
 
         void destroy_strong() noexcept {
             destroy_continuation();
-
-            // Remove the additional reference to the object
-            if (release_ref() == 0) {
-                delete this;
-            }
+            intrusive_ptr_release(this);
         }
 
         bool destroy_continuation() noexcept {
@@ -184,7 +172,6 @@ namespace coroactors::detail {
         }
 
     private:
-        std::atomic<size_t> refcount_{ 0 };
         std::atomic<size_t> strong_refcount_{ 0 };
         std::atomic<void*> continuation{ nullptr };
         result<T>* result_ptr;

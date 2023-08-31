@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/intrusive_ptr.h>
+#include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
 #include <coroactors/task_group_error.h>
@@ -49,7 +49,7 @@ namespace coroactors::detail {
      * This class is shared with a intrusive_ptr
      */
     template<class T>
-    class task_group_sink {
+    class task_group_sink final : public intrusive_atomic_base<task_group_sink<T>> {
     public:
         task_group_sink() noexcept = default;
 
@@ -58,14 +58,6 @@ namespace coroactors::detail {
 
         ~task_group_sink() noexcept {
             detach();
-        }
-
-        void add_ref() noexcept {
-            refcount.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        size_t release_ref() noexcept {
-            return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
         }
 
         /**
@@ -335,8 +327,6 @@ namespace coroactors::detail {
         // Signals the next await_suspend that the request is already cancelled
         static constexpr uintptr_t MarkerCancelled = 3;
 
-        // A reference count for intrusive_ptr
-        std::atomic<size_t> refcount{ 0 };
         // A linked list of ready results (last result first) or a marker
         std::atomic<void*> last_ready{ nullptr };
         // A linked list of ready results removed from the atomic head

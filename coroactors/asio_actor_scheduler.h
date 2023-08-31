@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
-#include <coroactors/detail/intrusive_ptr.h>
+#include <coroactors/intrusive_ptr.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/post.hpp>
@@ -56,7 +56,7 @@ namespace coroactors {
             }
 
             // This object manages its own lifetime
-            detail::intrusive_ptr<timer_t> timer(
+            intrusive_ptr timer(
                 new timer_t(executor_, d, std::move(c)));
             timer->start(std::move(t));
         }
@@ -76,7 +76,7 @@ namespace coroactors {
         }
 
     private:
-        class timer_t {
+        class timer_t final : public intrusive_atomic_base<timer_t> {
         public:
             timer_t(const executor_type& executor, time_point deadline,
                     schedule_callback_type&& callback)
@@ -87,17 +87,9 @@ namespace coroactors {
             timer_t(const timer_t&) = delete;
             timer_t& operator=(const timer_t&) = delete;
 
-            void add_ref() noexcept {
-                refcount.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            size_t release_ref() noexcept {
-                return refcount.fetch_sub(1, std::memory_order_acq_rel) - 1;
-            }
-
             void start(stop_token&& token) {
                 timer.async_wait(
-                    [p = detail::intrusive_ptr<timer_t>(this)](const asio::error_code& ec) {
+                    [p = intrusive_ptr(this)](const asio::error_code& ec) {
                         p->finish(ec);
                     });
                 // Install stop_callback after the call to async_wait, in case
@@ -116,7 +108,7 @@ namespace coroactors {
 
         private:
             struct cancel_t {
-                const detail::intrusive_ptr<timer_t> p;
+                const intrusive_ptr<timer_t> p;
 
                 explicit cancel_t(timer_t* p)
                     : p(p)
@@ -131,7 +123,6 @@ namespace coroactors {
             };
 
         private:
-            std::atomic<size_t> refcount{ 0 };
             asio::steady_timer timer;
             schedule_callback_type callback;
             std::optional<stop_callback<cancel_t>> cancel;

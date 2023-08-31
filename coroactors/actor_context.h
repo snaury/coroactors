@@ -2,8 +2,8 @@
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/actor_context.h>
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/intrusive_ptr.h>
 #include <coroactors/detail/mailbox.h>
+#include <coroactors/intrusive_ptr.h>
 #include <cassert>
 #include <coroutine>
 #include <stdexcept>
@@ -216,7 +216,7 @@ namespace coroactors {
 
 
     private:
-        detail::intrusive_ptr<detail::actor_context_state> ptr;
+        intrusive_ptr<detail::actor_context_state> ptr;
     };
 
     /**
