@@ -383,14 +383,17 @@ namespace coroactors::detail {
         {
             assert(is_running() && "trying to switch without a context running");
 
-            (void)returning;
-
             // Leave current context, so maybe_preempt doesn't always preempt
             leave_context();
 
             // Special case: the context is not changing
             if (context == from_context) {
-                if (maybe_preempt(frame)) {
+                // Note: we only preempt on the return path, because otherwise
+                // it is a co_await of a new actor coroutine, which initially
+                // inherits context from the caller. That coroutine will likely
+                // bind to a different context and that's when it's best to
+                // preempt.
+                if (returning && maybe_preempt(frame)) {
                     return std::noop_coroutine();
                 }
 
