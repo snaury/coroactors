@@ -1,9 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(coroactors)
 
-option(WITH_ASAN "Enable address sanitizer" OFF)
-option(WITH_TSAN "Enable thread sanitizer" OFF)
-option(WITH_UBSAN "Enable undefined sanitizer" OFF)
+set(SANITIZE "off" CACHE STRING "Enable sanitizier: address/thread/memory/undefined")
 option(WITH_COVERAGE "Compile with coverage profiling" OFF)
 
 # This codebase is c++20
@@ -13,19 +11,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # But don't want gnu++20
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(WITH_ASAN)
-    add_compile_options(-fsanitize=address)
-    add_link_options(-fsanitize=address)
-endif()
-
-if(WITH_TSAN)
-    add_compile_options(-fsanitize=thread)
-    add_link_options(-fsanitize=thread)
-endif()
-
-if(WITH_UBSAN)
-    add_compile_options(-fsanitize=undefined)
-    add_link_options(-fsanitize=undefined)
+if((SANITIZE STREQUAL "") OR (SANITIZE STREQUAL "off"))
+    # Don't enable sanitizers
+else()
+    # Enable the specified sanitizer
+    add_compile_options(-fsanitize=${SANITIZE})
+    add_link_options(-fsanitize=${SANITIZE})
 endif()
 
 if(WITH_COVERAGE)

@@ -23,25 +23,25 @@ namespace coroactors::detail {
         };
 
     public:
-        // A placeholder type for `initially_unlocked`
+        struct initially_locked_t {};
         struct initially_unlocked_t {};
 
-        /**
-         * Mailbox is initially unlocked when constructed with this argument
-         */
+        static constexpr initially_locked_t initially_locked{};
         static constexpr initially_unlocked_t initially_unlocked{};
 
     public:
         /**
          * Constructs a new mailbox, initially locked and empty
          */
-        mailbox() = default;
+        explicit mailbox(initially_locked_t = {}) {
+            // this is the default
+        }
 
         /**
          * Constructs a new mailbox, initially unlocked and empty
          */
         explicit mailbox(initially_unlocked_t) {
-            head_->next.store(reinterpret_cast<void*>(MarkerUnlocked));
+            head_->next.store(reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_relaxed);
         }
 
         /**
@@ -188,9 +188,9 @@ namespace coroactors::detail {
 
     private:
         std::unique_ptr<node> head_{ new node };
-        char head_padding[64 - sizeof(head_)];
+        char head_padding[128 - sizeof(head_)];
         std::atomic<node*> tail_{ head_.get() };
-        char tail_padding[64 - sizeof(tail_)];
+        char tail_padding[128 - sizeof(tail_)];
     };
 
 } // namespace coroactors::detail

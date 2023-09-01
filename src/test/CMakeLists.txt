@@ -8,6 +8,8 @@ if(GTest_FOUND)
         test_task_group
         test_with_continuation
         test_with_task_group
+        test_mailbox
+        test_intrusive_mailbox
     )
 
     # Common files and dependencies (compile once)

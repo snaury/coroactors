@@ -5,32 +5,6 @@
 
 using namespace coroactors;
 
-static void TestBasics() {
-    int item;
-    detail::mailbox<int> mailbox;
-    assert(mailbox.peek() == nullptr);
-    bool push1 = mailbox.push(1);
-    assert(push1 == false);
-    bool push2 = mailbox.push(2);
-    assert(push2 == false);
-    item = mailbox.pop_default();
-    assert(item == 1);
-    item = mailbox.pop_default();
-    assert(item == 2);
-    item = mailbox.pop_default();
-    assert(item == 0);
-    bool push3 = mailbox.push(3);
-    assert(push3 == true);
-    const int* current = mailbox.peek();
-    assert(current && *current == 3);
-    bool unlocked = mailbox.try_unlock();
-    assert(!unlocked);
-    item = mailbox.pop_default();
-    assert(item == 3);
-    unlocked = mailbox.try_unlock();
-    assert(unlocked);
-}
-
 static void BM_Push(benchmark::State& state) {
     detail::mailbox<int> mailbox;
     benchmark::DoNotOptimize(mailbox);
@@ -126,7 +100,6 @@ BENCHMARK_DEFINE_F(BM_PushPop, Producers)(benchmark::State& state) {
 BENCHMARK_REGISTER_F(BM_PushPop, Producers)->ThreadRange(1, 32)->UseRealTime();
 
 int main(int argc, char** argv) {
-    TestBasics();
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();
