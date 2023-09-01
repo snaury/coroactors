@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/actor_context.h>
 #include <coroactors/actor_error.h>
+#include <coroactors/detail/actor_context_frame.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -83,28 +84,32 @@ namespace coroactors::detail {
         exceptions_guard& operator=(const exceptions_guard&) = delete;
 
         ~exceptions_guard() {
-            if (count != std::uncaught_exceptions()) [[unlikely]] {
+            if (!cancelled && count != std::uncaught_exceptions()) [[unlikely]] {
                 callback();
             }
+        }
+
+        void cancel() {
+            cancelled = true;
         }
 
     private:
         Callback callback;
         int count = std::uncaught_exceptions();
+        bool cancelled = false;
     };
 
     template<class Callback>
     exceptions_guard(Callback&&) -> exceptions_guard<std::decay_t<Callback>>;
 
     /**
-     * A callback type that restores actor context before resuming a coroutine
+     * A callback type that restores the frame context
      */
     class actor_restore_context_callback {
     public:
-        actor_restore_context_callback(const actor_context& context,
-                std::coroutine_handle<> c, std::coroutine_handle<>& wrapped) noexcept
-            : context(context)
-            , c(c)
+        actor_restore_context_callback(actor_context_frame* frame,
+                std::coroutine_handle<>& wrapped) noexcept
+            : frame(frame)
             , wrapped(wrapped)
         {}
 
@@ -112,8 +117,7 @@ namespace coroactors::detail {
         actor_restore_context_callback& operator=(const actor_restore_context_callback&) = delete;
 
         actor_restore_context_callback(actor_restore_context_callback&& rhs) noexcept
-            : context(rhs.context)
-            , c(std::exchange(rhs.c, {}))
+            : frame(rhs.frame)
             , wrapped(rhs.wrapped)
         {}
 
@@ -121,18 +125,18 @@ namespace coroactors::detail {
             // Note: must short circuit on `c` here. The `wrapped`
             // reference is likely pointing to an already destroyed value
             // after the coroutine is resumed.
-            if (c && wrapped) {
+            if (frame && wrapped) {
                 // Callback was not invoked, but we are supposed to resume
                 // our continuation. All we can do now is destroy it and
                 // hope it unwinds its stack correctly.
                 wrapped = {};
-                c.destroy();
+                frame->destroy();
             }
         }
 
         std::coroutine_handle<> operator()() noexcept {
             wrapped = {};
-            return context.manager().restore(std::exchange(c, {}));
+            return frame->context.manager().restore(std::exchange(frame, nullptr));
         }
 
         /**
@@ -140,21 +144,27 @@ namespace coroactors::detail {
          * context before resuming. The handle also propagates destroy calls
          * unless the `wrapped` variable is unset at that time.
          */
-        static std::coroutine_handle<> wrap(const actor_context& context,
-                std::coroutine_handle<> c, std::coroutine_handle<>& wrapped) noexcept
+        static std::coroutine_handle<> wrap(actor_context_frame* frame,
+                std::coroutine_handle<>& wrapped) noexcept
         {
-            return with_resume_callback(actor_restore_context_callback{ context, c, wrapped });
+            return with_resume_callback(actor_restore_context_callback{ frame, wrapped });
         }
 
     private:
-        const actor_context& context;
-        std::coroutine_handle<> c;
+        actor_context_frame* frame;
         std::coroutine_handle<>& wrapped;
     };
 
     template<class T>
-    class actor_promise final : public actor_result_handler<T> {
+    class actor_promise final
+        : public actor_context_frame
+        , public actor_result_handler<T>
+    {
     public:
+        actor_promise() noexcept
+            : actor_context_frame(actor_continuation<T>::from_promise(*this))
+        {}
+
         ~actor_promise() noexcept {
             if (continuation) {
                 // We have a continuation, but promise is destroyed before
@@ -187,8 +197,8 @@ namespace coroactors::detail {
                 if (!next) {
                     // Actor finished after a call to detach, see if there's
                     // some other continuation available in the same context,
-                    // this would also correctly leave the context.
-                    next = p.context.manager().next_coroutine();
+                    // this will also correctly leave the frame.
+                    next = p.context.manager().finish(&p);
 
                     // We have to destroy ourselves, since nobody is waiting
                     h.destroy();
@@ -196,27 +206,19 @@ namespace coroactors::detail {
                     return next;
                 }
 
-                if (p.continuation_context) {
+                if (p.continuation_frame) {
                     // We are returning to an actor, handle context switches
-                    return p.continuation_context->manager().switch_from(
-                        p.context.manager(), next, /* returning */ true);
+                    return p.continuation_frame->context.manager().switch_frame(
+                        /* from */ &p, /* to */ p.continuation_frame, /* returning */ true);
                 } else {
                     // We are returning to a non-actor coroutine
-                    p.context.manager().leave();
+                    p.context.manager().leave(&p);
                     return next;
                 }
             }
         };
 
         static auto final_suspend() noexcept { return final_suspend_t{}; }
-
-        void set_stop_token(const stop_token& t) noexcept {
-            token = t;
-        }
-
-        const stop_token& get_stop_token() const noexcept {
-            return token;
-        }
 
         const actor_context& get_context() const {
             return context;
@@ -229,8 +231,8 @@ namespace coroactors::detail {
         template<class U>
         void set_continuation(actor_continuation<U> c) noexcept {
             continuation = c;
-            continuation_context = c.promise().get_context_ptr();
-            context = *continuation_context;
+            continuation_frame = &c.promise();
+            context = continuation_frame->context;
         }
 
         void set_continuation(std::coroutine_handle<> c) noexcept {
@@ -246,23 +248,17 @@ namespace coroactors::detail {
         }
 
         std::coroutine_handle<> start_await() noexcept {
-            std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
-
-            if (!continuation_context) {
+            if (!continuation_frame) {
                 // We are awaited by a non-actor coroutine, enter the context
-                return context.manager().enter(h);
+                return context.manager().enter(this);
             }
 
-            // We always inherit context when starting
-            assert(context == *continuation_context);
-            return context.manager().switch_from(
-                continuation_context->manager(), h, /* returning */ false);
+            return context.manager().switch_frame(
+                continuation_frame, this, /* returning */ false);
         }
 
         void start_detached() noexcept {
-            std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
-
-            context.manager().start(h);
+            context.manager().start(this);
         }
 
         enum class ESwitchContext {
@@ -283,11 +279,8 @@ namespace coroactors::detail {
                 // We are changing to a different context
                 assert(type != ESwitchContext::Ready);
                 auto& self = c.promise();
-                auto from = std::move(self.context);
-                self.context = to;
                 // Note: we are returning from a co_await here
-                return self.context.manager().switch_from(
-                    from.manager(), c, /* returning */ true);
+                return to.manager().switch_context(&self, /* returning */ true);
             }
 
             void await_resume() noexcept {
@@ -303,8 +296,7 @@ namespace coroactors::detail {
 
             if (!bound.context) {
                 // Switching to an empty context, avoid suspending
-                context.manager().switch_to_empty();
-                context = bound.context;
+                context.manager().switch_to_empty(this);
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
             }
 
@@ -315,7 +307,7 @@ namespace coroactors::detail {
         auto await_transform(actor_context::caller_context_t::bind_context_t) {
             // Reuse await_transform above for binding to a continuation context
             return await_transform(actor_context::bind_context_t{
-                continuation_context ? *continuation_context : no_actor_context
+                continuation_frame ? continuation_frame->context : no_actor_context
             });
         }
 
@@ -328,7 +320,7 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::caller_context_t) {
-            return return_context_awaiter_t{ continuation_context ? *continuation_context : no_actor_context };
+            return return_context_awaiter_t{ continuation_frame ? continuation_frame->context : no_actor_context };
         }
 
         auto await_transform(actor_context::current_context_t) {
@@ -341,7 +333,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                return self.context.manager().yield(c);
+                return self.context.manager().yield(&self);
             }
 
             void await_resume() noexcept {}
@@ -357,7 +349,7 @@ namespace coroactors::detail {
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
-                return self.context.manager().preempt(c);
+                return self.context.manager().yield(&self);
             }
 
             void await_resume() noexcept {}
@@ -376,7 +368,7 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::current_stop_token_t) {
-            return current_stop_token_awaiter_t{ token };
+            return current_stop_token_awaiter_t{ get_stop_token() };
         }
 
         template<awaitable Awaitable>
@@ -434,25 +426,30 @@ namespace coroactors::detail {
             {
                 // The wrapped handle restores context before resuming
                 std::coroutine_handle<> k = wrapped =
-                    actor_restore_context_callback::wrap(self.context, c, wrapped);
-
-                // This will make sure wrapper does not leak on exceptions
-                exceptions_guard guard([this]{
-                    if (wrapped) {
-                        std::exchange(wrapped, {}).destroy();
-                    }
-                });
+                    actor_restore_context_callback::wrap(&self, wrapped);
 
                 // Note: we still have context locked, but after the call to
                 // awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
                 auto context = self.context;
+                context.manager().async_start(&self);
+
+                // This will make sure wrapper does not leak on exceptions
+                exceptions_guard guard([this, &context]{
+                    context.manager().async_abort(&self);
+                    if (wrapped) {
+                        std::exchange(wrapped, {}).destroy();
+                    }
+                });
+
                 if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
                 } else if constexpr (has_await_suspend_bool<Awaiter>) {
                     if (!awaiter.await_suspend(std::move(k))) {
                         // Awaiter did not suspend, unwrap and resume
+                        guard.cancel();
+                        context.manager().async_abort(&self);
                         std::exchange(wrapped, {}).destroy();
                         return c;
                     }
@@ -464,14 +461,14 @@ namespace coroactors::detail {
                         // we cannot know if it is the same coroutine, even
                         // if it has the same address (it may have been
                         // destroyed and reallocated again).
-                        context.manager().leave();
+                        context.manager().async_leave();
                         return k;
                     }
                 }
 
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return context.manager().next_coroutine();
+                return context.manager().async_next();
             }
 
             Result await_resume()
@@ -559,37 +556,46 @@ namespace coroactors::detail {
                     // Awaiter's await_ready returned true, so we perform a
                     // context switch here, as if returning from the awaiter.
                     assert(self.context != new_context);
-                    auto context = std::move(self.context);
-                    self.context = new_context;
-                    return self.context.manager().switch_from(
-                        context.manager(), c, /* returning */ true);
+                    return new_context.manager().switch_context(
+                        &self, /* returning */ true);
                 }
 
                 // The wrapped handle restores context before resuming
                 std::coroutine_handle<> k = wrapped =
-                    actor_restore_context_callback::wrap(new_context, c, wrapped);
-
-                // This will make sure wrapper does not leak on exceptions
-                exceptions_guard guard([this]{
-                    if (wrapped) {
-                        std::exchange(wrapped, {}).destroy();
-                    }
-                });
+                    actor_restore_context_callback::wrap(&self, wrapped);
 
                 // Note: we still have context locked, but after the call to
                 // awaiter's await_suspend our frame may be destroyed and we
                 // cannot access self or any members. Make a copy of context.
                 auto context = std::move(self.context);
+
                 // Change promise context to new context
+                context.manager().async_start(&self);
                 self.context = new_context;
+
+                // This will make sure wrapper does not leak on exceptions
+                exceptions_guard guard([this, &context]{
+                    // Restore the original context
+                    self.context = std::move(context);
+                    self.context.manager().async_abort(&self);
+                    if (wrapped) {
+                        std::exchange(wrapped, {}).destroy();
+                    }
+                });
+
                 if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
                 } else if constexpr (has_await_suspend_bool<Awaiter>) {
                     if (!awaiter.await_suspend(std::move(k))) {
                         // Awaiter did not suspend, unwrap and resume
+                        guard.cancel();
+                        // Restore the original context and switch to new context
+                        self.context = std::move(context);
+                        self.context.manager().async_abort(&self);
                         std::exchange(wrapped, {}).destroy();
-                        return c;
+                        return new_context.manager().switch_context(
+                            &self, /* returning */ true);
                     }
                 } else {
                     static_assert(has_await_suspend_handle<Awaiter>);
@@ -599,14 +605,14 @@ namespace coroactors::detail {
                         // we cannot know if it is the same coroutine, even
                         // if it has the same address (it may have been
                         // destroyed and reallocated again)
-                        context.manager().leave();
+                        context.manager().async_leave();
                         return k;
                     }
                 }
 
                 // Awaiter suspended without a continuation
                 // Take the next continuation from our context
-                return context.manager().next_coroutine();
+                return context.manager().async_next();
             }
 
             Result await_resume()
@@ -635,7 +641,7 @@ namespace coroactors::detail {
         auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
-                continuation_context ? *continuation_context : no_actor_context,
+                continuation_frame ? continuation_frame->context : no_actor_context,
                 *this);
         }
 
@@ -690,10 +696,8 @@ namespace coroactors::detail {
         }
 
     private:
-        stop_token token;
-        actor_context context;
         std::coroutine_handle<> continuation;
-        const actor_context* continuation_context{ nullptr };
+        actor_context_frame* continuation_frame{ nullptr };
     };
 
     template<class T>

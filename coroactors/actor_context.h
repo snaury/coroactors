@@ -12,7 +12,8 @@
 namespace coroactors {
 
     class actor_context {
-        friend class detail::actor_context_manager;
+        friend detail::actor_context_frame;
+        friend detail::actor_context_manager;
 
         actor_context(detail::actor_context_state* ptr) noexcept
             : ptr(ptr)
@@ -29,6 +30,10 @@ namespace coroactors {
             return bool(ptr);
         }
 
+        friend bool operator<(const actor_context& a, const actor_context& b) {
+            return a.ptr < b.ptr;
+        }
+
         friend bool operator==(const actor_context& a, const actor_context& b) {
             return a.ptr == b.ptr;
         }
@@ -42,11 +47,9 @@ namespace coroactors {
 
     public:
         /**
-         * Returns continuations manager
+         * Returns the context frame management API
          */
-        detail::actor_context_manager manager() const {
-            return detail::actor_context_manager(ptr.get());
-        }
+        detail::actor_context_manager manager() const;
 
     public:
         /**
