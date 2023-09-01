@@ -91,7 +91,7 @@ namespace coroactors::detail {
          * blocked by a concurrent push, in which case that push will then lock
          * the mailbox.
          */
-        node* pop() noexcept {
+        Node* pop() noexcept {
             auto [head, next] = get_or_unlock();
             if (head) {
                 head_ = next;
