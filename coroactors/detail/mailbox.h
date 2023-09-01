@@ -13,7 +13,7 @@ namespace coroactors::detail {
     template<class T>
     class mailbox {
         struct node {
-            std::atomic<node*> next{ nullptr };
+            std::atomic<void*> next{ nullptr };
             T item;
 
             template<class... TArgs>
@@ -23,10 +23,26 @@ namespace coroactors::detail {
         };
 
     public:
+        // A placeholder type for `initially_unlocked`
+        struct initially_unlocked_t {};
+
+        /**
+         * Mailbox is initially unlocked when constructed with this argument
+         */
+        static constexpr initially_unlocked_t initially_unlocked{};
+
+    public:
         /**
          * Constructs a new mailbox, initially locked and empty
          */
         mailbox() = default;
+
+        /**
+         * Constructs a new mailbox, initially unlocked and empty
+         */
+        explicit mailbox(initially_unlocked_t) {
+            head_->next.store(reinterpret_cast<void*>(MarkerUnlocked));
+        }
 
         /**
          * Destroys all items in the mailbox
@@ -36,9 +52,12 @@ namespace coroactors::detail {
             std::unique_ptr<node> head(std::move(head_));
             assert(head != nullptr);
             do {
-                node* next = head->next.load(std::memory_order_acquire);
-                if (next == reinterpret_cast<node*>(MarkerUnlocked)) {
+                node* next;
+                void* marker = head->next.load(std::memory_order_acquire);
+                if (marker == reinterpret_cast<void*>(MarkerUnlocked)) {
                     next = nullptr;
+                } else {
+                    next = reinterpret_cast<node*>(marker);
                 }
                 head.reset(next);
             } while (head);
@@ -64,9 +83,9 @@ namespace coroactors::detail {
             // Note: acquire/release synchronizes with another push
             node* prev = tail_.exchange(next, std::memory_order_acq_rel);
             // Note: release synchronizes with Pop, acquire synchronizes with unlock
-            node* marker = prev->next.exchange(next, std::memory_order_acq_rel);
+            void* marker = prev->next.exchange(next, std::memory_order_acq_rel);
             // The mailbox was unlocked only if previous next was MarkerUnlocked
-            return marker == reinterpret_cast<node*>(MarkerUnlocked);
+            return marker == reinterpret_cast<void*>(MarkerUnlocked);
         }
 
         /**
@@ -77,17 +96,18 @@ namespace coroactors::detail {
          */
         T pop_default() {
             node* head = head_.get();
-            node* next = head->next.load(std::memory_order_acquire);
-            if (next == nullptr) {
+            void* marker = head->next.load(std::memory_order_acquire);
+            if (marker == nullptr) {
                 // Next item is unavailable, try to unlock
-                if (head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_acq_rel)) {
+                if (head->next.compare_exchange_strong(marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel)) {
                     // Successfully unlocked
                     return T();
                 }
                 // Lost the race: now next != nullptr
-                assert(next != nullptr);
+                assert(marker != nullptr);
             }
-            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
+            node* next = reinterpret_cast<node*>(marker);
             head_.reset(next);
             return std::move(next->item);
         }
@@ -100,17 +120,18 @@ namespace coroactors::detail {
          */
         std::optional<T> pop_optional() {
             node* head = head_.get();
-            node* next = head->next.load(std::memory_order_acquire);
-            if (next == nullptr) {
+            void* marker = head->next.load(std::memory_order_acquire);
+            if (marker == nullptr) {
                 // Next item is unavailable, try to unlock
-                if (head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_acq_rel)) {
+                if (head->next.compare_exchange_strong(marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel)) {
                     // Successfully unlocked
                     return std::nullopt;
                 }
                 // Lost the race: now next != nullptr
-                assert(next != nullptr);
+                assert(marker != nullptr);
             }
-            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
+            node* next = reinterpret_cast<node*>(marker);
             head_.reset(next);
             return std::move(next->item);
         }
@@ -121,12 +142,13 @@ namespace coroactors::detail {
          */
         T* peek() {
             node* head = head_.get();
-            node* next = head->next.load(std::memory_order_acquire);
-            if (next == nullptr) {
+            void* marker = head->next.load(std::memory_order_acquire);
+            if (marker == nullptr) {
                 // Next item is unavailable, keep it locked
                 return nullptr;
             }
-            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
+            node* next = reinterpret_cast<node*>(marker);
             return &next->item;
         }
 
@@ -151,12 +173,12 @@ namespace coroactors::detail {
          */
         bool try_unlock() {
             node* head = head_.get();
-            node* next = head->next.load(std::memory_order_relaxed);
-            if (next == nullptr) {
+            void* marker = head->next.load(std::memory_order_acquire);
+            if (marker == nullptr) {
                 // We either succeed at unlocking or next item becomes available
-                return head->next.compare_exchange_strong(next, reinterpret_cast<node*>(MarkerUnlocked), std::memory_order_release);
+                return head->next.compare_exchange_strong(marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_release);
             }
-            assert(next != reinterpret_cast<node*>(MarkerUnlocked));
+            assert(marker != reinterpret_cast<node*>(MarkerUnlocked));
             // Next item is available
             return false;
         }
