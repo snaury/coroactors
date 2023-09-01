@@ -3,6 +3,7 @@ project(coroactors)
 
 option(WITH_ASAN "Enable address sanitizer" OFF)
 option(WITH_TSAN "Enable thread sanitizer" OFF)
+option(WITH_UBSAN "Enable undefined sanitizer" OFF)
 option(WITH_COVERAGE "Compile with coverage profiling" OFF)
 
 # This codebase is c++20
@@ -20,6 +21,11 @@ endif()
 if(WITH_TSAN)
     add_compile_options(-fsanitize=thread)
     add_link_options(-fsanitize=thread)
+endif()
+
+if(WITH_UBSAN)
+    add_compile_options(-fsanitize=undefined)
+    add_link_options(-fsanitize=undefined)
 endif()
 
 if(WITH_COVERAGE)

@@ -255,16 +255,14 @@ namespace coroactors::detail {
 
             // We always inherit context when starting
             assert(context == *continuation_context);
-            return h;
+            return context.manager().switch_from(
+                continuation_context->manager(), h, /* returning */ false);
         }
 
-        void start_detached(bool use_scheduler = true) noexcept {
+        void start_detached() noexcept {
             std::coroutine_handle<> h = actor_continuation<T>::from_promise(*this);
 
-            // Will resume coroutine recursively when allowed or required
-            if (context.manager().start(h, use_scheduler)) {
-                context.manager().resume(h);
-            }
+            context.manager().start(h);
         }
 
         enum class ESwitchContext {

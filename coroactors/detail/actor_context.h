@@ -7,15 +7,6 @@
 #include <cassert>
 #include <optional>
 
-/**
- * When this feature is enabled actor context will track which exact context
- * is running at any given time, and verify they match on context switching.
- * This is very expensive however and disabled by default.
- */
-#ifndef COROACTORS_EXACT_RUNNING_CONTEXT
-#define COROACTORS_EXACT_RUNNING_CONTEXT 0
-#endif
-
 namespace coroactors {
 
     class actor_context;
@@ -30,43 +21,12 @@ namespace coroactors::detail {
         friend actor_context;
         friend actor_context_manager;
 
+        using mailbox_t = class mailbox<std::coroutine_handle<>>;
+
     public:
         explicit actor_context_state(class actor_scheduler& s)
             : scheduler(s)
-        {
-            // Change mailbox to initially unlocked
-            if (!mailbox_.try_unlock()) [[unlikely]] {
-                throw std::logic_error("unexpected failure to initially unlock the mailbox");
-            }
-        }
-
-        ~actor_context_state() noexcept {
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            assert(running_top != this && !prev && !next_count);
-#endif
-        }
-
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-    private:
-        /**
-         * Returns the currently running state pointer
-         */
-        static actor_context_state* running_ptr() noexcept {
-            return running_empty_frames == 0 ? running_top : nullptr;
-        }
-#endif
-
-        /**
-         * Returns true when the specified context is currently running
-         */
-        static bool is_running(actor_context_state* ptr) noexcept {
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            return running_frames > 0 && ptr == running_ptr();
-#else
-            // Assume it is running as long as anything is running
-            return running_frames > 0;
-#endif
-        }
+        {}
 
     private:
         /**
@@ -104,154 +64,19 @@ namespace coroactors::detail {
         }
 
     private:
-        /**
-         * Unconditionally enters a context
-         */
-        static void enter_unconditionally(actor_context_state* ptr) noexcept {
-            running_frames++;
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            if (running_top) {
-                running_top->next_count++;
-            }
-            if (ptr) {
-                // Entering a non-empty frame
-                assert(running_top != ptr && !ptr->prev && !ptr->next_count);
-                ptr->prev = running_top;
-                running_top = ptr;
-                running_empty_frames = 0;
-            } else {
-                // Entering an empty frame
-                running_empty_frames++;
-                if (!running_top) {
-                    bottom_empty_frames++;
-                }
-            }
-#else
-            (void)ptr;
-#endif
-        }
-
-        /**
-         * Unconditionally leaves a context
-         */
-        static void leave_unconditionally(actor_context_state* ptr) noexcept {
-            running_frames--;
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            assert(ptr == running_ptr());
-            if (ptr) {
-                running_top = ptr->prev;
-                ptr->prev = nullptr;
-                if (running_top) {
-                    running_top->next_count--;
-                    running_empty_frames = running_top->next_count;
-                } else {
-                    running_empty_frames = bottom_empty_frames;
-                }
-            } else {
-                assert(running_empty_frames > 0);
-                running_empty_frames--;
-                if (running_top) {
-                    running_top->next_count--;
-                } else {
-                    bottom_empty_frames--;
-                }
-            }
-#else
-            (void)ptr;
-#endif
-        }
-
-        /**
-         * Unconditionally changes a currently running `from` context to `ptr`
-         */
-        static void switch_unconditionally(actor_context_state* from, actor_context_state* ptr) noexcept {
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            assert(from == running_ptr() && !from->next_count);
-            if (from == ptr) [[unlikely]] {
-                // Be on the safe side, but calling code checks for this
-            } else if (from && ptr) {
-                // Easy case, just changing pointers
-                actor_context_state* prev = from->prev;
-                from->prev = nullptr;
-                ptr->prev = prev;
-                running_top = ptr;
-            } else {
-                // Hard to optimize, combine leave and enter
-                leave_unconditionally(from);
-                enter_unconditionally(ptr);
-            }
-#else
-            (void)from;
-            (void)ptr;
-#endif
-        }
-
-    private:
-        struct frame_guard {
-            size_t saved_running_frames;
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-            actor_context_state* saved_running_top;
-            size_t saved_running_empty;
-            size_t saved_bottom_empty;
-#endif
-
-            frame_guard() noexcept
-                : saved_running_frames(running_frames)
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-                , saved_running_top(running_top)
-                , saved_running_empty(running_empty_frames)
-                , saved_bottom_empty(bottom_empty_frames)
-#endif
-            {}
-
-            frame_guard(const frame_guard&) = delete;
-            frame_guard& operator=(const frame_guard&) = delete;
-
-            ~frame_guard() noexcept {
-                assert(running_frames == saved_running_frames);
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-                // Silently cleanup any leftover frames in release builds
-                if (running_frames > saved_running_frames) [[unlikely]] {
-                    do {
-                        leave_unconditionally(running_ptr());
-                    } while (running_frames > saved_running_frames);
-                }
-#endif
-                running_frames = saved_running_frames;
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-                running_top = saved_running_top;
-                running_empty_frames = saved_running_empty;
-                bottom_empty_frames = saved_bottom_empty;
-#endif
-            }
-        };
-
-    private:
-        // Tracks the number of running contexts on the current stack
-        static inline thread_local size_t running_frames{ 0 };
-
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-        // Tracks the top running non-empty context
-        static inline thread_local actor_context_state* running_top{ nullptr };
-
-        // Tracks the number of running empty contexts at the top of the stack
-        static inline thread_local size_t running_empty_frames{ 0 };
-
-        // Tracks the number of empty frames at the bottom of the stack
-        static inline thread_local size_t bottom_empty_frames{ 0 };
-#endif
-
-    private:
         actor_scheduler& scheduler;
-        mailbox<std::coroutine_handle<>> mailbox_;
-#if COROACTORS_EXACT_RUNNING_CONTEXT
-        actor_context_state* prev{ nullptr };
-        size_t next_count = 0;
-#endif
+        mailbox_t mailbox_{ mailbox_t::initially_unlocked };
     };
 
     /**
      * Coroutine management APIs so we don't clutter the actor context
+     *
+     * Note: many methods are noexcept, not because there may be no exceptions,
+     * but because coroutines are complicated and we can only terminate when
+     * scheduling fails. For example: we have scheduled current coroutine to
+     * run in another thread, but scheduling of something else fails with
+     * bad_alloc. But then on exception current coroutine will resume, which
+     * may already be running in another thread.
      */
     class actor_context_manager {
         friend class ::coroactors::actor_context;
@@ -261,38 +86,10 @@ namespace coroactors::detail {
         {}
 
     private:
-        static void fail(const char* message) {
-            // Note: this function throws an exception and immediately calls
-            // terminate, so the message would be printed to the console.
-            try {
-                throw std::logic_error(message);
-            } catch(...) {
-                std::terminate();
-            }
-        }
-
-    private:
         /**
-         * Verifies this context is running in the current thread, otherwise aborts
+         * Post a coroutine h to run in this context
          */
-        void verify_running(const char* message) const {
-            if (!actor_context_state::is_running(ptr)) [[unlikely]] {
-                fail(message);
-            }
-        }
-
-        /**
-         * Returns the number of currently running frames
-         */
-        static size_t running_frames() noexcept {
-            return actor_context_state::running_frames;
-        }
-
-    private:
-        /**
-         * Post coroutine h to run in this context
-         */
-        void post(std::coroutine_handle<> h) const {
+        void post(std::coroutine_handle<> h) const noexcept {
             // Note: `std::function` over a lambda capture with two pointers
             // usually doesn't allocate any additional memory. We also don't
             // need to add_ref the state, because the coroutine must keep a
@@ -303,9 +100,9 @@ namespace coroactors::detail {
         }
 
         /**
-         * Defer coroutine h to run in this context
+         * Defer a coroutine h to run in this context
          */
-        void defer(std::coroutine_handle<> h) const {
+        void defer(std::coroutine_handle<> h) const noexcept {
             // Note: `std::function` over a lambda capture with two pointers
             // usually doesn't allocate any additional memory. We also don't
             // need to add_ref the state, because the coroutine must keep a
@@ -316,7 +113,30 @@ namespace coroactors::detail {
         }
 
         /**
+         * Resumes a coroutine h, which is expecting to run in this context
+         *
+         * Context must be exclusively locked to caller, either explicitly by
+         * a call to `start`, or implicitly by `post` or `defer`. The resumed
+         * coroutine is expected to correctly leave this context before
+         * returning.
+         */
+        void resume(std::coroutine_handle<> h) const noexcept {
+#ifndef NDEBUG
+            size_t saved_frames = running_frames;
+#endif
+
+            enter_frame();
+            h.resume();
+
+#ifndef NDEBUG
+            assert(running_frames == saved_frames);
+#endif
+        }
+
+        /**
          * Reschedules coroutine when preempted and returns true, otherwise false
+         *
+         * Automatically leaves the context on preemption when `running` is true.
          */
         bool maybe_preempt(std::coroutine_handle<> h, bool running) const noexcept {
             if (!ptr) {
@@ -325,9 +145,9 @@ namespace coroactors::detail {
             }
 
             // When running in parallel with lower frames we use post
-            if (running_frames() > (running ? 1 : 0)) [[unlikely]] {
+            if (running_frames > (running ? 1 : 0)) [[unlikely]] {
                 if (running) {
-                    actor_context_state::leave_unconditionally(ptr);
+                    leave_frame();
                 }
                 post(h);
                 return true;
@@ -336,7 +156,7 @@ namespace coroactors::detail {
             // When preempted by the scheduler we use defer
             if (ptr->scheduler.preempt()) {
                 if (running) {
-                    actor_context_state::leave_unconditionally(ptr);
+                    leave_frame();
                 }
                 defer(h);
                 return true;
@@ -345,33 +165,16 @@ namespace coroactors::detail {
             return false;
         }
 
-    public:
         /**
-         * Resumes a coroutine h, which is expecting to run in this context
+         * Prepare a coroutine `h` to start in this context
          *
-         * Context must be exclusively locked to caller, e.g. by a successful
-         * call to `start`. The resumed coroutine is expected to correctly
-         * leave this context before returning.
+         * This is used both for starting a detached coroutine, as well as
+         * starting a coroutine with `co_await` from a non-actor coroutine.
+         * When `preempt` is true it will also check for preemption.
+         *
+         * Returns true when `h` is not enqueued and may start in this thread
          */
-        void resume(std::coroutine_handle<> h) const {
-            actor_context_state::frame_guard guard;
-            actor_context_state::enter_unconditionally(ptr);
-            h.resume();
-        }
-
-        /**
-         * Starts a coroutine `h` in this context
-         *
-         * This is called when an actor coroutine attempts to start in some
-         * datached way (e.g. `actor<T>::detach()`). When it returns true the
-         * context is locked and the result must be resumed using a manager's
-         * resume method.
-         *
-         * When optional `use_scheduler` is false this method will never post
-         * provided coroutine to the scheduler, but it may still return false
-         * when this context is currently locked and `h` is enqueued.
-         */
-        bool start(std::coroutine_handle<> h, bool use_scheduler = true) const {
+        bool prepare(std::coroutine_handle<> h, bool preempt) const {
             if (!ptr) {
                 return true;
             }
@@ -383,20 +186,24 @@ namespace coroactors::detail {
                 return false;
             }
 
-            // Entering actors may lead to a long chain of context switches
-            // which is undesirable when a call is detached or added to a task
-            // group. This is impossible to detect with generic coroutines,
-            // however with actors we can, simply by detecting that this is
-            // done while another actor is currently running. For generic
-            // coroutines actor scheduler usually preempts context switches
-            // when they happen in unexpected threads.
-            if (use_scheduler) {
-                if (maybe_preempt(h, /* running */ false)) {
-                    return false;
-                }
+            // This is technically a context switch, so check for preemption
+            if (preempt && maybe_preempt(h, /* running */ false)) {
+                return false;
             }
 
             return true;
+        }
+
+    public:
+        /**
+         * Tries to start a coroutine `h` in this thread and context
+         *
+         * This is mainly to support `actor<T>::detach()`.
+         */
+        void start(std::coroutine_handle<> h) const {
+            if (prepare(h, /* preempt */ true)) {
+                resume(h);
+            }
         }
 
         /**
@@ -406,11 +213,11 @@ namespace coroactors::detail {
          * a non-actor coroutine. It always returns a valid coroutine handle,
          * which could be returned from an await_suspend method. When this
          * context locks it also starts running in the current thread,
-         * otherwise the returned handle is noop_coroutine.
+         * otherwise the returned handle is a noop_coroutine().
          */
         std::coroutine_handle<> enter(std::coroutine_handle<> h) const {
-            if (start(h)) {
-                actor_context_state::enter_unconditionally(ptr);
+            if (prepare(h, /* preempt */ true)) {
+                enter_frame();
                 return h;
             } else {
                 return std::noop_coroutine();
@@ -422,17 +229,16 @@ namespace coroactors::detail {
          *
          * Returns noop_coroutine() and leaves when nothing is available.
          */
-        std::coroutine_handle<> next_coroutine() const {
-            verify_running("calling next_coroutine() with a context that is not running");
+        std::coroutine_handle<> next_coroutine() const noexcept {
+            assert(running() && "calling next_coroutine() with a context that is not running");
 
-            // Leave first because next_coroutine() may invalidate current context
-            actor_context_state::leave_unconditionally(ptr);
+            leave_frame();
 
             if (ptr) {
                 if (auto next = ptr->next_coroutine()) {
                     if (!maybe_preempt(next, /* running */ false)) {
-                        // Re-enter and continue in the same thread
-                        actor_context_state::enter_unconditionally(ptr);
+                        // This context continues in the current thread
+                        enter_frame();
                         return next;
                     }
                 }
@@ -444,11 +250,10 @@ namespace coroactors::detail {
         /**
          * Leave this context, e.g. after starting some async activity
          */
-        void leave() const {
-            verify_running("calling leave() with a context that is not running");
+        void leave() const noexcept {
+            assert(running() && "calling leave() with a context that is not running");
 
-            // Leave first becasue next_coroutine() may invalidate current context
-            actor_context_state::leave_unconditionally(ptr);
+            leave_frame();
 
             if (ptr) {
                 if (auto next = ptr->next_coroutine()) {
@@ -465,10 +270,10 @@ namespace coroactors::detail {
          * be a noop_coroutine(), in which case context is not restored and
          * the provided coroutine will run somewhere else.
          */
-        std::coroutine_handle<> restore(std::coroutine_handle<> h) const {
+        std::coroutine_handle<> restore(std::coroutine_handle<> h) const noexcept {
             if (!ptr) {
                 // Enter an empty context frame
-                actor_context_state::enter_unconditionally(ptr);
+                enter_frame();
                 return h;
             }
 
@@ -484,7 +289,8 @@ namespace coroactors::detail {
                 // return to actor directly, and when we return to actor via
                 // a context-less actor call.
                 if (!maybe_preempt(h, /* running */ false)) {
-                    actor_context_state::enter_unconditionally(ptr);
+                    // This context continues in the current thread
+                    enter_frame();
                     return h;
                 }
             }
@@ -495,14 +301,10 @@ namespace coroactors::detail {
         /**
          * Switches from this context to an empty context
          */
-        void switch_to_empty() const {
-            verify_running("calling switch_to_empty() with a context that is not running");
+        void switch_to_empty() const noexcept {
+            assert(running() && "calling switch_to_empty() with a context that is not running");
 
             if (ptr) {
-                // We need to switch context first, because next_coroutine()
-                // may unlock this context and then free it in another thread.
-                actor_context_state::switch_unconditionally(ptr, nullptr);
-
                 if (auto next = ptr->next_coroutine()) {
                     // This activity runs parallel to current thread
                     post(next);
@@ -525,45 +327,40 @@ namespace coroactors::detail {
          * been called.
          */
         std::coroutine_handle<> switch_from(actor_context_manager from,
-                std::coroutine_handle<> h, bool returning) const
+                std::coroutine_handle<> h, bool returning) const noexcept
         {
-            from.verify_running("calling switch_from() with a context that is not running");
-
+            assert(from.running() && "calling switch_from() with a context that is not running");
             assert(h && "Switching context with an invalid handle");
+
+            // This currently does not change behavior
             (void)returning;
 
             if (ptr == from.ptr) {
-                // We are not changing contexts, but we may want to preempt
                 if (maybe_preempt(h, /* running */ true)) {
                     return std::noop_coroutine();
                 }
 
+                // Same context continues in this thread
                 return h;
             }
 
-            if (!ptr) {
-                // Switching to a context without a scheduler. We need to
-                // switch the context first, because next_coroutine() may
-                // unlock and allow it to run in another thread.
-                actor_context_state::switch_unconditionally(from.ptr, ptr);
+            from.leave_frame();
 
+            if (!ptr) {
                 if (auto next = from.ptr->next_coroutine()) {
                     // Run the next activity parallel to h
                     from.post(next);
                 }
 
-                // Continue with this empty context
+                // Empty context continues in this thread
+                enter_frame();
                 return h;
             }
-
-            // Leave current context first, because some coroutine may resume
-            // in another thread with the same context when it is unblocked.
-            actor_context_state::leave_unconditionally(from.ptr);
 
             // Take the next runnable from the current context. It will either
             // stay locked with more work, or will unlock and possibly run in
             // another thread. Note: we cannot attempt running in a new context
-            // first, because when the coroutine starts running it may free
+            // first, because when a coroutine starts running it may free
             // local variables which are keeping contexts in memory.
             std::coroutine_handle<> more;
             if (from.ptr) {
@@ -588,7 +385,8 @@ namespace coroactors::detail {
                     from.post(more);
                 }
 
-                actor_context_state::enter_unconditionally(ptr);
+                // This context continues in this thread
+                enter_frame();
                 return h;
             }
 
@@ -600,37 +398,40 @@ namespace coroactors::detail {
                 return std::noop_coroutine();
             }
 
-            // Re-enter the original context with the next coroutine
-            actor_context_state::enter_unconditionally(from.ptr);
+            // The `from` context continues in this thread
+            from.enter_frame();
             return more;
         }
 
         /**
          * Yields to other coroutines in this context
          */
-        std::coroutine_handle<> yield(std::coroutine_handle<> h) {
-            verify_running("calling yield(h) with a context that is not running");
+        std::coroutine_handle<> yield(std::coroutine_handle<> h) const noexcept {
+            assert(running() && "calling yield(h) with a context that is not running");
 
             if (!ptr) {
                 return h;
             }
 
+            leave_frame();
+
             // Push current coroutine to the end of the queue
             if (ptr->run_coroutine(h)) [[unlikely]] {
-                fail("unexpected run_coroutine(h) result on a locked context");
+                assert(false && "unexpected run_coroutine(h) result on a locked context");
             }
 
             // Check the front of the queue, there's at least one coroutine there
             auto next = ptr->next_coroutine();
             if (!next) [[unlikely]] {
-                fail("unexpected unlock when removing the next coroutine");
+                assert(false && "unexpected unlock when removing the next coroutine");
             }
 
-            if (maybe_preempt(next, /* running */ true)) {
+            if (maybe_preempt(next, /* running */ false)) {
                 return std::noop_coroutine();
             }
 
             // Run the next coroutine in the same context
+            enter_frame();
             return next;
         }
 
@@ -638,20 +439,40 @@ namespace coroactors::detail {
          * Forces preemption without yielding in the current context
          */
         std::coroutine_handle<> preempt(std::coroutine_handle<> h) {
-            verify_running("calling preempt(h) with a context that is not running");
+            assert(running() && "calling preempt(h) with a context that is not running");
 
             if (!ptr) {
                 return h;
             }
 
-            actor_context_state::leave_unconditionally(ptr);
-            if (running_frames() > 0) {
+            leave_frame();
+
+            if (running_frames > 0) {
                 post(h);
             } else {
                 defer(h);
             }
+
             return std::noop_coroutine();
         }
+
+    private:
+        static bool running() noexcept {
+            return running_frames > 0;
+        }
+
+        static void enter_frame() noexcept {
+            running_frames++;
+        }
+
+        static void leave_frame() noexcept {
+            assert(running_frames > 0 && "leaving a frame that is not running");
+            running_frames--;
+        }
+
+    private:
+        // Tracks the number of running context frames in the current thread stack
+        static inline thread_local size_t running_frames{ 0 };
 
     private:
         actor_context_state* const ptr;
