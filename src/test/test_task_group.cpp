@@ -14,34 +14,63 @@
 #include <mutex>
 #include <thread>
 #include <latch>
+#include <type_traits>
+#include <variant>
 
 using namespace coroactors;
 
 namespace {
 
-enum class EAction {
-    AddTask,
-    AwaitTask,
-    AwaitTaskWrapped,
-    AwaitValue,
-    Return,
+namespace Action {
+    struct AddTask_t{} AddTask;
+    struct AwaitTask_t{} AwaitTask;
+    struct AwaitTaskWrapped_t{} AwaitTaskWrapped;
+    struct AwaitValue_t{} AwaitValue;
+    struct Return_t{} Return;
+
+    struct AddSuspend{
+        std::coroutine_handle<>& handle;
+
+        bool await_ready() noexcept { return false; }
+        void await_suspend(std::coroutine_handle<> h) noexcept { handle = h; }
+        int await_resume() noexcept { std::terminate(); }
+    };
+
+    using Any = std::variant<
+        AddTask_t,
+        AwaitTask_t,
+        AwaitTaskWrapped_t,
+        AwaitValue_t,
+        Return_t,
+        AddSuspend>;
+
+    template<class T, size_t I = 0>
+    static constexpr size_t index_of() {
+        static_assert(I < std::variant_size_v<Any>, "Cannot find the specified type");
+        if constexpr (std::is_same_v<std::variant_alternative_t<I, Any>, T>) {
+            return I;
+        } else {
+            return (index_of<T, I + 1>());
+        }
+    }
 };
 
-actor<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<EAction()> next) {
+actor<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<Action::Any()> next) {
     co_await no_actor_context();
     std::vector<int> results;
     task_group<int> group;
     for (;;) {
-        switch (next()) {
-            case EAction::AddTask: {
+        auto action = next();
+        switch (action.index()) {
+            case Action::index_of<Action::AddTask_t>(): {
                 group.add(provider.get());
                 break;
             }
-            case EAction::AwaitTask: {
+            case Action::index_of<Action::AwaitTask_t>(): {
                 results.push_back(co_await group.next());
                 break;
             }
-            case EAction::AwaitTaskWrapped: {
+            case Action::index_of<Action::AwaitTaskWrapped_t>(): {
                 auto result = co_await group.next_result();
                 if (result.has_value()) {
                     results.push_back(std::move(result).take_value());
@@ -52,11 +81,19 @@ actor<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<
                 }
                 break;
             }
-            case EAction::AwaitValue: {
+            case Action::index_of<Action::AwaitValue_t>(): {
                 results.push_back(co_await provider.get());
                 break;
             }
-            case EAction::Return: {
+            case Action::index_of<Action::Return_t>(): {
+                co_return results;
+            }
+            case Action::index_of<Action::AddSuspend>(): {
+                group.add(std::get<Action::AddSuspend>(action));
+                break;
+            }
+            default: {
+                ADD_FAILURE() << "Unsupported action";
                 co_return results;
             }
         }
@@ -70,15 +107,15 @@ TEST(TaskGroupTest, SimpleAsync) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 3u);
@@ -100,15 +137,15 @@ TEST(TaskGroupTest, SimpleSync) {
     provider.provide(3);
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     EXPECT_EQ(provider.awaiters(), 0u);
@@ -122,15 +159,15 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 10) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 20) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 10u);
@@ -159,15 +196,15 @@ TEST(TaskGroupTest, CompleteOutOfOrder) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 3u);
@@ -185,18 +222,18 @@ TEST(TaskGroupTest, CompleteBeforeAwaited) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step == 4) {
-                return EAction::AwaitValue;
+                return Action::AwaitValue;
             }
             if (step <= 7) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 4u);
@@ -216,24 +253,24 @@ TEST(TaskGroupTest, LocalReadyQueue) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step == 4) {
-                return EAction::AwaitValue;
+                return Action::AwaitValue;
             }
             if (step == 5) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
             if (step == 6) {
-                return EAction::AwaitValue;
+                return Action::AwaitValue;
             }
             if (step <= 8) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 4u);
@@ -259,12 +296,12 @@ TEST(TaskGroupTest, DetachAll) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_TRUE(result.success());
@@ -278,15 +315,15 @@ TEST(TaskGroupTest, ResumeException) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTask;
+                return Action::AwaitTask;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 3u);
@@ -302,15 +339,15 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
     test_channel<int> provider;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTaskWrapped;
+                return Action::AwaitTaskWrapped;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
     ASSERT_EQ(provider.awaiters(), 3u);
@@ -323,25 +360,30 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
     EXPECT_EQ(*result, expected);
 }
 
-TEST(TaskGroupTest, DestroyedContinuationResumesTaskGroup) {
+TEST(TaskGroupTest, DestroyedTaskResumesTaskGroup) {
     size_t last_step = 0;
     test_channel<int> provider;
+    std::coroutine_handle<> suspended;
 
     auto result = packaged_awaitable(
-        run_scenario(provider, [&]{
+        run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
+            if (step == 2) {
+                return Action::AddSuspend{ suspended };
+            }
             if (step <= 3) {
-                return EAction::AddTask;
+                return Action::AddTask;
             }
             if (step <= 6) {
-                return EAction::AwaitTaskWrapped;
+                return Action::AwaitTaskWrapped;
             }
-            return EAction::Return;
+            return Action::Return;
         }));
 
-    ASSERT_EQ(provider.awaiters(), 3u);
+    ASSERT_EQ(provider.awaiters(), 2u);
+    ASSERT_TRUE(suspended);
     provider.resume(1);
-    provider.take().destroy();
+    suspended.destroy();
     provider.resume(3);
     EXPECT_EQ(provider.awaiters(), 0u);
     ASSERT_TRUE(result.success());

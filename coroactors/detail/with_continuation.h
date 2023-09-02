@@ -2,6 +2,7 @@
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
+#include <coroactors/with_continuation_error.h>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -90,7 +91,8 @@ namespace coroactors::detail {
                         std::memory_order_acq_rel, std::memory_order_relaxed))
                 {
                     if (addr) {
-                        std::coroutine_handle<>::from_address(addr).destroy();
+                        result_ptr->set_exception(with_continuation_error("continuation was not resumed"));
+                        std::coroutine_handle<>::from_address(addr).resume();
                     }
                     return true;
                 }
@@ -111,8 +113,8 @@ namespace coroactors::detail {
 
         status set_continuation(std::coroutine_handle<> c) noexcept {
             void* addr = nullptr;
-            // Note: this synchronizes with later resume or destroy (release),
-            // and also synchronizes with possible finish or destroy calls.
+            // Note: this synchronizes with later resume (release), and also
+            // synchronizes with possible finish or destroy calls.
             if (continuation.compare_exchange_strong(
                     addr, c.address(), std::memory_order_acq_rel))
             {
@@ -124,10 +126,16 @@ namespace coroactors::detail {
             return static_cast<status>(reinterpret_cast<uintptr_t>(addr));
         }
 
+        void destroy() {
+            if (!destroy_continuation()) {
+                throw with_continuation_error("continuation was resumed or destroyed already");
+            }
+        }
+
         template<class... TArgs>
         void set_value(TArgs&&... args) {
             if (!result_ptr) {
-                throw std::logic_error("coroutine frame resumed or destroyed already");
+                throw with_continuation_error("continuation was resumed or destroyed already");
             }
             result_ptr->set_value(std::forward<TArgs>(args)...);
         }
@@ -135,7 +143,7 @@ namespace coroactors::detail {
         template<class E>
         void set_exception(E&& e) {
             if (!result_ptr) {
-                throw std::logic_error("coroutine frame resumed or destroyed already");
+                throw with_continuation_error("continuation was resumed or destroyed already");
             }
             result_ptr->set_exception(std::forward<E>(e));
         }
@@ -160,9 +168,9 @@ namespace coroactors::detail {
             // Try to catch attempts to resume later
             result_ptr = nullptr;
             // Called by awaiter when it is destroyed without resuming
-            // Tries to make sure it will not be resumed or destroyed later,
-            // but it's up to the user to make sure there is no race with both
-            // ends trying to resume/destroy the same coroutine frame.
+            // Tries to make sure it will not be resumed later, but it's up to
+            // the user to make sure there is no race with both ends trying to
+            // resume/destroy the same coroutine frame concurrently.
             // Note: we don't care if it was finished or destroyed before.
             continuation.store(nullptr, std::memory_order_release);
         }
@@ -213,7 +221,7 @@ namespace coroactors::detail {
         }
 
         __attribute__((__noinline__))
-        bool await_suspend(std::coroutine_handle<> c) noexcept {
+        bool await_suspend(std::coroutine_handle<> c) {
             switch (state_->set_continuation(c)) {
             case status::success:
                 // Continuation is set and this coroutine will be resumed or
@@ -228,10 +236,8 @@ namespace coroactors::detail {
             case status::destroyed:
             default:
                 // All continuation object references have been destroyed
-                // before we could set the continuation. We destroy
-                // ourselves and return true since we are not resuming.
-                c.destroy();
-                return true;
+                // before we could set the continuation.
+                throw with_continuation_error("continuation was not resumed");
             }
         }
 

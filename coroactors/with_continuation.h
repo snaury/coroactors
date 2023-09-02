@@ -1,10 +1,11 @@
 #pragma once
 #include <coroactors/detail/with_continuation.h>
+#include <coroactors/with_continuation_error.h>
 
 namespace coroactors {
 
     /**
-     * A type-safe resumable continuation of an arbitrary coroutine
+     * A type-safe resumable continuation over an arbitrary coroutine
      */
     template<class T = void>
     class continuation {
@@ -80,17 +81,19 @@ namespace coroactors {
         }
 
         /**
-         * Destroys continuation without resuming
+         * Destroy a continuation without resuming
+         *
+         * Note: the awaiting coroutine frame will not be destroyed however
+         * and a `with_continuation_error` exception will be thrown instead.
          */
         void destroy() {
-            if (!state->destroy_continuation()) {
-                throw std::logic_error("coroutine frame resumed or destroyed already");
-            }
+            state->destroy();
         }
 
         /**
-         * Returns a coroutine handle that may be resumed manually with the
-         * result constructed from args
+         * Returns a coroutine handle that may be resumed manually
+         *
+         * The result is constructed from args.
          */
         template<class... TArgs>
         std::coroutine_handle<> release_with_result(TArgs&&... args) {
@@ -103,8 +106,9 @@ namespace coroactors {
         }
 
         /**
-         * Returns a coroutine handle that may be resumed manually and will
-         * throw the provided exception
+         * Returns a coroutine handle that may be resumed manually
+         *
+         * Throws the provided exception or std::exception_ptr when resumed.
          */
         template<class E>
         std::coroutine_handle<> release_with_exception(E&& e) {
@@ -117,10 +121,10 @@ namespace coroactors {
         }
 
         /**
-         * Resumes continuation with the result constructed from args
+         * Resumes a continuation with the result constructed from args
          *
-         * Returns true if suspended continuation was resumed
-         * Returns false if continuation will continue without suspending
+         * Returns true when a suspended continuation is resumed
+         * Returns false when a continuation is not going to suspend
          */
         template<class... TArgs>
         bool resume(TArgs&&... args) {
@@ -134,10 +138,10 @@ namespace coroactors {
         }
 
         /**
-         * Resumes continuation by throwing an exception
+         * Resumes a continuation by throwing the provided exception
          *
-         * Returns true if suspended continuation was resumed
-         * Returns false if continuation will continue without suspending
+         * Returns true when a suspended continuation is resumed
+         * Returns false when a continuation is not going to suspend
          */
         template<class E>
         bool resume_with_exception(E&& e) {

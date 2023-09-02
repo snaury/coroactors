@@ -439,7 +439,7 @@ actor<void> actor_wrapper(actor<void> nested, int* refs) {
 
 } // namespace
 
-TEST(WithContinuationTest, DestroyUnwind) {
+TEST(WithContinuationTest, DestroyAfterSuspend) {
     int stage = 0;
     int refs = 0;
 
@@ -469,9 +469,10 @@ TEST(WithContinuationTest, DestroyUnwind) {
     // Destroy continuation
     suspended.reset();
 
-    // Coroutine shouldn't finish, but stack should be unwound
+    // Coroutine should finish with an exception
     EXPECT_FALSE(result.running());
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result);
+    EXPECT_THROW(*result, with_continuation_error);
     ASSERT_EQ(refs, 0);
 }
 
@@ -482,16 +483,18 @@ TEST(WithContinuationTest, DestroyFromCallback) {
     auto result = packaged_awaitable(
         actor_wrapper(
             actor_with_continuation(no_actor_context, stage,
-                [&, guard = count_refs_guard{ &refs }](continuation<>&& c) {
+                [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 4);
                     c.reset();
                 }),
             &refs));
 
+    // Coroutine should finish with an exception
     EXPECT_EQ(stage, 2);
     EXPECT_FALSE(result.running());
-    EXPECT_FALSE(result);
+    EXPECT_TRUE(result);
+    EXPECT_THROW(*result, with_continuation_error);
     EXPECT_EQ(refs, 0);
 }
 
@@ -519,6 +522,9 @@ TEST(WithContinuationTest, DestroyBottomUp) {
 
     EXPECT_EQ(stage, 2);
     EXPECT_EQ(refs, 0);
+
+    // Resuming a destroyed continuation is an error
+    EXPECT_THROW(suspended.resume(), with_continuation_error);
 }
 
 TEST(WithContinuationTest, StopToken) {
