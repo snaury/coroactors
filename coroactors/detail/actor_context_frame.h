@@ -25,14 +25,6 @@ namespace coroactors::detail {
             : self(self)
         {}
 
-        void destroy() {
-            self.destroy();
-        }
-
-        void resume() {
-            self.resume();
-        }
-
         std::coroutine_handle<> handle() const {
             return self;
         }
@@ -77,7 +69,7 @@ namespace coroactors::detail {
 #endif
 
             enter_frame(frame);
-            frame->resume();
+            frame->handle().resume();
 
 #ifndef NDEBUG
             assert(saved_count == running_count());

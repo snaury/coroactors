@@ -72,20 +72,9 @@ namespace coroactors::detail {
         sleep_until_context(const sleep_until_context&) = delete;
         sleep_until_context& operator=(const sleep_until_context&) = delete;
 
-        ~sleep_until_context() noexcept {
-            void* addr = continuation.exchange(reinterpret_cast<void*>(MarkerFailure), std::memory_order_acquire);
-            if (addr &&
-                addr != reinterpret_cast<void*>(MarkerSuccess) &&
-                addr != reinterpret_cast<void*>(MarkerFailure))
-            {
-                // We still have a continuation which needs to be destroyed
-                std::coroutine_handle<>::from_address(addr).destroy();
-            }
-        }
-
         bool set_continuation(std::coroutine_handle<> c) noexcept {
             void* expected = nullptr;
-            return continuation.compare_exchange_strong(expected, c.address(), std::memory_order_release);
+            return continuation.compare_exchange_strong(expected, c.address(), std::memory_order_acq_rel);
         }
 
         void cancel() noexcept {
@@ -104,11 +93,13 @@ namespace coroactors::detail {
         }
 
         bool ready() const noexcept {
-            return continuation.load(std::memory_order_relaxed) != nullptr;
+            return continuation.load(std::memory_order_acquire) != nullptr;
         }
 
         bool status() const {
-            void* addr = continuation.load(std::memory_order_acquire);
+            // Note: relaxed is used because set_continuation, ready or finish
+            // have acquired already, and this is only called after a resume.
+            void* addr = continuation.load(std::memory_order_relaxed);
             if (addr == reinterpret_cast<void*>(MarkerSuccess)) {
                 return true;
             }
@@ -154,10 +145,11 @@ namespace coroactors::detail {
                     },
                     deadline,
                     std::move(token));
+                return context->ready();
             } else {
                 context->finish(false);
+                return true;
             }
-            return context->ready();
         }
 
         __attribute__((__noinline__))
@@ -235,6 +227,8 @@ namespace coroactors::detail {
                 if (!source.stop_requested()) {
                     scheduler->schedule(with_deadline_request_stop(source), deadline, std::move(token));
                     token = source.get_token();
+                } else {
+                    assert(token.stop_requested());
                 }
             }
             return awaiter.await_ready(std::move(token));

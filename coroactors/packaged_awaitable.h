@@ -51,9 +51,9 @@ namespace coroactors {
         /**
          * Returns true when the awaitable is still running
          *
-         * It is possible for both the result and running() be false, either
+         * It is possible for both the result and running() to be false, either
          * because the packaged awaitable was moved from, or because coroutine
-         * was destroyed in a top-down fashion while awaiting.
+         * was destroyed without finishing.
          */
         bool running() const noexcept {
             return bool(handle);

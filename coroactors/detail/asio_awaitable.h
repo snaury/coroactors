@@ -25,15 +25,6 @@ namespace coroactors::detail {
         asio_continuation(const asio_continuation&) = delete;
         asio_continuation& operator=(const asio_continuation&) = delete;
 
-        ~asio_continuation() {
-            void* addr = without_markers(continuation.load(std::memory_order_acquire));
-            if (addr) {
-                // It shouldn't be possible, since awaiter holds a strong
-                // reference and unsets continuation in the destructor
-                std::coroutine_handle<>::from_address(addr).destroy();
-            }
-        }
-
         bool set_continuation(std::coroutine_handle<> c) noexcept {
             // Make sure it is aligned to at least 4 bytes
             assert(get_marker(c.address()) == 0);
@@ -342,9 +333,9 @@ namespace coroactors::detail {
         {}
 
         ~asio_awaiter_t() {
-            if (result && suspended) {
-                // Try to support bottom-up destruction, but operation's
-                // handler could be waking us up in another thread already.
+            if (result) {
+                // Support bottom-up destruction and cancel a possible future
+                // resume. This relies on handler not running concurrently.
                 result->unset_continuation();
             }
         }
@@ -386,13 +377,11 @@ namespace coroactors::detail {
 
         __attribute__((__noinline__))
         bool await_suspend(std::coroutine_handle<> c) {
-            suspended = true;
             return result->set_continuation(c);
         }
 
         result_type await_resume() {
             // All resume paths should have acquire sync on the result value
-            suspended = false;
             return result->take_value();
         }
 
@@ -426,7 +415,6 @@ namespace coroactors::detail {
         std::tuple<std::decay_t<Args>...> args;
         intrusive_ptr<continuation_type> result;
         std::optional<stop_callback<emit_cancellation_t>> stop;
-        bool suspended = false;
     };
 
 } // namespace coroactors::detail

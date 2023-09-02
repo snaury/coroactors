@@ -59,7 +59,6 @@ namespace coroactors::detail {
             {
                 auto& self = h.promise();
                 std::move(self.callback)();
-                h.destroy();
             }
 
             __attribute__((__noinline__))
@@ -68,7 +67,6 @@ namespace coroactors::detail {
             {
                 auto& self = h.promise();
                 std::coroutine_handle<> c = std::move(self.callback)();
-                h.destroy();
                 return c;
             }
 
