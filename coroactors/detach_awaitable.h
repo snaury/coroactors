@@ -4,9 +4,7 @@
 namespace coroactors {
 
     /**
-     * Runs `co_await awaitable` and ignores the result
-     *
-     * Terminating on exceptions.
+     * Runs `co_await awaitable` and ignores the result and/or exceptions
      */
     template<class Awaitable>
     detail::detach_awaitable_ignore_coroutine<Awaitable>
@@ -17,7 +15,7 @@ namespace coroactors {
     /**
      * Runs `co_await awaitable` and calls callback with the result
      *
-     * Terminates on exceptions.
+     * Terminates when the awaitable or the callback throw an exception.
      */
     template<class Awaitable, class Callback>
     detail::detach_awaitable_callback_coroutine<Awaitable, Callback>

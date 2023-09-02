@@ -11,6 +11,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # But don't want gnu++20
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+#set(CMAKE_CXX_FLAGS_RELEASE -O3)
+#set(CMAKE_CXX_FLAGS_RELWITHDEBINFO -O3 -g)
+
 if((SANITIZE STREQUAL "") OR (SANITIZE STREQUAL "off"))
     # Don't enable sanitizers
 else()

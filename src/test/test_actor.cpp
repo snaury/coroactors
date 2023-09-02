@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "test_scheduler.h"
+#include <coroactors/detach_awaitable.h>
 #include <coroactors/packaged_awaitable.h>
 #include <coroactors/task_group.h>
 #include <coroactors/with_continuation.h>
@@ -81,7 +82,7 @@ TEST(ActorTest, StartWithSpecificContext) {
     auto r = packaged_awaitable(actor_with_specific_context(context));
     EXPECT_TRUE(r.running());
     ASSERT_EQ(scheduler.queue.size(), 1u);
-    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
     scheduler.run_next();
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r.success());
@@ -90,10 +91,22 @@ TEST(ActorTest, StartWithSpecificContext) {
 TEST(ActorTest, DetachWithSpecificContext) {
     test_scheduler scheduler;
     actor_context context(scheduler);
-    // We are not running in the scheduler so it will preempt
+    // Detached actors with a context are always posted
     actor_with_specific_context(context).detach();
     ASSERT_EQ(scheduler.queue.size(), 1u);
-    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
+    scheduler.run_next();
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+}
+
+TEST(ActorTest, DetachAwaitableWithSpecificContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    // The detach_awaitable use case should not differ from detach
+    detach_awaitable(actor_with_specific_context(context));
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
     scheduler.run_next();
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_EQ(scheduler.queue.size(), 0u);
@@ -173,7 +186,7 @@ TEST(ActorTest, AwaitEmptyFromSpecificContext) {
     EXPECT_TRUE(r.running());
     EXPECT_EQ(stage, 1);
     ASSERT_EQ(scheduler.queue.size(), 1u);
-    EXPECT_EQ(scheduler.queue[0].deferred, true);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
     scheduler.run_next();
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_EQ(stage, 4);
@@ -230,7 +243,7 @@ TEST(ActorTest, Sleep) {
         SCOPED_TRACE("timers disabled");
         auto r = packaged_awaitable(actor_check_sleep(context, false));
         ASSERT_EQ(scheduler.queue.size(), 1u);
-        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        EXPECT_EQ(scheduler.queue[0].deferred, false);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         EXPECT_TRUE(r.success());
@@ -240,7 +253,7 @@ TEST(ActorTest, Sleep) {
         SCOPED_TRACE("timer triggers");
         auto r = packaged_awaitable(actor_check_sleep(context, true));
         ASSERT_EQ(scheduler.queue.size(), 1u);
-        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        EXPECT_EQ(scheduler.queue[0].deferred, false);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);
@@ -260,7 +273,7 @@ TEST(ActorTest, Sleep) {
         };
         auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false, before_sleep)));
         ASSERT_EQ(scheduler.queue.size(), 1u);
-        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        EXPECT_EQ(scheduler.queue[0].deferred, false);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 0u);
@@ -271,7 +284,7 @@ TEST(ActorTest, Sleep) {
         stop_source source;
         auto r = packaged_awaitable(with_stop_token(source.get_token(), actor_check_sleep(context, false)));
         ASSERT_EQ(scheduler.queue.size(), 1u);
-        EXPECT_EQ(scheduler.queue[0].deferred, true);
+        EXPECT_EQ(scheduler.queue[0].deferred, false);
         scheduler.run_next();
         ASSERT_EQ(scheduler.queue.size(), 0u);
         ASSERT_EQ(scheduler.timers.size(), 1u);

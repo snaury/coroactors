@@ -46,7 +46,7 @@ namespace coroactors::detail {
         static auto final_suspend() noexcept { return std::suspend_never{}; }
 
         void unhandled_exception() noexcept {
-            std::terminate();
+            // ignore
         }
     };
 

@@ -148,11 +148,10 @@ namespace coroactors::detail {
          *
          * This is used both for starting a detached coroutine, as well as
          * starting a coroutine with `co_await` from a non-actor coroutine.
-         * When `preempt` is true it will also check for preemption.
          *
          * Returns the next frame to run in this thread or nullptr
          */
-        actor_context_frame* prepare(actor_context_frame* frame, bool preempt) noexcept {
+        actor_context_frame* prepare(actor_context_frame* frame) noexcept {
             if (!context) {
                 return frame;
             }
@@ -165,12 +164,14 @@ namespace coroactors::detail {
                 return nullptr;
             }
 
-            // This is technically a context switch, so check for preemption
-            if (preempt && maybe_preempt(next)) {
-                return nullptr;
-            }
-
-            return next;
+            // Note: when a new actor is detached we know it runs parallel to
+            // the current activity. With `co_await` from non-actor coroutines
+            // it's trickier, because we simply can't know, it could be a
+            // detach_awaitable call (and thus also parallel), or it could be
+            // a switch to a non-actor coroutine and then await of an actor
+            // coroutine. Unfortunately we have to assume the worst.
+            post(next);
+            return nullptr;
         }
 
     public:
@@ -180,7 +181,7 @@ namespace coroactors::detail {
          * This is mainly to support `actor<T>::detach()`.
          */
         void start(actor_context_frame* frame) {
-            if (auto* next = prepare(frame, /* preempt */ true)) {
+            if (auto* next = prepare(frame)) {
                 run(next);
             }
         }
@@ -195,7 +196,7 @@ namespace coroactors::detail {
          * otherwise the returned handle is a noop_coroutine().
          */
         std::coroutine_handle<> enter(actor_context_frame* frame) noexcept {
-            if (auto* next = prepare(frame, /* preempt */ true)) {
+            if (auto* next = prepare(frame)) {
                 enter_frame(next);
                 return next->handle();
             } else {
@@ -325,7 +326,7 @@ namespace coroactors::detail {
             // to block a caller of resume(). This includes completed network
             // calls (in which case we want to defer, as it is a continuation
             // of the return), but also calls to `continuation<T>::resume`,
-            // which really start a new activity parallel to resumer. We rely
+            // which really starts a new activity parallel to resumer. We rely
             // on common logic in maybe_preempt here and scheduler preempting
             // in unexpected threads and handlers. This should be consistent
             // when we return to actor directly, and when we return to actor
@@ -360,7 +361,7 @@ namespace coroactors::detail {
          * Enter from `from_context` to this context and run `frame`
          *
          * The `returning` argument specifies the direction of switching: when
-         * it is true the switch is returning from `co_await`.
+         * it is true the switch is returning from a `co_await`.
          *
          * This is mostly equivalent to async_leave() followed by restore(),
          * but it is more efficient and has subtle differences where new
@@ -382,10 +383,12 @@ namespace coroactors::detail {
             // Special case: the context is not changing
             if (context == from_context) {
                 // Note: we only preempt on the return path, because otherwise
-                // it is a co_await of a new actor coroutine, which initially
-                // inherits context from the caller. That coroutine will likely
-                // bind to a different context and that's when it's best to
-                // preempt.
+                // it is a co_await of a new actor coroutine, which might be
+                // setting up some async activities. We don't want to cause
+                // thrashing where we resume later only to immediately leave
+                // the context. A new coroutine will likely suspend soon by
+                // making more calls, or return from at least one call, and
+                // that's when we would try to preempt.
                 if (returning && maybe_preempt(frame)) {
                     return std::noop_coroutine();
                 }
@@ -417,14 +420,17 @@ namespace coroactors::detail {
                 more = from_context->next_frame();
             }
 
-            // Try running to_frame in this context. It will either lock and
-            // give us some frame (likely to_frame, but not guaranteed), so we
+            // Try running `frame` in this context. It will either lock and
+            // give us some frame (likely `frame`, but not guaranteed), so we
             // will try running it in the current thread, or it will be added
             // to the queue and we will try running some work from the original
             // context instead.
             if (auto* next = context->push_frame(frame)) {
-                // Check for preemption by this context
-                if (maybe_preempt(next)) {
+                // Check for preemption by this context. We do this either on
+                // the return path (see a comment above), or when switching
+                // from an empty context, because it should behave similar to
+                // restore().
+                if ((returning || !from_context) && maybe_preempt(next)) {
                     if (more) {
                         post(from_context, more);
                     }
