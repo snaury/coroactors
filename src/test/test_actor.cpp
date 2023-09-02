@@ -3,6 +3,7 @@
 
 #include "test_scheduler.h"
 #include <coroactors/packaged_awaitable.h>
+#include <coroactors/task_group.h>
 #include <coroactors/with_continuation.h>
 
 using namespace coroactors;
@@ -38,13 +39,13 @@ actor<void> actor_await_sleep_without_context() {
 
 TEST(ActorTest, AwaitWithoutContext) {
     auto a = packaged_awaitable(actor_await_const_without_context(42));
-    EXPECT_TRUE(a.success());
+    EXPECT_THROW(*a, actor_error);
     auto b = packaged_awaitable(actor_await_caller_context_without_context());
-    EXPECT_TRUE(b.success());
+    EXPECT_THROW(*b, actor_error);
     auto c = packaged_awaitable(actor_await_current_context_without_context());
-    EXPECT_TRUE(c.success());
+    EXPECT_THROW(*c, actor_error);
     auto d = packaged_awaitable(actor_await_sleep_without_context());
-    EXPECT_TRUE(d.success());
+    EXPECT_THROW(*d, actor_error);
 }
 
 actor<void> actor_empty_context() {
@@ -103,16 +104,19 @@ TEST(ActorTest, ActorContextInheritance) {
     actor_context context(scheduler);
 
     auto r = packaged_awaitable([](const actor_context& context) -> actor<void> {
+        // Explicitly inherit some caller context
+        co_await actor_context::caller_context();
         EXPECT_EQ(co_await actor_context::caller_context, no_actor_context);
         EXPECT_EQ(co_await actor_context::current_context, no_actor_context);
         co_await context();
         EXPECT_EQ(co_await actor_context::caller_context, no_actor_context);
         EXPECT_EQ(co_await actor_context::current_context, context);
         co_await [](const actor_context& context) -> actor<void> {
-            // The context is inherited when initially awaited
+            // Explicitly inherit some caller context
+            co_await actor_context::caller_context();
             EXPECT_EQ(co_await actor_context::caller_context, context);
             EXPECT_EQ(co_await actor_context::current_context, context);
-            // We can change it to empty context
+            // We can change it to an empty context
             co_await no_actor_context();
             // Caller will not change, but current context will
             EXPECT_EQ(co_await actor_context::caller_context, context);
@@ -345,4 +349,83 @@ TEST(TestActor, ThrowDuringSuspend) {
     // without context switches, double frees or any leaks.
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_TRUE(r.success());
+}
+
+TEST(TestActor, StartNestedActorsBeforeContext) {
+    test_scheduler scheduler;
+    actor_context context(scheduler);
+    std::vector<int> events;
+
+    std::optional<packaged_awaitable<int>> ropt;
+
+    // We need to start everything inside a scheduler
+    scheduler.post([&]{
+        ropt.emplace(
+            [](const actor_context& context, std::vector<int>& events) -> actor<int> {
+                task_group<int> g;
+
+                events.push_back(11);
+                g.add([](const actor_context& context, std::vector<int>& events) -> actor<int> {
+                    events.push_back(21);
+                    co_await context();
+                    events.push_back(22);
+                    co_return 42;
+                }(context, events));
+
+                events.push_back(12);
+                g.add([](const actor_context& context, std::vector<int>& events) -> actor<int> {
+                    events.push_back(31);
+                    co_await context();
+                    events.push_back(32);
+                    co_return 58;
+                }(context, events));
+
+                events.push_back(13);
+                co_await context();
+
+                events.push_back(14);
+                int a = co_await g.next();
+
+                events.push_back(15);
+                int b = co_await g.next();
+
+                events.push_back(16);
+                co_return a + b;
+            }(context, events));
+    });
+    scheduler.run_next();
+
+    ASSERT_TRUE(ropt);
+    auto r = std::move(*ropt);
+
+    // We must be blocked on nested context activation (running inside an actor)
+    // And parent coroutine then enqueues behind the two other activations
+    EXPECT_TRUE(r.running());
+    EXPECT_EQ(events, std::vector<int>({ 11, 21, 12, 31, 13 }));
+    events.clear();
+
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false); // parallel activity
+    scheduler.run_next();
+
+    // We return to a non-actor coroutine (task group), next one is posted
+    EXPECT_EQ(events, std::vector<int>({ 22 }));
+    events.clear();
+
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false); // parallel activity
+    scheduler.run_next();
+
+    // Same for the second task
+    EXPECT_EQ(events, std::vector<int>({ 32 }));
+    events.clear();
+
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false); // parallel activity
+    scheduler.run_next();
+
+    // The parent wakes up and finishes everything
+    EXPECT_EQ(events, std::vector<int>({ 14, 15, 16 }));
+    EXPECT_EQ(scheduler.queue.size(), 0u);
+    EXPECT_EQ(*r, 100);
 }

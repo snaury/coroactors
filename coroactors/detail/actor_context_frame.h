@@ -570,6 +570,7 @@ namespace coroactors::detail {
 #endif
         }
 
+    public:
         static void enter_frame(actor_context_frame* frame) noexcept {
             enter_context();
             track_push_frame(frame);

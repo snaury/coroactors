@@ -133,6 +133,14 @@ namespace coroactors::detail {
         actor_context_frame* frame;
     };
 
+    enum class actor_promise_state {
+        context_unknown,
+        context_inherit,
+        context_set,
+        running,
+        finished,
+    };
+
     template<class T>
     class actor_promise final
         : public actor_context_frame
@@ -151,7 +159,22 @@ namespace coroactors::detail {
             this->result_.set_exception(std::current_exception());
         }
 
-        static auto initial_suspend() noexcept { return std::suspend_always{}; }
+        bool ready() const noexcept {
+            return state == actor_promise_state::finished;
+        }
+
+        struct initial_suspend_t {
+            actor_promise* self;
+
+            static bool await_ready() noexcept { return true; }
+            static void await_suspend(std::coroutine_handle<>) noexcept { /* never called */ }
+
+            void await_resume() noexcept {
+                actor_context_manager::enter_frame(self);
+            }
+        };
+
+        auto initial_suspend() noexcept { return initial_suspend_t{ this }; }
 
         struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
@@ -159,8 +182,17 @@ namespace coroactors::detail {
 
             static std::coroutine_handle<> await_suspend(actor_continuation<T> h) noexcept {
                 auto& p = h.promise();
+                auto state = std::exchange(p.state, actor_promise_state::finished);
 
-                // Check if we have been co_await'ed
+                if (state != actor_promise_state::running) {
+                    // We finished before reaching a `co_await context()` point,
+                    // suspend until we are co_awaited for a result. We must
+                    // also leave the frame we entered in initial suspend.
+                    actor_context_manager::leave_frame(&p);
+                    return std::noop_coroutine();
+                }
+
+                // Check if we have been detached
                 auto next = std::exchange(p.continuation, {});
                 if (!next) {
                     // Actor finished after a call to detach, see if there's
@@ -200,7 +232,9 @@ namespace coroactors::detail {
         void set_continuation(actor_continuation<U> c) noexcept {
             continuation = c;
             continuation_frame = &c.promise();
-            context = continuation_frame->context;
+            if (state == actor_promise_state::context_inherit) {
+                context = continuation_frame->context;
+            }
         }
 
         void set_continuation(std::coroutine_handle<> c) noexcept {
@@ -208,6 +242,10 @@ namespace coroactors::detail {
         }
 
         std::coroutine_handle<> start_await() noexcept {
+            assert(state != actor_promise_state::finished);
+            assert(state != actor_promise_state::running);
+            state = actor_promise_state::running;
+
             if (!continuation_frame) {
                 // We are awaited by a non-actor coroutine, enter the context
                 return context.manager().enter(this);
@@ -218,12 +256,21 @@ namespace coroactors::detail {
         }
 
         void start_detached() noexcept {
+            if (state == actor_promise_state::finished) {
+                // Destroy an already finished coroutine
+                actor_continuation<T>::from_promise(*this).destroy();
+                return;
+            }
+
+            assert(state != actor_promise_state::running);
+            state = actor_promise_state::running;
             context.manager().start(this);
         }
 
         enum class ESwitchContext {
             Ready,
             Switch,
+            Initial,
         };
 
         struct switch_context_awaiter {
@@ -236,9 +283,17 @@ namespace coroactors::detail {
 
             __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
-                // We are changing to a different context
-                assert(type != ESwitchContext::Ready);
                 auto& self = c.promise();
+
+                // The first time we suspend we return to caller
+                if (type == ESwitchContext::Initial) {
+                    // We must also leave the frame we entered in initial suspend
+                    actor_context_manager::leave_frame(&self);
+                    return std::noop_coroutine();
+                }
+
+                // We are changing to a different context
+                assert(type == ESwitchContext::Switch);
                 // Note: we are returning from a co_await here
                 return to.manager().switch_context(&self, /* returning */ true);
             }
@@ -249,6 +304,13 @@ namespace coroactors::detail {
         };
 
         switch_context_awaiter await_transform(actor_context::bind_context_t bound) {
+            if (state == actor_promise_state::context_unknown) {
+                // We binding to an explicit initial context
+                context = bound.context;
+                state = actor_promise_state::context_set;
+                return switch_context_awaiter{ bound.context, ESwitchContext::Initial };
+            }
+
             if (context == bound.context) {
                 // We are not changing contexts, no op
                 return switch_context_awaiter{ bound.context, ESwitchContext::Ready };
@@ -265,10 +327,22 @@ namespace coroactors::detail {
         }
 
         auto await_transform(actor_context::caller_context_t::bind_context_t) {
+            if (state == actor_promise_state::context_unknown) {
+                // We binding to a caller's initial context
+                state = actor_promise_state::context_inherit;
+                return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
+            }
+
             // Reuse await_transform above for binding to a continuation context
             return await_transform(actor_context::bind_context_t{
                 continuation_frame ? continuation_frame->context : no_actor_context
             });
+        }
+
+        void ensure_running() const {
+            if (state != actor_promise_state::running) [[unlikely]] {
+                throw actor_error("actor must co_await context() first");
+            }
         }
 
         struct return_context_awaiter_t {
@@ -280,10 +354,14 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::caller_context_t) {
+            ensure_running();
+
             return return_context_awaiter_t{ continuation_frame ? continuation_frame->context : no_actor_context };
         }
 
         auto await_transform(actor_context::current_context_t) {
+            ensure_running();
+
             return return_context_awaiter_t{ context };
         }
 
@@ -300,6 +378,8 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::yield_t) {
+            ensure_running();
+
             return yield_context_awaiter_t{};
         }
 
@@ -316,6 +396,8 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::preempt_t) {
+            ensure_running();
+
             return preempt_context_awaiter_t{};
         }
 
@@ -328,6 +410,8 @@ namespace coroactors::detail {
         };
 
         auto await_transform(actor_context::current_stop_token_t) {
+            ensure_running();
+
             return current_stop_token_awaiter_t{ get_stop_token() };
         }
 
@@ -439,6 +523,8 @@ namespace coroactors::detail {
         auto await_transform(Awaitable&& awaitable)
             requires (!actor_passthru_awaitable<Awaitable, T>)
         {
+            ensure_running();
+
             // Protect against metaprogramming mistakes
             static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor<T>>);
             static_assert(!std::is_same_v<std::decay_t<Awaitable>, actor_awaiter<T>>);
@@ -568,6 +654,8 @@ namespace coroactors::detail {
 
         template<awaitable Awaitable>
         auto await_transform(actor_context::bind_awaitable_t<Awaitable> bound) {
+            ensure_running();
+
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 bound.context,
@@ -576,6 +664,8 @@ namespace coroactors::detail {
 
         template<awaitable Awaitable>
         auto await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) {
+            ensure_running();
+
             return change_context_wrapped_awaiter<Awaitable>(
                 std::forward<Awaitable>(bound.awaitable),
                 continuation_frame ? continuation_frame->context : no_actor_context,
@@ -629,12 +719,15 @@ namespace coroactors::detail {
         // claim to support context switches directly, this includes wrappers.
         template<actor_passthru_awaitable<T> Awaitable>
         auto await_transform(Awaitable&& awaitable) {
+            ensure_running();
+
             return actor_passthru_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
     private:
         std::coroutine_handle<> continuation;
         actor_context_frame* continuation_frame{ nullptr };
+        actor_promise_state state{ actor_promise_state::context_unknown };
     };
 
     template<class T>
@@ -661,11 +754,11 @@ namespace coroactors::detail {
 
         bool await_ready(stop_token token) noexcept {
             handle.promise().set_stop_token(std::move(token));
-            return false;
+            return handle.promise().ready();
         }
 
         bool await_ready() noexcept {
-            return false;
+            return handle.promise().ready();
         }
 
         template<class Promise>
@@ -708,11 +801,11 @@ namespace coroactors::detail {
 
         bool await_ready(stop_token token) noexcept {
             handle.promise().set_stop_token(std::move(token));
-            return false;
+            return handle.promise().ready();
         }
 
         bool await_ready() noexcept {
-            return false;
+            return handle.promise().ready();
         }
 
         template<class Promise>

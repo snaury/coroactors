@@ -17,7 +17,7 @@ This repository takes ideas from the Swift language and standard library, and tr
 
 ## Actors with C++ coroutines
 
-The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is a lazily started coroutine that usually `co_await`s on `actor_context::operator()` call first, at which point it binds to the specified context. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context.
+The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either `co_return` immediately or `co_await` on `actor_context::operator()` call first, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context.
 
 ```c++
 class Counter {
