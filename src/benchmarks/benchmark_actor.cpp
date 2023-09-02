@@ -3,6 +3,7 @@
 #include <benchmark/benchmark.h>
 #include <absl/synchronization/mutex.h>
 #include <deque>
+#include <mutex>
 
 using namespace coroactors;
 
@@ -49,10 +50,36 @@ private:
     int value_ = 0;
 };
 
-class TCounterServiceMutex {
+class ICounterServiceMutex {
 public:
-    __attribute__((__noinline__))
-    int increment() {
+    virtual int get_const() = 0;
+
+    virtual int increment() = 0;
+};
+
+class TCounterServiceStdMutex : public ICounterServiceMutex {
+public:
+    int get_const() override {
+        return 42;
+    }
+
+    int increment() override {
+        std::unique_lock l(lock);
+        return ++value_;
+    }
+
+private:
+    std::mutex lock;
+    int value_ = 0;
+};
+
+class TCounterServiceAbslMutex : public ICounterServiceMutex {
+public:
+    int get_const() override {
+        return 42;
+    }
+
+    int increment() override {
         absl::MutexLock l(&Lock);
         return ++value_;
     }
@@ -129,23 +156,20 @@ private:
 
 class TTestServiceMutex {
 public:
-    TTestServiceMutex(TCounterServiceMutex& counter)
+    TTestServiceMutex(ICounterServiceMutex& counter)
         : counter(counter)
     {}
 
     __attribute__((__noinline__))
-    int get_const() {
-        return 42;
-    }
-
     void run_const(benchmark::State& state) {
         for (auto _ : state) {
-            int value = get_const();
+            int value = counter.get_const();
             benchmark::DoNotOptimize(value);
         }
         state.SetItemsProcessed(state.iterations());
     }
 
+    __attribute__((__noinline__))
     void run_direct(benchmark::State& state) {
         for (auto _ : state) {
             int value = counter.increment();
@@ -155,7 +179,7 @@ public:
     }
 
 private:
-    TCounterServiceMutex& counter;
+    ICounterServiceMutex& counter;
 };
 
 static void BM_Actor_Call_Const_Immediate(benchmark::State& state) {
@@ -203,20 +227,28 @@ static void BM_Actor_Call_Indirect(benchmark::State& state) {
 BENCHMARK(BM_Actor_Call_Indirect);
 
 static void BM_Normal_Call_Const(benchmark::State& state) {
-    TCounterServiceMutex counter;
+    TCounterServiceStdMutex counter;
     TTestServiceMutex test(counter);
     test.run_const(state);
 }
 
 BENCHMARK(BM_Normal_Call_Const);
 
-static void BM_Normal_Call_Service(benchmark::State& state) {
-    TCounterServiceMutex counter;
+static void BM_StdMutex_Call_Service(benchmark::State& state) {
+    TCounterServiceStdMutex counter;
     TTestServiceMutex test(counter);
     test.run_direct(state);
 }
 
-BENCHMARK(BM_Normal_Call_Service);
+BENCHMARK(BM_StdMutex_Call_Service);
+
+static void BM_AbslMutex_Call_Service(benchmark::State& state) {
+    TCounterServiceAbslMutex counter;
+    TTestServiceMutex test(counter);
+    test.run_direct(state);
+}
+
+BENCHMARK(BM_AbslMutex_Call_Service);
 
 int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);
