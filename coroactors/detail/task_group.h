@@ -517,7 +517,6 @@ namespace coroactors::detail {
         struct final_suspend_t {
             bool await_ready() noexcept { return false; }
 
-            __attribute__((__noinline__))
             std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
                 self.running = false;

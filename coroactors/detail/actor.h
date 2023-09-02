@@ -157,7 +157,6 @@ namespace coroactors::detail {
             static bool await_ready() noexcept { return false; }
             static void await_resume() noexcept { /* never called */ }
 
-            __attribute__((__noinline__))
             static std::coroutine_handle<> await_suspend(actor_continuation<T> h) noexcept {
                 auto& p = h.promise();
 

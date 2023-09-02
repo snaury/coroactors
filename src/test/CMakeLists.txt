@@ -10,6 +10,7 @@ if(GTest_FOUND)
         test_with_task_group
         test_mailbox
         test_intrusive_mailbox
+        test_task
     )
 
     # Common files and dependencies (compile once)

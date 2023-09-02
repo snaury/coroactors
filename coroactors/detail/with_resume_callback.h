@@ -53,7 +53,6 @@ namespace coroactors::detail {
         struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
 
-            __attribute__((__noinline__))
             static void await_suspend(with_resume_callback_handle<Callback> h) noexcept
                 requires (is_resume_callback_void<Callback>)
             {
@@ -61,7 +60,6 @@ namespace coroactors::detail {
                 std::move(self.callback)();
             }
 
-            __attribute__((__noinline__))
             static std::coroutine_handle<> await_suspend(with_resume_callback_handle<Callback> h) noexcept
                 requires (is_resume_callback_handle<Callback>)
             {

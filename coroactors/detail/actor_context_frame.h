@@ -1,3 +1,4 @@
+#pragma once
 #include <coroactors/actor_context.h>
 #include <coroactors/detail/actor_context.h>
 #include <coroactors/detail/intrusive_mailbox.h>
