@@ -35,15 +35,16 @@ namespace coroactors::detail {
         /**
          * Pushes the next frame to this context's mailbox
          *
-         * Returns nullptr when the mailbox is currently locked, the frame is
+         * Returns false when the mailbox is currently locked, the frame is
          * enqueued and may run in another thread. Otherwise locks the mailbox
-         * and returns the next runnable frame, which may be different from the
-         * passed in frame.
+         * and true. The next (likely the same) frame should be acquired with
+         * `next_frame()`, which may rarely fail and unlock the mailbox due to
+         * a concurrent push.
          *
          * This method is thread-safe and may be called by any thread. It is
          * also wait-free, never allocates and never throws exceptions.
          */
-        actor_context_frame* push_frame(actor_context_frame* frame) noexcept;
+        bool push_frame(actor_context_frame* frame) noexcept;
 
         /**
          * Removes the next frame from this context's mailbox

@@ -43,9 +43,13 @@ public:
     actor<TRunResult> runWithoutLatencies(int count) {
         co_await context();
 
+        int last = 0;
         for (int i = 0; i < count; ++i) {
             int value = co_await pingable.ping();
-            (void)value;
+            if (value <= last) {
+                std::terminate();
+            }
+            last = value;
         }
 
         co_return TRunResult{};
@@ -57,10 +61,14 @@ public:
         TTime end = TClock::now();
         auto maxLatency = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
+        int last = 0;
         for (int i = 0; i < count; ++i) {
             TTime call_start = end;
             int value = co_await pingable.ping();
-            (void)value;
+            if (value <= last) {
+                std::terminate();
+            }
+            last = value;
             TTime call_end = TClock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(call_end - call_start);
             maxLatency = std::max(maxLatency, elapsed);

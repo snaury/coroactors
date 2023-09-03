@@ -159,8 +159,14 @@ namespace coroactors::detail {
             // Note: when the call to push_frame returns false it may
             // immediately start running in another thread and destroy both
             // this frame and context.
-            auto* next = context->push_frame(frame);
-            if (!next) {
+            if (!context->push_frame(frame)) {
+                return nullptr;
+            }
+
+            // We may rarely fail to take the next frame, in which case the
+            // context is unlocked and a concurrent thread is guaranteed to
+            // take it instead.
+            if (!(frame = context->next_frame())) {
                 return nullptr;
             }
 
@@ -170,7 +176,7 @@ namespace coroactors::detail {
             // detach_awaitable call (and thus also parallel), or it could be
             // a switch to a non-actor coroutine and then await of an actor
             // coroutine. Unfortunately we have to assume the worst.
-            post(next);
+            post(frame);
             return nullptr;
         }
 
@@ -317,8 +323,7 @@ namespace coroactors::detail {
                 return frame->handle();
             }
 
-            frame = context->push_frame(frame);
-            if (!frame) {
+            if (!context->push_frame(frame) || !(frame = context->next_frame())) {
                 return std::noop_coroutine();
             }
 
@@ -363,14 +368,13 @@ namespace coroactors::detail {
          * The `returning` argument specifies the direction of switching: when
          * it is true the switch is returning from a `co_await`.
          *
-         * This is mostly equivalent to async_leave() followed by restore(),
-         * but it is more efficient and has subtle differences where new
-         * continuation is prioritized over additional work in the
-         * `from_context`.
+         * It's mostly equivalent to `async_leave()` followed by `restore()`,
+         * but more efficient and has subtle differences where new continuation
+         * is prioritized over additional work in the `from_context`.
          *
          * Returns the next runnable coroutine for the current thread, which
-         * may also be a noop_coroutine(), in which case it's as if leave() has
-         * been called.
+         * may also be a noop_coroutine(), in which case it's as if
+         * `async_leave()` has been called.
          */
         std::coroutine_handle<> switch_from(actor_context_state* from_context,
                 actor_context_frame* frame, bool returning) noexcept
@@ -421,16 +425,16 @@ namespace coroactors::detail {
             }
 
             // Try running `frame` in this context. It will either lock and
-            // give us some frame (likely `frame`, but not guaranteed), so we
-            // will try running it in the current thread, or it will be added
-            // to the queue and we will try running some work from the original
-            // context instead.
-            if (auto* next = context->push_frame(frame)) {
+            // give us a frame (likely the same we pushed, but not guaranteed),
+            // which we will try running in the current thread, or it will be
+            // added to the queue and we will try running some work from the
+            // original context instead.
+            if (context->push_frame(frame) && (frame = context->next_frame())) {
                 // Check for preemption by this context. We do this either on
                 // the return path (see a comment above), or when switching
                 // from an empty context, because it should behave similar to
                 // restore().
-                if ((returning || !from_context) && maybe_preempt(next)) {
+                if ((returning || !from_context) && maybe_preempt(frame)) {
                     if (more) {
                         post(from_context, more);
                     }
@@ -442,8 +446,8 @@ namespace coroactors::detail {
                 }
 
                 // New frame continues in this thread
-                enter_frame(next);
-                return next->handle();
+                enter_frame(frame);
+                return frame->handle();
             }
 
             if (!more) {
@@ -496,23 +500,22 @@ namespace coroactors::detail {
 
             // Push current frame to the end of the queue
             if (context->push_frame(frame)) [[unlikely]] {
-                assert(false && "unexpected push_frame() result on a locked context");
+                assert(false && "unexpected push_frame() lock on an already locked context");
             }
 
-            auto* next = context->next_frame();
-            if (!next) {
+            if (!(frame = context->next_frame())) {
                 leave_context();
                 return std::noop_coroutine();
             }
 
-            if (maybe_preempt(next)) {
+            if (maybe_preempt(frame)) {
                 leave_context();
                 return std::noop_coroutine();
             }
 
             // Run the next frame in this thread
-            track_push_frame(next);
-            return next->handle();
+            track_push_frame(frame);
+            return frame->handle();
         }
 
         /**
@@ -600,15 +603,8 @@ namespace coroactors::detail {
         actor_context_state* context;
     };
 
-    inline actor_context_frame* actor_context_state::push_frame(actor_context_frame* frame) noexcept {
-        if (mailbox_.push(frame)) {
-            // We locked the mailbox, but the first item may be temporarily
-            // blocked by a concurrent push in another thread. When it returns
-            // nullptr it automatically unlocks, or stays locked otherwise.
-            return next_frame();
-        } else {
-            return nullptr;
-        }
+    inline bool actor_context_state::push_frame(actor_context_frame* frame) noexcept {
+        return mailbox_.push(frame);
     }
 
     inline actor_context_frame* actor_context_state::next_frame() noexcept {
