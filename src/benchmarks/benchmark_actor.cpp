@@ -1,9 +1,12 @@
 #include <coroactors/actor.h>
 #include <coroactors/detach_awaitable.h>
 #include <benchmark/benchmark.h>
-#include <absl/synchronization/mutex.h>
 #include <deque>
 #include <mutex>
+
+#if HAVE_ABSEIL
+#include <absl/synchronization/mutex.h>
+#endif
 
 using namespace coroactors;
 
@@ -73,6 +76,7 @@ private:
     int value_ = 0;
 };
 
+#if HAVE_ABSEIL
 class TCounterServiceAbslMutex : public ICounterServiceMutex {
 public:
     int get_const() override {
@@ -88,6 +92,7 @@ private:
     absl::Mutex Lock;
     int value_ = 0;
 };
+#endif
 
 class TTestServiceActor {
 public:
@@ -242,6 +247,7 @@ static void BM_StdMutex_Call_Service(benchmark::State& state) {
 
 BENCHMARK(BM_StdMutex_Call_Service);
 
+#if HAVE_ABSEIL
 static void BM_AbslMutex_Call_Service(benchmark::State& state) {
     TCounterServiceAbslMutex counter;
     TTestServiceMutex test(counter);
@@ -249,6 +255,7 @@ static void BM_AbslMutex_Call_Service(benchmark::State& state) {
 }
 
 BENCHMARK(BM_AbslMutex_Call_Service);
+#endif
 
 int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);

@@ -1,9 +1,6 @@
 #include <coroactors/actor.h>
 #include <coroactors/detach_awaitable.h>
 #include <coroactors/detail/blocking_queue.h>
-#include <coroactors/asio_actor_scheduler.h>
-#include <absl/synchronization/mutex.h>
-#include <asio/thread_pool.hpp>
 #include <deque>
 #include <iostream>
 #include <string>
@@ -11,6 +8,15 @@
 #include <mutex>
 #include <condition_variable>
 #include <variant>
+
+#if HAVE_ABSEIL
+#include <absl/synchronization/mutex.h>
+#endif
+
+#if HAVE_ASIO
+#include <coroactors/asio_actor_scheduler.h>
+#include <asio/thread_pool.hpp>
+#endif
 
 using namespace coroactors;
 
@@ -94,42 +100,6 @@ private:
 };
 
 template<class T>
-class TBlockingQueueWithAbslMutex {
-public:
-    template<class... TArgs>
-    void push(TArgs&&... args) {
-        absl::MutexLock l(&Lock);
-        Items.emplace_back(std::forward<TArgs>(args)...);
-    }
-
-    T pop() {
-        absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::HasItems));
-        T item(std::move(Items.front()));
-        Items.pop_front();
-        return item;
-    }
-
-    std::optional<T> try_pop() {
-        absl::MutexLock l(&Lock);
-        if (!Items.empty()) {
-            std::optional<T> item(std::move(Items.front()));
-            Items.pop_front();
-            return item;
-        }
-        return std::nullopt;
-    }
-
-private:
-    bool HasItems() const {
-        return !Items.empty();
-    }
-
-private:
-    absl::Mutex Lock;
-    std::deque<T> Items;
-};
-
-template<class T>
 class TBlockingQueueWithStdMutex {
 public:
     template<class... TArgs>
@@ -170,58 +140,45 @@ private:
     size_t Waiters = 0;
 };
 
-static std::atomic<size_t> mailbox_wakeups{ 0 };
-
+#if HAVE_ABSEIL
 template<class T>
-class TBlockingQueueWithAbslMailbox {
+class TBlockingQueueWithAbslMutex {
 public:
-    TBlockingQueueWithAbslMailbox() {
-        MailboxLocked = !Mailbox.try_unlock();
-    }
-
     template<class... TArgs>
     void push(TArgs&&... args) {
-        // Most of the time this will be lockfree
-        if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
-            absl::MutexLock l(&Lock);
-            MailboxLocked = true;
-        }
+        absl::MutexLock l(&Lock);
+        Items.emplace_back(std::forward<TArgs>(args)...);
     }
 
     T pop() {
-        for (;;) {
-            absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::CanPop));
-            if (auto result = Mailbox.pop_optional()) {
-                return std::move(*result);
-            }
-            // Mailbox was unlocked, now wait
-            MailboxLocked = false;
-        }
+        absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::HasItems));
+        T item(std::move(Items.front()));
+        Items.pop_front();
+        return item;
     }
 
     std::optional<T> try_pop() {
         absl::MutexLock l(&Lock);
-        if (MailboxLocked) {
-            if (auto result = Mailbox.pop_optional()) {
-                return std::move(*result);
-            }
-            // Mailbox was unlocked, new ops will wait
-            MailboxLocked = false;
+        if (!Items.empty()) {
+            std::optional<T> item(std::move(Items.front()));
+            Items.pop_front();
+            return item;
         }
         return std::nullopt;
     }
 
 private:
-    bool CanPop() const {
-        return MailboxLocked;
+    bool HasItems() const {
+        return !Items.empty();
     }
 
-public:
+private:
     absl::Mutex Lock;
-    detail::mailbox<T> Mailbox;
-    bool MailboxLocked;
+    std::deque<T> Items;
 };
+#endif
+
+static std::atomic<size_t> mailbox_wakeups{ 0 };
 
 template<class T>
 class TBlockingQueueWithStdMailbox {
@@ -286,108 +243,91 @@ public:
     bool MailboxLocked;
 };
 
+#if HAVE_ABSEIL
 template<class T>
-class TBlockingQueue {
-    struct IBlockingQueue {
-        virtual ~IBlockingQueue() = default;
-        virtual void push(T) = 0;
-        virtual T pop() = 0;
-        virtual std::optional<T> try_pop() = 0;
-    };
-
+class TBlockingQueueWithAbslMailbox {
 public:
-    template<class TQueue>
-    void emplace() {
-        struct TProxy
-            : private TQueue
-            , public IBlockingQueue
-        {
-            void push(T item) override {
-                TQueue::push(std::move(item));
-            }
-
-            T pop() override {
-                return TQueue::pop();
-            }
-
-            std::optional<T> try_pop() override {
-                return TQueue::try_pop();
-            }
-        };
-
-        Impl = std::make_unique<TProxy>();
+    TBlockingQueueWithAbslMailbox() {
+        MailboxLocked = !Mailbox.try_unlock();
     }
 
-    void push(T item) {
-        Impl->push(std::move(item));
+    template<class... TArgs>
+    void push(TArgs&&... args) {
+        // Most of the time this will be lockfree
+        if (Mailbox.push(std::forward<TArgs>(args)...)) {
+            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
+            absl::MutexLock l(&Lock);
+            MailboxLocked = true;
+        }
     }
 
     T pop() {
-        return Impl->pop();
+        for (;;) {
+            absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::CanPop));
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
+            }
+            // Mailbox was unlocked, now wait
+            MailboxLocked = false;
+        }
     }
 
     std::optional<T> try_pop() {
-        return Impl->try_pop();
+        absl::MutexLock l(&Lock);
+        if (MailboxLocked) {
+            if (auto result = Mailbox.pop_optional()) {
+                return std::move(*result);
+            }
+            // Mailbox was unlocked, new ops will wait
+            MailboxLocked = false;
+        }
+        return std::nullopt;
     }
 
 private:
-    std::unique_ptr<IBlockingQueue> Impl;
+    bool CanPop() const {
+        return MailboxLocked;
+    }
+
+public:
+    absl::Mutex Lock;
+    detail::mailbox<T> Mailbox;
+    bool MailboxLocked;
 };
+#endif
 
 enum class ESchedulerType {
-    Fast,
-    Asio,
-};
-
-enum class ESchedulerQueue {
     LockFree,
-    AbslMutex,
     StdMutex,
-    AbslMailbox,
     StdMailbox,
+#if HAVE_ABSEIL
+    AbslMutex,
+    AbslMailbox,
+#endif
+#if HAVE_ASIO
+    Asio,
+#endif
 };
 
-class TScheduler : public actor_scheduler {
+template<template <class> typename BlockingQueue>
+class BlockingQueueScheduler : public actor_scheduler {
 public:
-    TScheduler(size_t threads,
-            std::chrono::microseconds preemptUs = std::chrono::microseconds(10),
-            ESchedulerQueue queueType = ESchedulerQueue::LockFree)
+    using execute_callback_type = actor_scheduler::execute_callback_type;
+
+    BlockingQueueScheduler(size_t threads, std::chrono::microseconds preemptUs)
         : PreemptUs(preemptUs)
     {
-        switch (queueType) {
-            case ESchedulerQueue::LockFree: {
-                Queue.emplace<detail::blocking_queue<execute_callback_type>>();
-                break;
-            }
-            case ESchedulerQueue::AbslMutex: {
-                Queue.emplace<TBlockingQueueWithAbslMutex<execute_callback_type>>();
-                break;
-            }
-            case ESchedulerQueue::StdMutex: {
-                Queue.emplace<TBlockingQueueWithStdMutex<execute_callback_type>>();
-                break;
-            }
-            case ESchedulerQueue::AbslMailbox: {
-                Queue.emplace<TBlockingQueueWithAbslMailbox<execute_callback_type>>();
-                break;
-            }
-            case ESchedulerQueue::StdMailbox: {
-                Queue.emplace<TBlockingQueueWithStdMailbox<execute_callback_type>>();
-                break;
-            }
-        }
-
         for (size_t i = 0; i < threads; ++i) {
             Threads.emplace_back([this]{
-                RunWorker();
+                this->RunWorker();
             });
         }
     }
 
-    ~TScheduler() {
+    ~BlockingQueueScheduler() {
         // Send a stop signal for every thread
         for (size_t i = 0; i < Threads.size(); ++i) {
-            Queue.push({});
+            Queue.push(execute_callback_type());
         }
         for (auto& thread : Threads) {
             thread.join();
@@ -424,27 +364,49 @@ private:
 
 private:
     std::chrono::microseconds PreemptUs;
-    TBlockingQueue<execute_callback_type> Queue;
+    BlockingQueue<execute_callback_type> Queue;
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };
 };
 
-class TAsioScheduler {
+#if HAVE_ASIO
+class AsioScheduler
+    : private asio::thread_pool
+    , public asio_actor_scheduler
+{
 public:
-    TAsioScheduler(size_t threads, std::chrono::microseconds preeemptUs)
-        : pool(threads)
-        , scheduler(pool.get_executor(), preeemptUs)
+    AsioScheduler(size_t threads, std::chrono::microseconds preemptUs)
+        : asio::thread_pool(threads)
+        , asio_actor_scheduler(this->get_executor(), preemptUs)
     {}
-
-    actor_scheduler& get_scheduler() {
-        return scheduler;
-    }
-
-private:
-    asio::thread_pool pool;
-    asio_actor_scheduler scheduler;
 };
+#endif
+
+std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
+        size_t threads, std::chrono::microseconds preemptUs)
+{
+    switch (type) {
+    case ESchedulerType::LockFree:
+        return std::make_shared<BlockingQueueScheduler<detail::blocking_queue>>(threads, preemptUs);
+    case ESchedulerType::StdMutex:
+        return std::make_shared<BlockingQueueScheduler<TBlockingQueueWithStdMutex>>(threads, preemptUs);
+    case ESchedulerType::StdMailbox:
+        return std::make_shared<BlockingQueueScheduler<TBlockingQueueWithStdMailbox>>(threads, preemptUs);
+#if HAVE_ABSEIL
+    case ESchedulerType::AbslMutex:
+        return std::make_shared<BlockingQueueScheduler<TBlockingQueueWithAbslMutex>>(threads, preemptUs);
+    case ESchedulerType::AbslMailbox:
+        return std::make_shared<BlockingQueueScheduler<TBlockingQueueWithAbslMailbox>>(threads, preemptUs);
+#endif
+#if HAVE_ASIO
+    case ESchedulerType::Asio:
+        return std::make_shared<AsioScheduler>(threads, preemptUs);
+#endif
+    default:
+        throw std::runtime_error("unsupported scheduler type");
+    }
+}
 
 template<class T>
     requires (!std::is_void_v<T>)
@@ -499,8 +461,7 @@ int main(int argc, char** argv) {
     int numPingables = 1;
     long long count = 10'000'000;
     std::chrono::microseconds preemptUs(10);
-    ESchedulerType schedulerType = ESchedulerType::Fast;
-    ESchedulerQueue queueType = ESchedulerQueue::LockFree;
+    ESchedulerType schedulerType = ESchedulerType::LockFree;
     bool withLatencies = true;
     bool debugWakeups = false;
 
@@ -531,30 +492,34 @@ int main(int argc, char** argv) {
             preemptUs = std::chrono::microseconds(std::stoi(argv[++i]));
             continue;
         }
-        if (arg == "--use-lockfree-queue") {
-            queueType = ESchedulerQueue::LockFree;
-            continue;
-        }
-        if (arg == "--use-absl-mutex") {
-            queueType = ESchedulerQueue::AbslMutex;
+        if (arg == "--use-lockfree") {
+            schedulerType = ESchedulerType::LockFree;
             continue;
         }
         if (arg == "--use-std-mutex") {
-            queueType = ESchedulerQueue::StdMutex;
-            continue;
-        }
-        if (arg == "--use-absl-mailbox") {
-            queueType = ESchedulerQueue::AbslMailbox;
+            schedulerType = ESchedulerType::StdMutex;
             continue;
         }
         if (arg == "--use-std-mailbox") {
-            queueType = ESchedulerQueue::StdMailbox;
+            schedulerType = ESchedulerType::StdMailbox;
             continue;
         }
+#if HAVE_ABSEIL
+        if (arg == "--use-absl-mutex") {
+            schedulerType = ESchedulerType::AbslMutex;
+            continue;
+        }
+        if (arg == "--use-absl-mailbox") {
+            schedulerType = ESchedulerType::AbslMailbox;
+            continue;
+        }
+#endif
+#if HAVE_ASIO
         if (arg == "--use-asio") {
             schedulerType = ESchedulerType::Asio;
             continue;
         }
+#endif
         if (arg == "--without-latencies") {
             withLatencies = false;
             continue;
@@ -567,19 +532,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::variant<std::monostate, TScheduler, TAsioScheduler> scheduler;
-    switch (schedulerType) {
-        case ESchedulerType::Fast: {
-            auto& s = scheduler.emplace<1>(numThreads, preemptUs, queueType);
-            actor_scheduler::set_current_ptr(&s);
-            break;
-        }
-        case ESchedulerType::Asio: {
-            auto& s = scheduler.emplace<2>(numThreads, preemptUs);
-            actor_scheduler::set_current_ptr(&s.get_scheduler());
-            break;
-        }
-    }
+    auto scheduler = create_scheduler(schedulerType, numThreads, preemptUs);
+    actor_scheduler::set_current_ptr(scheduler.get());
 
     std::deque<TPingable> pingables;
     std::deque<TPinger> pingers;
