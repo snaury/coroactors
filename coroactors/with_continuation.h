@@ -12,54 +12,36 @@ namespace coroactors {
         template<class U, class Callback>
         friend class detail::with_continuation_awaiter;
 
-        explicit continuation(detail::continuation_state<T>* state) noexcept
+        explicit continuation(const intrusive_ptr<detail::continuation_state<T>>& state) noexcept
             : state(state)
         {
-            state->init_strong();
+            assert(state);
         }
 
     public:
         continuation() noexcept
-            : state(nullptr)
+            : state()
         {}
-
-        continuation(const continuation& rhs) noexcept
-            : state(rhs.state)
-        {
-            if (state) {
-                state->add_strong_ref();
-            }
-        }
 
         continuation(continuation&& rhs) noexcept
-            : state(std::exchange(rhs.state, nullptr))
-        {}
+            : state(std::move(rhs.state))
+        {
+            assert(!rhs.state);
+        }
 
         ~continuation() noexcept {
             if (state) {
-                state->release_strong_ref();
+                state->destroy();
             }
-        }
-
-        continuation& operator=(const continuation& rhs) noexcept {
-            auto* prev = state;
-            state = rhs.state;
-            if (state) {
-                state->add_strong_ref();
-            }
-            if (prev) {
-                prev->release_strong_ref();
-            }
-            return *this;
         }
 
         continuation& operator=(continuation&& rhs) noexcept {
             if (this != &rhs) [[likely]] {
-                auto* prev = state;
-                state = rhs.state;
-                rhs.state = nullptr;
+                auto prev = std::move(state);
+                state = std::move(rhs.state);
+                assert(!rhs.state);
                 if (prev) {
-                    prev->release_strong_ref();
+                    prev->destroy();
                 }
             }
             return *this;
@@ -69,15 +51,12 @@ namespace coroactors {
             return bool(state);
         }
 
-        friend bool operator==(const continuation& a, const continuation& b) noexcept {
-            return a.state == b.state;
+        friend bool operator<(const continuation& a, const continuation& b) noexcept {
+            return a.state < b.state;
         }
 
-        void reset() noexcept {
-            if (state) {
-                state->release_strong_ref();
-                state = nullptr;
-            }
+        friend bool operator==(const continuation& a, const continuation& b) noexcept {
+            return a.state == b.state;
         }
 
         /**
@@ -87,7 +66,9 @@ namespace coroactors {
          * and a `with_continuation_error` exception will be thrown instead.
          */
         void destroy() {
-            state->destroy();
+            if (state) {
+                state->destroy_explicit();
+            }
         }
 
         /**
@@ -162,7 +143,7 @@ namespace coroactors {
         }
 
     private:
-        detail::continuation_state<T>* state;
+        intrusive_ptr<detail::continuation_state<T>> state;
     };
 
     /**

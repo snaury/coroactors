@@ -153,7 +153,7 @@ TEST(WithContinuationTest, CompleteAsync) {
         EXPECT_EQ(await_ready_count, 1);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
-        suspended = c;
+        suspended = std::move(c);
     });
 
     // Must be suspended with continuation
@@ -197,7 +197,7 @@ TEST(WithContinuationTest, CompleteRaceWithState) {
         EXPECT_EQ(await_ready_count, 1);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
-        suspended = c;
+        suspended = std::move(c);
     });
 
     // Must resume and complete before returning
@@ -231,7 +231,7 @@ TEST(WithContinuationTest, CompleteRaceWithoutState) {
         EXPECT_EQ(await_ready_count, 1);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
-        suspended = c;
+        suspended = std::move(c);
     });
 
     // Must resume and complete before returning
@@ -365,7 +365,7 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     // Start the first actor function
     actor_with_continuation(context, stage, [&](continuation<> c) {
         EXPECT_EQ(stage, 2);
-        suspended = c;
+        suspended = std::move(c);
     }).detach();
 
     // It should initially block at context wait
@@ -456,7 +456,7 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
                     // - in with_continuation_awaiter (callback member)
                     // - the original lambda temporary is not destroyed yet!
                     EXPECT_EQ(refs, 4);
-                    suspended = c;
+                    suspended = std::move(c);
                 }),
             &refs));
 
@@ -467,7 +467,7 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
     ASSERT_EQ(refs, 3);
 
     // Destroy continuation
-    suspended.reset();
+    suspended.destroy();
 
     // Coroutine should finish with an exception
     EXPECT_FALSE(result.running());
@@ -486,7 +486,7 @@ TEST(WithContinuationTest, DestroyFromCallback) {
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 4);
-                    c.reset();
+                    c.destroy();
                 }),
             &refs));
 
@@ -510,7 +510,7 @@ TEST(WithContinuationTest, DestroyBottomUp) {
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
                     EXPECT_EQ(refs, 4);
-                    suspended = c;
+                    suspended = std::move(c);
                 }),
             &refs));
 
@@ -525,6 +525,9 @@ TEST(WithContinuationTest, DestroyBottomUp) {
 
     // Resuming a destroyed continuation is an error
     EXPECT_THROW(suspended.resume(), with_continuation_error);
+
+    // Trying to explicitly destroy it is an error too
+    EXPECT_THROW(suspended.destroy(), with_continuation_error);
 }
 
 TEST(WithContinuationTest, StopToken) {
@@ -540,7 +543,7 @@ TEST(WithContinuationTest, StopToken) {
             actor_wrapper(
                 actor_with_continuation(no_actor_context, stage,
                     [&](continuation<> c) {
-                        suspended = c;
+                        suspended = std::move(c);
                     }),
                 &refs)));
 
@@ -556,4 +559,19 @@ TEST(WithContinuationTest, StopToken) {
     suspended.resume();
     EXPECT_TRUE(result.success());
     EXPECT_EQ(refs, 0);
+}
+
+TEST(WithContinuationTest, ThrowFromCallback) {
+    struct custom_exception {};
+
+    auto r = packaged_awaitable(
+        []() -> actor<void> {
+            co_await no_actor_context();
+            co_await with_continuation([](continuation<> c) {
+                throw custom_exception{};
+            });
+        }());
+
+    EXPECT_FALSE(r.running());
+    EXPECT_THROW(*r, custom_exception);
 }

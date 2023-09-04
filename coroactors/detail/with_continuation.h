@@ -39,38 +39,7 @@ namespace coroactors::detail {
         continuation_state(const continuation_state&) = delete;
         continuation_state& operator=(const continuation_state&) = delete;
 
-        void add_strong_ref() noexcept {
-            strong_refcount_.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        void release_strong_ref() noexcept {
-            // Note: we need memory_order_acq_rel here, because thread 1 may
-            // start setting the result, but fail with an exception before it
-            // calls finish, decrement strong refcount (not zero yet), and
-            // pause before decrementing the full refcount. Then thread 2 would
-            // drop the strong refcount to zero and finally start destroying
-            // the coroutine. That coroutine needs the result modifications to
-            // happen before its destruction, and so we need release in thread 1
-            // and acquire in thread 2.
-            if (strong_refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                // The last strong owner marks continuation as destroyed,
-                // unless the caller finished with a value first (possibly in
-                // another thread).
-                destroy_strong();
-            }
-        }
-
-        void init_strong() noexcept {
-            intrusive_ptr_add_ref(this);
-            add_strong_ref();
-        }
-
-        void destroy_strong() noexcept {
-            destroy_continuation();
-            intrusive_ptr_release(this);
-        }
-
-        bool destroy_continuation() noexcept {
+        bool destroy() noexcept {
             void* addr = continuation.load(std::memory_order_relaxed);
             for (;;) {
                 if (addr == reinterpret_cast<void*>(MarkerFinished)) {
@@ -126,15 +95,15 @@ namespace coroactors::detail {
             return static_cast<status>(reinterpret_cast<uintptr_t>(addr));
         }
 
-        void destroy() {
-            if (!destroy_continuation()) {
+        void destroy_explicit() {
+            if (!destroy()) [[unlikely]] {
                 throw with_continuation_error("continuation was resumed or destroyed already");
             }
         }
 
         template<class... TArgs>
         void set_value(TArgs&&... args) {
-            if (!result_ptr) {
+            if (!result_ptr) [[unlikely]] {
                 throw with_continuation_error("continuation was resumed or destroyed already");
             }
             result_ptr->set_value(std::forward<TArgs>(args)...);
@@ -142,7 +111,7 @@ namespace coroactors::detail {
 
         template<class E>
         void set_exception(E&& e) {
-            if (!result_ptr) {
+            if (!result_ptr) [[unlikely]] {
                 throw with_continuation_error("continuation was resumed or destroyed already");
             }
             result_ptr->set_exception(std::forward<E>(e));
@@ -172,7 +141,7 @@ namespace coroactors::detail {
             // the user to make sure there is no race with both ends trying to
             // resume/destroy the same coroutine frame concurrently.
             // Note: we don't care if it was finished or destroyed before.
-            continuation.store(nullptr, std::memory_order_release);
+            continuation.store(reinterpret_cast<void*>(MarkerDestroyed), std::memory_order_release);
         }
 
         const stop_token& get_stop_token() const noexcept {
@@ -180,7 +149,6 @@ namespace coroactors::detail {
         }
 
     private:
-        std::atomic<size_t> strong_refcount_{ 0 };
         std::atomic<void*> continuation{ nullptr };
         result<T>* result_ptr;
         stop_token token;
@@ -212,10 +180,10 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token = {}) noexcept {
+        bool await_ready(stop_token token = {}) {
             state_.reset(new continuation_state<T>(
                 static_cast<result<T>*>(this), std::move(token)));
-            std::move(callback)(continuation<T>(state_.get()));
+            std::move(callback)(continuation<T>(state_));
             // Avoid suspending when the result is ready
             return state_->ready();
         }
