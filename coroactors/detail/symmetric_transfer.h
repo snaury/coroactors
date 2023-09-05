@@ -6,8 +6,7 @@
 
 namespace coroactors::detail {
 
-#if COROACTORS_USE_SYMMETRIC_TRANSFER
-    class symmetric {
+    class symmetric_native {
     public:
         using result_t = std::coroutine_handle<>;
 
@@ -39,8 +38,8 @@ namespace coroactors::detail {
             return h;
         }
     };
-#else
-    class symmetric {
+
+    class symmetric_emulated {
     public:
         /**
          * The return type from await_suspend to support symmetric transfer
@@ -51,13 +50,14 @@ namespace coroactors::detail {
          * Use instead of h.resume() to avoid recursive resume on transfers
          */
         static void resume(std::coroutine_handle<> h) {
-            running_guard guard;
+            std::coroutine_handle<> continuation;
+            running_guard guard(continuation);
             for (;;) {
                 h.resume();
                 if (!continuation) {
                     break;
                 }
-                h = std::coroutine_handle<>::from_address(continuation);
+                h = continuation;
                 continuation = nullptr;
             }
         }
@@ -68,7 +68,8 @@ namespace coroactors::detail {
          * Usually causes the coroutine stack to suspend and return to caller
          */
         static result_t noop() noexcept {
-            assert(!continuation && "Transferring to a noop coroutine with another transfer in progress");
+            assert((!current_loop || !*current_loop) &&
+                    "Transferring to a noop coroutine with another transfer in progress");
             return true;
         }
 
@@ -78,7 +79,8 @@ namespace coroactors::detail {
          * Usually causes the suspended coroutine to resume without recursion
          */
         static result_t self(std::coroutine_handle<>) noexcept {
-            assert(!continuation && "Transferring to a self coroutine with another transfer in progress");
+            assert((!current_loop || !*current_loop) &&
+                    "Transferring to a self coroutine with another transfer in progress");
             return false;
         }
 
@@ -87,9 +89,9 @@ namespace coroactors::detail {
          */
         static result_t transfer(std::coroutine_handle<> h) noexcept {
             assert(h && "Transferring to a nullptr coroutine");
-            if (running > 0) [[likely]] {
-                assert(!continuation && "Transferring to a coroutine with another transfer in progress");
-                continuation = h.address();
+            if (auto* loop = current_loop) [[likely]] {
+                assert(!*loop && "Transferring to a coroutine with another transfer in progress");
+                *loop = h;
             } else {
                 resume(h);
             }
@@ -104,9 +106,10 @@ namespace coroactors::detail {
          */
         static std::coroutine_handle<> intercept(bool suspended) noexcept {
             if (suspended) {
-                if (continuation) {
-                    std::coroutine_handle<> h = std::coroutine_handle<>::from_address(continuation);
-                    continuation = nullptr;
+                auto* loop = current_loop;
+                if (loop && *loop) {
+                    std::coroutine_handle<> h = *loop;
+                    *loop = nullptr;
                     return h;
                 } else {
                     return std::noop_coroutine();
@@ -128,18 +131,17 @@ namespace coroactors::detail {
 
     private:
         struct running_guard {
-            void* saved_continuation;
+            std::coroutine_handle<>* const saved_loop;
 
-            running_guard() noexcept {
-                saved_continuation = continuation;
-                continuation = nullptr;
-                ++running;
+            running_guard(std::coroutine_handle<>& handle) noexcept
+                : saved_loop(current_loop)
+            {
+                current_loop = &handle;
             }
 
             ~running_guard() noexcept {
-                --running;
-                assert(!continuation && "Symmetric transfer did not resume a continuation");
-                continuation = saved_continuation;
+                assert(!*current_loop && "Symmetric transfer did not resume a continuation");
+                current_loop = saved_loop;
             }
 
             running_guard(const running_guard&) = delete;
@@ -147,9 +149,13 @@ namespace coroactors::detail {
         };
 
     private:
-        static inline thread_local void* continuation{ nullptr };
-        static inline thread_local size_t running{ 0 };
+        static inline thread_local std::coroutine_handle<>* current_loop{ nullptr };
     };
+
+#if COROACTORS_USE_SYMMETRIC_TRANSFER
+    using symmetric = symmetric_native;
+#else
+    using symmetric = symmetric_emulated;
 #endif
 
 } // namespace coroactors::detail
