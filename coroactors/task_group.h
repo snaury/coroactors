@@ -1,5 +1,5 @@
 #pragma once
-#include <coroactors/detail/compiler.h>
+#include <coroactors/detail/config.h>
 #include <coroactors/detail/task_group.h>
 
 namespace coroactors {

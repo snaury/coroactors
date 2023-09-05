@@ -1,5 +1,5 @@
 #pragma once
-#include <coroactors/detail/compiler.h>
+#include <coroactors/detail/config.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -62,7 +62,8 @@ namespace coroactors::detail {
                 {
                     if (addr) {
                         result_ptr->set_exception(with_continuation_error("continuation was not resumed"));
-                        std::coroutine_handle<>::from_address(addr).resume();
+                        symmetric::resume(
+                            std::coroutine_handle<>::from_address(addr));
                     }
                     return true;
                 }

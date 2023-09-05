@@ -203,10 +203,12 @@ There are multiple known bugs in coroutine implementations, one glaring example 
 
 Symmetric transfer is absolutely critical for fast coroutine switching without unbounded stack growth, and it seems to work well with modern versions of clang. Unfortunately it causes unexpected stack explosions with gcc, just because you compiled your code a little differently (like without `-O2`, or with a sanitizer). It's not safe to use code that can randomly blow up, just because it's friday and your compiler didn't feel like optimizing.
 
+For this reason (and also for Windows support) coroactors don't use compiler support for symmetric transfer by default, and instead emulate it using a TLS variable resumed in a loop. This may be prone to errors however, and causes a performance hit in at least some microbenchmarks.
+
 And then every actor call has to allocate memory from the heap, because it cannot be elided due to pointers escaping to the scheduler, etc. There's a `task<T>` class that is a lot simpler and elides heap allocations, but it doesn't work in loops, and sometimes it's actually worse: suppose your `task<T>` coroutine calls 10 other `task<T>` methods that perfectly inline, etc. Unfortunately your initial `task<T>` will now allocate 10 times the heap space needed for a single call, because apparently clang cannot reuse memory between different invocations. :-/
 
 Coroutines still feel very immature, and it all feels like trying to solve your normal function calls, before you could even start solving complex concurrency related problems.
 
 ## Windows support
 
-Actors compile on Windows, but don't work (tested with Visual Studio 2022 so far), because many wrappers in coroactors destroy coroutine handles in their final_suspend (one way or another). It appears stack is already unwound when entering final suspend, but when destroy is called it unwinds again, causing double frees.
+Actors compile on Windows, but don't work without symmetric transfer emulation (tested with Visual Studio 2022 so far), because many wrappers in coroactors destroy coroutine handles in their `final_suspend` (one way or another). It appears when `await_suspend` returns `std::coroutine_handle<>` stack is already unwound when entering `final_suspend`, but when destroy is called it unwinds it again (often causing a double free), likely because coroutines are not fully suspended before the symmetric transfer variant of `await_suspend` is called. Symmetric transfer emulation appears to work well however.

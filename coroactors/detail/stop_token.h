@@ -1,6 +1,6 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/compiler.h>
+#include <coroactors/detail/config.h>
 #include <coroutine>
 
 #pragma once

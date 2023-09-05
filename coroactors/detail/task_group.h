@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/compiler.h>
+#include <coroactors/detail/config.h>
+#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -444,7 +445,7 @@ namespace coroactors::detail {
 
             void operator()() noexcept {
                 if (auto h = sink->await_cancel(true)) {
-                    h.resume();
+                    symmetric::resume(h);
                 }
             }
         };
@@ -504,7 +505,7 @@ namespace coroactors::detail {
                 // destroy it instead of resuming, unwinding frames back to
                 // us. Make sure we wake up awaiter with an empty result.
                 if (auto next = sink_->push(std::move(this->result_))) {
-                    next.resume();
+                    symmetric::resume(next);
                 }
             }
         }
@@ -519,13 +520,13 @@ namespace coroactors::detail {
             bool await_ready() noexcept { return false; }
 
             COROACTORS_AWAIT_SUSPEND
-            std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
+            symmetric::result_t await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
                 self.running = false;
                 auto sink = std::move(self.sink_);
                 auto next = sink->push(std::move(self.result_));
                 h.destroy();
-                return next;
+                return symmetric::transfer(next);
             }
 
             void await_resume() noexcept {}
@@ -539,7 +540,8 @@ namespace coroactors::detail {
             token_ = std::move(token);
             running = true;
             this->result_->set_index(index);
-            task_group_handle<T>::from_promise(*this).resume();
+            symmetric::resume(
+                task_group_handle<T>::from_promise(*this));
             return index;
         }
 

@@ -1,9 +1,10 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/awaiters.h>
-#include <coroactors/detail/compiler.h>
+#include <coroactors/detail/config.h>
 #include <coroactors/detail/intrusive_mailbox.h>
 #include <coroactors/detail/mailbox.h>
+#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <atomic>
 #include <cassert>
@@ -90,7 +91,8 @@ namespace coroactors::detail {
             if (addr) {
                 assert(addr != reinterpret_cast<void*>(MarkerSuccess));
                 assert(addr != reinterpret_cast<void*>(MarkerFailure));
-                std::coroutine_handle<>::from_address(addr).resume();
+                symmetric::resume(
+                    std::coroutine_handle<>::from_address(addr));
             }
         }
 

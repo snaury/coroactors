@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/detail/packaged_awaitable.h>
+#include <coroactors/detail/symmetric_transfer.h>
 #include <utility>
 
 namespace coroactors {
@@ -26,7 +27,7 @@ namespace coroactors {
             : handle(detail::make_packaged_awaitable<T>(std::forward<Awaitable>(awaitable)).handle)
         {
             handle.promise().bind(this, &handle);
-            handle.resume();
+            detail::symmetric::resume(handle);
         }
 
         packaged_awaitable(const packaged_awaitable&) = delete;

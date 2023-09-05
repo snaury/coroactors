@@ -2,6 +2,7 @@
 #include <coroactors/actor_context.h>
 #include <coroactors/detail/actor_context.h>
 #include <coroactors/detail/intrusive_mailbox.h>
+#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/stop_token.h>
 #include <optional>
 
@@ -70,7 +71,7 @@ namespace coroactors::detail {
 #endif
 
             enter_frame(frame);
-            frame->handle().resume();
+            symmetric::resume(frame->handle());
 
 #ifndef NDEBUG
             assert(saved_count == running_count());
