@@ -425,12 +425,30 @@ namespace coroactors::detail {
                 more = from_context->next_frame();
             }
 
+            auto from_continue = [from_context, more]() -> std::coroutine_handle<> {
+                if (!more || maybe_preempt(from_context, more)) {
+                    return std::noop_coroutine();
+                }
+
+                // The original context continues in this thread
+                enter_frame(more);
+                return more->handle();
+            };
+
             // Try running `frame` in this context. It will either lock and
             // give us a frame (likely the same we pushed, but not guaranteed),
             // which we will try running in the current thread, or it will be
             // added to the queue and we will try running some work from the
             // original context instead.
             if (context->push_frame(frame) && (frame = context->next_frame())) {
+                // Special case: check if scheduler is changing, in which case
+                // we must always post new frame to the new scheduler, since it
+                // likely runs in a different thread pool.
+                if (from_context && &from_context->scheduler != &context->scheduler) [[unlikely]] {
+                    post(frame);
+                    return from_continue();
+                }
+
                 // Check for preemption by this context. We do this either on
                 // the return path (see a comment above), or when switching
                 // from an empty context, because it should behave similar to
@@ -451,17 +469,7 @@ namespace coroactors::detail {
                 return frame->handle();
             }
 
-            if (!more) {
-                return std::noop_coroutine();
-            }
-
-            if (maybe_preempt(from_context, more)) {
-                return std::noop_coroutine();
-            }
-
-            // The original context continues in this thread
-            enter_frame(more);
-            return more->handle();
+            return from_continue();
         }
 
         std::coroutine_handle<> switch_context(actor_context_frame* frame,

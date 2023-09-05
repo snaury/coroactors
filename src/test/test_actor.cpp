@@ -442,3 +442,39 @@ TEST(TestActor, StartNestedActorsBeforeContext) {
     EXPECT_EQ(scheduler.queue.size(), 0u);
     EXPECT_EQ(*r, 100);
 }
+
+TEST(TestActor, SwitchBetweenSchedulers) {
+    int stage = 0;
+    test_scheduler scheduler1;
+    actor_context context1(scheduler1);
+    test_scheduler scheduler2;
+    actor_context context2(scheduler2);
+
+    auto r = packaged_awaitable(
+        [](int& stage, const actor_context& context1, const actor_context& context2) -> actor<void> {
+            stage = 1;
+            co_await context1();
+            stage = 2;
+            co_await [](int& stage, const actor_context& context2) -> actor<void> {
+                stage = 3;
+                co_await context2();
+                stage = 4;
+            }(stage, context2);
+            stage = 5;
+        }(stage, context1, context2));
+
+    EXPECT_EQ(stage, 1);
+    ASSERT_EQ(scheduler1.queue.size(), 1u);
+    EXPECT_EQ(scheduler1.queue[0].deferred, false);
+    scheduler1.run_next();
+    EXPECT_EQ(stage, 3);
+    ASSERT_EQ(scheduler2.queue.size(), 1u);
+    EXPECT_EQ(scheduler2.queue[0].deferred, false);
+    scheduler2.run_next();
+    EXPECT_EQ(stage, 4);
+    ASSERT_EQ(scheduler1.queue.size(), 1u);
+    EXPECT_EQ(scheduler1.queue[0].deferred, false);
+    scheduler1.run_next();
+    EXPECT_EQ(stage, 5);
+    EXPECT_TRUE(r.success());
+}
