@@ -1,5 +1,6 @@
 #include <coroutine>
 #include <exception>
+#include <cstdio>
 
 struct my_awaiter {
     my_awaiter() {
@@ -77,9 +78,19 @@ struct task {
             printf("promise %p initial suspend\n", this);
             return std::suspend_never{};
         }
+        struct final_suspend_t {
+            bool await_ready() noexcept { return false; }
+            void await_resume() noexcept { /* never called */ }
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                printf("promise %p final await_suspend start\n", &h.promise());
+                h.destroy();
+                printf("promise %p final await_suspend end\n", &h.promise());
+                return std::noop_coroutine();
+            }
+        };
         auto final_suspend() noexcept {
             printf("promise %p final suspend\n", this);
-            return std::suspend_never{};
+            return final_suspend_t{};
         }
         void unhandled_exception() noexcept { std::terminate(); }
         void return_value(int) {

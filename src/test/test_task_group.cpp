@@ -7,15 +7,16 @@
 #include <coroactors/actor.h>
 #include <coroactors/packaged_awaitable.h>
 
+#include <algorithm>
 #include <deque>
-#include <vector>
 #include <functional>
-#include <optional>
-#include <mutex>
-#include <thread>
 #include <latch>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 using namespace coroactors;
 

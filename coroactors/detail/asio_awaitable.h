@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/compiler.h>
 #include <coroactors/intrusive_ptr.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/async_result.hpp>
@@ -375,7 +376,7 @@ namespace coroactors::detail {
             return false;
         }
 
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         bool await_suspend(std::coroutine_handle<> c) {
             return result->set_continuation(c);
         }

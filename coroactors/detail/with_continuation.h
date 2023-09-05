@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/compiler.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -188,7 +189,7 @@ namespace coroactors::detail {
             return state_->ready();
         }
 
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         bool await_suspend(std::coroutine_handle<> c) {
             switch (state_->set_continuation(c)) {
             case status::success:

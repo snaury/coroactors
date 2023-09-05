@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/compiler.h>
 #include <coroutine>
 
 #pragma once
@@ -81,7 +82,7 @@ namespace coroactors::detail {
         }
 
         template<class Promise>
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
             noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
             requires has_await_suspend<Awaiter, Promise>

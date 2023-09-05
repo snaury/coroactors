@@ -2,6 +2,7 @@
 #include <coroactors/actor_context.h>
 #include <coroactors/actor_error.h>
 #include <coroactors/detail/actor_context_frame.h>
+#include <coroactors/detail/compiler.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -180,6 +181,7 @@ namespace coroactors::detail {
             static bool await_ready() noexcept { return false; }
             static void await_resume() noexcept { /* never called */ }
 
+            COROACTORS_AWAIT_SUSPEND
             static std::coroutine_handle<> await_suspend(actor_continuation<T> h) noexcept {
                 auto& p = h.promise();
                 auto state = std::exchange(p.state, actor_promise_state::finished);
@@ -281,7 +283,7 @@ namespace coroactors::detail {
                 return type == ESwitchContext::Ready;
             }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
 
@@ -368,7 +370,7 @@ namespace coroactors::detail {
         struct yield_context_awaiter_t {
             bool await_ready() noexcept { return false; }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
                 return self.context.manager().yield(&self);
@@ -386,7 +388,7 @@ namespace coroactors::detail {
         struct preempt_context_awaiter_t {
             bool await_ready() noexcept { return false; }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(actor_continuation<T> c) noexcept {
                 auto& self = c.promise();
                 return self.context.manager().yield(&self);
@@ -454,7 +456,7 @@ namespace coroactors::detail {
                 }
             }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 // Note: we allocate a wrapper in this method, so not noexcept
                 // noexcept(has_noexcept_await_suspend<Awaiter>)
@@ -574,7 +576,7 @@ namespace coroactors::detail {
                 return ready && new_context == self.context;
             }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(actor_continuation<T> c)
                 // Note: we allocate a wrapper in this method, so not noexcept
                 // noexcept(has_noexcept_await_suspend<Awaiter>)
@@ -696,7 +698,7 @@ namespace coroactors::detail {
             }
 
             template<class Promise>
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
                 noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
                 requires has_await_suspend<Awaiter, Promise>
@@ -762,7 +764,7 @@ namespace coroactors::detail {
         }
 
         template<class Promise>
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c);
@@ -809,7 +811,7 @@ namespace coroactors::detail {
         }
 
         template<class Promise>
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> c) noexcept {
             auto& p = handle.promise();
             p.set_continuation(c);

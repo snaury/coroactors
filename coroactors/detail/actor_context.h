@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/actor_scheduler.h>
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/compiler.h>
 #include <coroactors/detail/intrusive_mailbox.h>
 #include <coroactors/detail/mailbox.h>
 #include <coroactors/intrusive_ptr.h>
@@ -24,7 +25,7 @@ namespace coroactors::detail {
         friend actor_context_frame;
         friend actor_context_manager;
 
-        using mailbox_t = class intrusive_mailbox<actor_context_frame>;
+        using mailbox_t = intrusive_mailbox<actor_context_frame>;
 
     public:
         explicit actor_context_state(class actor_scheduler& s)
@@ -153,7 +154,7 @@ namespace coroactors::detail {
             }
         }
 
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         bool await_suspend(std::coroutine_handle<> c) noexcept {
             return context->set_continuation(c);
         }
@@ -236,7 +237,7 @@ namespace coroactors::detail {
         }
 
         template<class Promise>
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
             noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
             requires has_await_suspend<Awaiter, Promise>

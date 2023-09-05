@@ -42,7 +42,7 @@ public:
         : context(scheduler)
     {}
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     actor<int> increment() {
         co_await context();
         co_return ++value_;
@@ -101,18 +101,18 @@ public:
         , counter(counter)
     {}
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     actor<int> get_const_immediate() const {
         co_return 42;
     }
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     actor<int> get_const_context() const {
         co_await context();
         co_return 42;
     }
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     actor<int> get_indirect() const {
         co_await context();
         co_return co_await counter.increment();
@@ -165,7 +165,7 @@ public:
         : counter(counter)
     {}
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     void run_const(benchmark::State& state) {
         for (auto _ : state) {
             int value = counter.get_const();
@@ -174,7 +174,7 @@ public:
         state.SetItemsProcessed(state.iterations());
     }
 
-    __attribute__((__noinline__))
+    COROACTORS_NOINLINE
     void run_direct(benchmark::State& state) {
         for (auto _ : state) {
             int value = counter.increment();

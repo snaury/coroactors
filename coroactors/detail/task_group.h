@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
+#include <coroactors/detail/compiler.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -391,7 +392,7 @@ namespace coroactors::detail {
             return false;
         }
 
-        __attribute__((__noinline__))
+        COROACTORS_AWAIT_SUSPEND
         bool await_suspend(std::coroutine_handle<> h) noexcept {
             suspended = true;
             // Note: there are two possible pathways for an empty queue here:
@@ -517,6 +518,7 @@ namespace coroactors::detail {
         struct final_suspend_t {
             bool await_ready() noexcept { return false; }
 
+            COROACTORS_AWAIT_SUSPEND
             std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
                 self.running = false;
@@ -562,7 +564,7 @@ namespace coroactors::detail {
             }
 
             template<class Promise>
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
                 noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
                 requires has_await_suspend<Awaiter, Promise>

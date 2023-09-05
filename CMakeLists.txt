@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(coroactors LANGUAGES CXX)
 
+cmake_policy(PUSH)
+cmake_policy(VERSION 3.15...3.24)
+
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(COROACTORS_IS_ROOT ON)
 else()
@@ -41,6 +44,21 @@ add_library(coroactors INTERFACE)
 target_include_directories(coroactors INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(COROACTORS_IS_ROOT)
+    include(FetchContent)
+
+    # Use system gtest or download from github when unavailable
+    # Unfortunately FIND_PACKAGE_ARGS is not available in cmake 3.22 :(
+    find_package(googletest QUIET NAMES GTest)
+    if(NOT googletest_FOUND)
+        FetchContent_Declare(
+            googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+        )
+        # For Windows: Prevent overriding the parent project's compiler/linker settings
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+    endif()
+
     # Some targets require asio to build
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
@@ -61,3 +79,5 @@ if(COROACTORS_IS_ROOT)
 
     add_subdirectory(src)
 endif()
+
+cmake_policy(POP)

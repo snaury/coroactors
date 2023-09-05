@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/compiler.h>
 #include <coroactors/detail/task_group.h>
 
 namespace coroactors {
@@ -113,7 +114,7 @@ namespace coroactors {
                 return sink->await_ready();
             }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             bool await_suspend(std::coroutine_handle<> c) noexcept {
                 suspended = true;
                 return sink->await_suspend(c);
@@ -167,7 +168,7 @@ namespace coroactors {
                 return sink->await_ready();
             }
 
-            __attribute__((__noinline__))
+            COROACTORS_AWAIT_SUSPEND
             bool await_suspend(std::coroutine_handle<> c) noexcept {
                 suspended = true;
                 return sink->await_suspend(c);

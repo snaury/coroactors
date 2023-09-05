@@ -65,7 +65,7 @@ public:
     }
 
     template<class Promise>
-    __attribute__((__noinline__))
+    COROACTORS_AWAIT_SUSPEND
     decltype(auto) await_suspend(std::coroutine_handle<Promise> c) {
         ++await_suspend_count;
         if (await_suspend_hook) {
