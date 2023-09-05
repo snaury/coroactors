@@ -48,8 +48,8 @@ if(COROACTORS_IS_ROOT)
 
     # Use system gtest or download from github when unavailable
     # Unfortunately FIND_PACKAGE_ARGS is not available in cmake 3.22 :(
-    find_package(googletest QUIET NAMES GTest)
-    if(NOT googletest_FOUND)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
         FetchContent_Declare(
             googletest
             URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
@@ -57,6 +57,20 @@ if(COROACTORS_IS_ROOT)
         # For Windows: Prevent overriding the parent project's compiler/linker settings
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googletest)
+    endif()
+
+    # Use system google-benchmark or download from github when unavailable
+    find_package(benchmark)
+    if(NOT benchmark_FOUND)
+        FetchContent_Declare(
+            googlebenchmark
+            URL https://github.com/google/benchmark/archive/refs/tags/v1.8.3.zip
+        )
+        set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        #set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+        #set(BENCHMARK_ENABLE_ASSEMBLY_TESTS OFF CACHE BOOL "" FORCE)
+        #set(BENCHMARK_USE_BUNDLED_GTEST OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googlebenchmark)
     endif()
 
     # Some targets require asio to build
