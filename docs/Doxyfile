@@ -1,7 +1,6 @@
 PROJECT_NAME           = CoroActors
-OUTPUT_DIRECTORY       = doc
 JAVADOC_AUTOBRIEF      = YES
 BUILTIN_STL_SUPPORT    = YES
-INPUT                  = coroactors
+INPUT                  = ../coroactors
 RECURSIVE              = YES
-EXCLUDE                = coroactors/detail
+EXCLUDE                = ../coroactors/detail
