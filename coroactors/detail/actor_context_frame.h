@@ -18,7 +18,7 @@ namespace coroactors::detail {
      * Usually a base class of a coroutine promise that runs in an actor context
      */
     class actor_context_frame
-        : public intrusive_mailbox_node<actor_context_frame>
+        : public intrusive_mailbox_node
     {
         friend actor_context_manager;
 

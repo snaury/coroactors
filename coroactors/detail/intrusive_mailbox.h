@@ -5,21 +5,17 @@
 
 namespace coroactors::detail {
 
-    template<class Node>
-    class intrusive_mailbox;
-
     /**
      * Base class for intrusive mailbox nodes
      */
-    template<class Node>
     class intrusive_mailbox_node {
-        friend intrusive_mailbox<Node>;
+        template<class Node>
+        friend class intrusive_mailbox;
 
     public:
         intrusive_mailbox_node() = default;
 
     private:
-        // Note: initially uninitialized
         std::atomic<void*> next;
     };
 
@@ -28,7 +24,7 @@ namespace coroactors::detail {
      */
     template<class Node>
     class intrusive_mailbox {
-        using node = intrusive_mailbox_node<Node>;
+        using node = intrusive_mailbox_node;
 
         static constexpr uintptr_t MarkerUnlocked = 1;
 
@@ -92,7 +88,18 @@ namespace coroactors::detail {
          * the mailbox.
          */
         Node* pop() noexcept {
-            auto [head, next] = get_or_unlock();
+            auto [head, next] = pop_impl<true>();
+            if (head) {
+                head_ = next;
+            }
+            return static_cast<Node*>(head);
+        }
+
+        /**
+         * Tries to pop the next node from the mailbox without unlocking
+         */
+        Node* try_pop() noexcept {
+            auto [head, next] = pop_impl<false>();
             if (head) {
                 head_ = next;
             }
@@ -102,7 +109,7 @@ namespace coroactors::detail {
         /**
          * Tries to lock an empty mailbox without pushing new nodes
          *
-         * Returns true on success, false when locked or not empty.
+         * Returns true on success, false when already locked (or will be soon).
          */
         bool try_lock() noexcept {
             // This is a bit subtle, but stub_'s next is MarkerUnlocked only
@@ -125,10 +132,11 @@ namespace coroactors::detail {
         /**
          * Tries to unlock a locked and empty mailbox without removing a node
          *
-         * Returns true on success, false when the mailbox is not empty.
+         * Returns true on success, or false when the mailbox is not empty and
+         * there's an unblocked node that is guaranteed to be removable.
          */
         bool try_unlock() noexcept {
-            auto [head, next] = get_or_unlock();
+            auto [head, next] = pop_impl<true>();
             return head == nullptr;
         }
 
@@ -154,42 +162,6 @@ namespace coroactors::detail {
                 stub_.next.store(nullptr, std::memory_order_relaxed);
                 head_ = head = reinterpret_cast<node*>(marker);
             }
-            return static_cast<Node*>(head);
-        }
-
-        /**
-         * Tries to pop the next node from the mailbox without unlocking
-         */
-        Node* try_pop() noexcept {
-            // Note: it's get_or_unlock() but without unlock, see comments there
-            node* head = head_;
-            void* marker = head->next.load(std::memory_order_acquire);
-            if (head == &stub_) {
-                if (marker == nullptr) {
-                    // When mailbox is empty we don't unlock
-                    return nullptr;
-                }
-                assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
-                // Remove the stub and move head to the first published item
-                stub_.next.store(nullptr, std::memory_order_relaxed);
-                head_ = head = reinterpret_cast<node*>(marker);
-                marker = head->next.load(std::memory_order_acquire);
-            }
-            if (marker == nullptr) {
-                node* last = tail_.load(std::memory_order_relaxed);
-                if (head == last) {
-                    assert(stub_.next.load(std::memory_order_relaxed) == nullptr);
-                    if (tail_.compare_exchange_strong(last, &stub_, std::memory_order_release)) {
-                        // We don't update head's next since it's removed immediately
-                        head_ = &stub_;
-                        return static_cast<Node*>(head);
-                    }
-                }
-                // When there is a concurrent push we don't unlock
-                return nullptr;
-            }
-            assert(marker && marker != reinterpret_cast<void*>(MarkerUnlocked));
-            head_ = reinterpret_cast<node*>(marker);
             return static_cast<Node*>(head);
         }
 
@@ -222,7 +194,21 @@ namespace coroactors::detail {
         }
 
     private:
-        std::tuple<node*, node*> get_or_unlock() noexcept {
+        /**
+         * Implementation of various forms of head node removal or unlocking
+         *
+         * Tries to make it safe to remove the current mailbox head node, and
+         * returns a [head, next] pair, where head may be removed and replaced
+         * with the next pointer. Returns head == nullptr when the mailbox is
+         * either empty, or the head node is blocked by a concurrent push and
+         * cannot be removed.
+         *
+         * When the Unlock template parameter is true the mailbox is atomically
+         * unlocked when the mailbox is either empty or the current head cannot
+         * be removed.
+         */
+        template<bool Unlock>
+        std::tuple<node*, node*> pop_impl() noexcept {
             node* head = head_;
             // Note: acquire synchronizes with push publishing via next
             void* marker = head->next.load(std::memory_order_acquire);
@@ -230,14 +216,19 @@ namespace coroactors::detail {
             if (head == &stub_) {
                 // When mailbox is empty we try to unlock
                 if (marker == nullptr) {
-                    if (head->next.compare_exchange_strong(
-                            marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel))
-                    {
-                        // Successfully unlocked the mailbox
+                    if constexpr (!Unlock) {
+                        // Unlock disabled, return empty
                         return { nullptr, nullptr };
+                    } else {
+                        if (head->next.compare_exchange_strong(
+                                marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel))
+                        {
+                            // Successfully unlocked the mailbox
+                            return { nullptr, nullptr };
+                        }
+                        // Lost the race: next is updated with an inserted item
+                        assert(marker != nullptr);
                     }
-                    // Lost the race: next is updated with an inserted item
-                    assert(marker != nullptr);
                 }
                 assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
                 // Remove the stub and move head to the first published item
@@ -267,13 +258,18 @@ namespace coroactors::detail {
                 // by a different thread. Try to cas it to MarkerUnlocked,
                 // which will either fail because push already finished, or
                 // succeed and push will lock the mailbox.
-                if (head->next.compare_exchange_strong(
-                        marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel))
-                {
-                    // Successfully unlocked the mailbox
-                    return { nullptr, nullptr };
+                if constexpr (!Unlock) {
+                    // Unlock disabled, return blocked head
+                    return { nullptr, head };
+                } else {
+                    if (head->next.compare_exchange_strong(
+                            marker, reinterpret_cast<void*>(MarkerUnlocked), std::memory_order_acq_rel))
+                    {
+                        // Successfully unlocked the mailbox
+                        return { nullptr, nullptr };
+                    }
+                    // Lost the race: next item's push has finished, safe to remove
                 }
-                // Lost the race: next item's push has finished, safe to remove
             }
             assert(marker && marker != reinterpret_cast<void*>(MarkerUnlocked));
             return { head, reinterpret_cast<node*>(marker) };

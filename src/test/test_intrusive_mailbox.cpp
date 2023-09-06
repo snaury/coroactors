@@ -3,7 +3,7 @@
 
 using namespace coroactors;
 
-struct node_t : public detail::intrusive_mailbox_node<node_t> {
+struct node_t : public detail::intrusive_mailbox_node {
     int value;
 
     explicit node_t(int value) : value(value) {}
