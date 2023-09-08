@@ -19,8 +19,11 @@ if(COROACTORS_IS_ROOT)
     # But don't want gnu++20
     set(CMAKE_CXX_EXTENSIONS OFF)
 
-    #set(CMAKE_CXX_FLAGS_RELEASE -O3)
-    #set(CMAKE_CXX_FLAGS_RELWITHDEBINFO -O3 -g)
+    if(NOT MSVC)
+        set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wpedantic -Werror")
+        #set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+        #set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")
+    endif()
 
     set(SANITIZE "off" CACHE STRING "Enable sanitizier: address/thread/memory/undefined")
     option(WITH_COVERAGE "Compile with coverage profiling" OFF)
@@ -60,7 +63,7 @@ if(COROACTORS_IS_ROOT)
     endif()
 
     # Use system google-benchmark or download from github when unavailable
-    find_package(benchmark)
+    find_package(benchmark QUIET)
     if(NOT benchmark_FOUND)
         FetchContent_Declare(
             googlebenchmark

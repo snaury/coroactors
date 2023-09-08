@@ -567,7 +567,7 @@ TEST(WithContinuationTest, ThrowFromCallback) {
     auto r = packaged_awaitable(
         []() -> actor<void> {
             co_await no_actor_context();
-            co_await with_continuation([](continuation<> c) {
+            co_await with_continuation([](continuation<>) {
                 throw custom_exception{};
             });
         }());

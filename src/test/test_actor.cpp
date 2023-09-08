@@ -302,7 +302,7 @@ struct aborted_suspend {
         return false;
     }
 
-    bool await_suspend(std::coroutine_handle<> h) {
+    bool await_suspend(std::coroutine_handle<>) {
         // Abort suspend and resume
         return false;
     }
@@ -336,7 +336,7 @@ struct throw_during_suspend {
         return false;
     }
 
-    void await_suspend(std::coroutine_handle<> h) {
+    void await_suspend(std::coroutine_handle<>) {
         throw std::runtime_error("throw during suspend");
     }
 

@@ -12,7 +12,7 @@ namespace coroactors {
      */
     class actor_scheduler {
     protected:
-        ~actor_scheduler() = default;
+        virtual ~actor_scheduler() = default;
 
     public:
         using clock_type = std::chrono::steady_clock;
@@ -67,6 +67,8 @@ namespace coroactors {
          */
         virtual void schedule(schedule_callback_type c, time_point d, stop_token t) {
             c(false); // don't support timers by default
+            (void)d;
+            (void)t;
         }
 
     public:
