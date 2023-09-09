@@ -196,7 +196,7 @@ namespace coroactors::detail {
                             // waiter, now we just need to unlock. In the process
                             // of unlocking we may find more waiters to lock, in
                             // which case this would be more waiters behind us.
-                            pending = UnlockWaiting(head);
+                            pending = unlock_waiting(head);
                             pendingLast = pending ? find_last(pending) : nullptr;
 
                             // Wait until someone wakes us up
@@ -449,7 +449,7 @@ namespace coroactors::detail {
          * Unlocks after installing a waiter, setting head_ to the new head.
          * Returns existing waiter list queued for locking the queue.
          */
-        blocking_queue_waiter* UnlockWaiting(node* head) noexcept {
+        blocking_queue_waiter* unlock_waiting(node* head) noexcept {
             void* headValue = head_.exchange(head, std::memory_order_acq_rel);
             if (headValue) {
                 assert(is_waiter(headValue));
