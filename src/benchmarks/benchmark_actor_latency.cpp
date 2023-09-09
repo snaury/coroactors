@@ -9,6 +9,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <variant>
+#include <random>
 
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
@@ -210,7 +211,7 @@ private:
 };
 #endif
 
-static std::atomic<size_t> mailbox_wakeups{ 0 };
+static std::atomic<size_t> g_wakeups{ 0 };
 
 template<class T>
 class TBlockingQueueWithStdMailbox;
@@ -228,7 +229,7 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
+            g_wakeups.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock l(Lock);
             MailboxLocked = true;
             if (Waiters > 0) {
@@ -311,7 +312,7 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            mailbox_wakeups.fetch_add(1, std::memory_order_relaxed);
+            g_wakeups.fetch_add(1, std::memory_order_relaxed);
             absl::MutexLock l(&Lock);
             MailboxLocked = true;
         }
@@ -372,6 +373,7 @@ enum class ESchedulerType {
 #if HAVE_ASIO
     Asio,
 #endif
+    WorkStealing,
 };
 
 template<template <class> typename BlockingQueue>
@@ -445,6 +447,359 @@ public:
 };
 #endif
 
+class WorkStealingScheduler
+    : public actor_scheduler
+{
+private:
+    using mailbox_t = detail::intrusive_mailbox<actor_scheduler_runnable>;
+
+    static constexpr size_t max_local_tasks = 256;
+    static constexpr uint32_t task_index_mask = 255;
+
+    struct thread_state {
+        WorkStealingScheduler* scheduler;
+        size_t thread_count;
+
+        // The only reason these are atomic is to make it possible to atomically
+        // read them while racing with other threads. All operations on these
+        // atomics are relaxed.
+        std::atomic<actor_scheduler_runnable*> local_queue[max_local_tasks];
+        // Packed head and tail indexes to simplify consistent load and cas
+        std::atomic<uint64_t> local_queue_head_tail;
+        // The number of processed local tasks
+        size_t local_processed = 0;
+        // Random state for stealing
+        std::mt19937 random_;
+
+        TTime preempt_deadline{};
+
+        explicit thread_state(WorkStealingScheduler* self, size_t thread_count)
+            : scheduler(self)
+            , thread_count(thread_count)
+        {}
+    };
+
+public:
+    WorkStealingScheduler(size_t thread_count, std::chrono::microseconds preempt_us)
+        : preempt_us_(preempt_us)
+        , global_queue_(mailbox_t::initially_unlocked)
+    {
+        for (size_t i = 0; i < thread_count; ++i) {
+            thread_states_.emplace_back(this, thread_count);
+        }
+        for (size_t i = 0; i < thread_count; ++i) {
+            threads_.emplace_back([this, state = &thread_states_[i]] {
+                this->run_worker(state);
+            });
+        }
+    }
+
+    ~WorkStealingScheduler() {
+        {
+            std::unique_lock l(global_queue_lock_);
+            shutdown_ = true;
+            have_tasks_.notify_all();
+        }
+
+        for (auto& thread : threads_) {
+            thread.join();
+        }
+    }
+
+    void post(actor_scheduler_runnable* r) override {
+        auto* state = local_state;
+        if (state && state->scheduler == this) [[likely]] {
+            if (push_to_local(state, r)) {
+                // Other threads may want to steal our tasks
+                wake_blocked_thread_fast();
+                return;
+            }
+        }
+        push_to_global(r, /* wake */ true);
+    }
+
+    void defer(actor_scheduler_runnable* r) override {
+        auto* state = local_state;
+        if (state && state->scheduler == this) [[likely]] {
+            if (push_to_local(state, r)) {
+                // Note: we don't wake up threads!
+                return;
+            }
+            push_to_global(r, /* wake */ false);
+        } else {
+            push_to_global(r, /* wake */ true);
+        }
+    }
+
+    bool preempt() override {
+        auto* state = local_state;
+        if (state && state->scheduler == this) [[likely]] {
+            return TClock::now() >= state->preempt_deadline;
+        }
+        // Preempt all unexpected threads
+        return true;
+    }
+
+private:
+    void init_seed(thread_state* state) {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto a = now.time_since_epoch().count();
+        auto b = std::this_thread::get_id();
+        auto c = std::hash<decltype(b)>()(b);
+        state->random_.seed(a + c);
+    }
+
+    void run_worker(thread_state* state) noexcept {
+        init_seed(state);
+
+        local_state = state;
+        while (auto* r = next_task(state)) {
+            state->preempt_deadline = TClock::now() + preempt_us_;
+            r->run();
+        }
+        local_state = nullptr;
+    }
+
+    actor_scheduler_runnable* next_task(thread_state* state) {
+        // Check global queue periodically
+        if (state->local_processed >= state->thread_count) {
+            state->local_processed = 0;
+            if (auto* r = fast_global_task()) {
+                return r;
+            }
+        }
+
+        if (auto* r = pop_from_local(state)) {
+            state->local_processed++;
+            return r;
+        }
+
+        // Try stealing from other threads
+        if (auto* r = try_stealing(state)) {
+            state->local_processed++;
+            return r;
+        }
+
+        // We couldn't find anything, block on the global queue
+        std::unique_lock l(global_queue_lock_);
+        bool did_block = false;
+        for (;;) {
+            if (global_queue_locked_.load(std::memory_order_relaxed)) {
+                if (auto* r = global_queue_.pop()) {
+                    if (global_queue_.try_unlock()) {
+                        global_queue_locked_.store(false, std::memory_order_relaxed);
+                    }
+                    if (did_block) {
+                        // Daisy chain a possibly consumed wake up, because
+                        // there's either a locked global queue, or may be a
+                        // local task that we didn't steal.
+                        daisy_chain_notify();
+                    }
+                    state->local_processed = 0;
+                    return r;
+                }
+                global_queue_locked_.store(false, std::memory_order_relaxed);
+            }
+
+            // Block until there are either local or global tasks
+            blocked_threads_.fetch_add(1, std::memory_order_relaxed);
+            do {
+                // Try stealing again before actually blocking
+                if (auto* r = try_stealing(state)) {
+                    blocked_threads_.fetch_sub(1, std::memory_order_relaxed);
+                    // There could be more work in local queues
+                    daisy_chain_notify();
+                    state->local_processed++;
+                    return r;
+                }
+                // On shutdown stop when there are no tasks
+                if (shutdown_) {
+                    return nullptr;
+                }
+                // Block until someone wakes us up
+                have_tasks_.wait(l);
+            } while (!global_queue_locked_.load(std::memory_order_relaxed));
+            blocked_threads_.fetch_sub(1, std::memory_order_relaxed);
+            did_block = true;
+        }
+    }
+
+    actor_scheduler_runnable* fast_global_task() {
+        // Don't lock the mutex when we know the global queue is empty
+        if (!global_queue_locked_.load(std::memory_order_relaxed)) {
+            return nullptr;
+        }
+
+        std::unique_lock l(global_queue_lock_);
+        if (!global_queue_locked_.load(std::memory_order_relaxed)) {
+            return nullptr;
+        }
+
+        auto* r = global_queue_.pop();
+        if (!r || global_queue_.try_unlock()) {
+            global_queue_locked_.store(false, std::memory_order_relaxed);
+        }
+        return r;
+    }
+
+    actor_scheduler_runnable* try_stealing(thread_state* state) {
+        uint32_t pos = state->random_();
+        for (size_t i = 0; i < state->thread_count; ++i, pos += 1) {
+            thread_state* from = &thread_states_[pos % state->thread_count];
+            if (state != from) {
+                if (auto* r = steal_from_local(state, from)) {
+                    return r;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+private:
+    static uint64_t pack_head_tail(uint32_t head, uint32_t tail) {
+        return (uint64_t(head) << 32) | tail;
+    }
+
+    static std::tuple<uint32_t, uint32_t> unpack_head_tail(uint64_t value) {
+        return { (value >> 32), (value & uint32_t(-1)) };
+    }
+
+    actor_scheduler_runnable* pop_from_local(thread_state* state) {
+        auto head_tail = state->local_queue_head_tail.load(std::memory_order_relaxed);
+        for (;;) {
+            auto [head, tail] = unpack_head_tail(head_tail);
+            if (head == tail) {
+                return nullptr;
+            }
+            actor_scheduler_runnable* r = state->local_queue[head & task_index_mask].load(std::memory_order_relaxed);
+            // Note: we don't need any synchronization here, because only the
+            // current thread ever writes to the local queue and reordering
+            // should be ok.
+            if (state->local_queue_head_tail.compare_exchange_strong(head_tail,
+                    pack_head_tail(head + 1, tail), std::memory_order_relaxed))
+            {
+                return r;
+            }
+            // Lost the race with a stealer, head_tail is reloaded
+        }
+    }
+
+    bool push_to_local(thread_state* state, actor_scheduler_runnable* r) {
+        // Note: tail is only modified locally, no synchronization needed
+        // And while head may be updated by a stealer, we only use it for
+        // determining if there's enough capacity, nothing else.
+        auto head_tail = state->local_queue_head_tail.load(std::memory_order_relaxed);
+        auto [head, tail] = unpack_head_tail(head_tail);
+        if (uint32_t(tail - head) >= max_local_tasks) {
+            return false;
+        }
+        state->local_queue[tail & task_index_mask].store(r, std::memory_order_relaxed);
+        // We want to increment tail without changing head as a single increment
+        // This computes a wrapping difference that will make tail = tail + 1
+        // even when other threads are modifying head concurrently.
+        uint64_t increment = pack_head_tail(0, tail + 1) - pack_head_tail(0, tail);
+        // Note: release synchronizes with other threads stealing tasks
+        state->local_queue_head_tail.fetch_add(increment, std::memory_order_release);
+        return true;
+    }
+
+    actor_scheduler_runnable* steal_from_local(thread_state* state, thread_state* from) {
+        auto our_head_tail = state->local_queue_head_tail.load(std::memory_order_relaxed);
+        auto [our_head, our_tail] = unpack_head_tail(our_head_tail);
+        assert(our_head == our_tail);
+        // Note: acquire synchronizes with push_to_local
+        auto their_head_tail = from->local_queue_head_tail.load(std::memory_order_acquire);
+        for (;;) {
+            auto [their_head, their_tail] = unpack_head_tail(their_head_tail);
+            uint32_t n = their_tail - their_head;
+            if (n == 0) {
+                return nullptr;
+            }
+            n -= n >> 1;
+            // Copy pointer values, the first task is not copied
+            auto* r = from->local_queue[their_head & task_index_mask].load(std::memory_order_relaxed);
+            for (uint32_t i = 1; i < n; ++i) {
+                state->local_queue[(our_tail + i - 1) & task_index_mask].store(
+                    from->local_queue[(their_head + i) & task_index_mask].load(std::memory_order_relaxed),
+                    std::memory_order_relaxed);
+            }
+            // Note: acquire needed in case of failures
+            // Note: release needed so loads above are not reordered with cas
+            if (from->local_queue_head_tail.compare_exchange_strong(their_head_tail,
+                    pack_head_tail(their_head + n, their_tail), std::memory_order_acq_rel))
+            {
+                // We successfully stole some tasks
+                if (n > 1) {
+                    // Note: we can use a store, because local queue is empty
+                    // and no concurrent stealer could have changed head/tail
+                    // Note: release synchronizes with other threads stealing our tasks
+                    state->local_queue_head_tail.store(
+                        pack_head_tail(our_head, our_tail + n - 1),
+                        std::memory_order_release);
+                }
+                return r;
+            }
+            // Lost the race: will retry with updated their_head_tail
+        }
+    }
+
+    void push_to_global(actor_scheduler_runnable* r, bool wake) {
+        if (global_queue_.push(r)) {
+            // We have locked the queue
+            std::unique_lock l(global_queue_lock_);
+            global_queue_locked_.store(true);
+            if (wake) {
+                wake_blocked_thread_lock_held();
+            }
+        }
+    }
+
+    void wake_blocked_thread_fast() {
+        if (blocked_threads_.load(std::memory_order_relaxed) > 0 &&
+            !unblocking_.load(std::memory_order_relaxed))
+        {
+            std::unique_lock l(global_queue_lock_);
+            wake_blocked_thread_lock_held();
+        }
+    }
+
+    void wake_blocked_thread_lock_held() {
+        if (blocked_threads_.load(std::memory_order_relaxed) > 0) {
+            // We only wake one, others are expected to daisy chain
+            unblocking_.store(true, std::memory_order_relaxed);
+            have_tasks_.notify_one();
+            g_wakeups.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void daisy_chain_notify() {
+        if (unblocking_.load(std::memory_order_relaxed)) {
+            if (blocked_threads_.load(std::memory_order_relaxed) > 0) {
+                have_tasks_.notify_one();
+                g_wakeups.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            unblocking_.store(false, std::memory_order_relaxed);
+        }
+    }
+
+private:
+    std::chrono::microseconds preempt_us_;
+    std::deque<thread_state> thread_states_;
+    std::deque<std::thread> threads_;
+
+    std::mutex global_queue_lock_;
+    std::condition_variable have_tasks_;
+    mailbox_t global_queue_;
+    std::atomic<bool> global_queue_locked_{ false };
+    std::atomic<uint32_t> blocked_threads_{ 0 };
+    std::atomic<bool> unblocking_{ false };
+    bool shutdown_ = false;
+
+private:
+    static inline thread_local thread_state* local_state{ nullptr };
+};
+
 std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
         size_t threads, std::chrono::microseconds preemptUs)
 {
@@ -465,6 +820,8 @@ std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
     case ESchedulerType::Asio:
         return std::make_shared<AsioScheduler>(threads, preemptUs);
 #endif
+    case ESchedulerType::WorkStealing:
+        return std::make_shared<WorkStealingScheduler>(threads, preemptUs);
     default:
         throw std::runtime_error("unsupported scheduler type");
     }
@@ -582,6 +939,10 @@ int main(int argc, char** argv) {
             continue;
         }
 #endif
+        if (arg == "--use-work-stealing") {
+            schedulerType = ESchedulerType::WorkStealing;
+            continue;
+        }
         if (arg == "--without-latencies") {
             withLatencies = false;
             continue;
@@ -630,8 +991,8 @@ int main(int argc, char** argv) {
         ", max latency = " << (maxLatency.count()) << "us" << std::endl;
 
     if (debugWakeups) {
-        if (auto wakeups = mailbox_wakeups.load(std::memory_order_relaxed)) {
-            std::cout << "Mailbox wakeups: " << wakeups << std::endl;
+        if (auto wakeups = g_wakeups.load(std::memory_order_relaxed)) {
+            std::cout << "Number of wakeups: " << wakeups << std::endl;
         }
     }
 
