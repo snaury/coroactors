@@ -78,9 +78,7 @@ namespace coroactors::detail {
         }
 
         /**
-         * Removes the next node from a locked mailbox
-         *
-         * Returns the removed node when it is avalable.
+         * Removes and returns the next available node from a locked mailbox
          *
          * Returns nullptr and unlocks when the next node cannot be removed,
          * either because the mailbox is empty, or the first node is currently
@@ -96,13 +94,26 @@ namespace coroactors::detail {
         }
 
         /**
-         * Tries to pop the next node from the mailbox without unlocking
+         * Tries to pop the next available node from a locked mailbox without unlocking
          */
         Node* try_pop() noexcept {
             auto [head, next] = pop_impl<false>();
             if (head) {
                 head_ = next;
             }
+            return static_cast<Node*>(head);
+        }
+
+        /**
+         * Returns the next available node in a locked mailbox without removing it
+         *
+         * Returns nullptr when the next node cannot be removed, either because
+         * the mailbox is empty, or the first node is currently blocked by a
+         * concurrent push. When a non-nullptr pointer is returned the next
+         * pop() is guaranteed to return it without unlocking.
+         */
+        Node* peek() noexcept {
+            auto [head, next] = pop_impl<false>();
             return static_cast<Node*>(head);
         }
 
@@ -138,31 +149,6 @@ namespace coroactors::detail {
         bool try_unlock() noexcept {
             auto [head, next] = pop_impl<true>();
             return head == nullptr;
-        }
-
-        /**
-         * Tries to peek at the next node in the mailbox
-         *
-         * Returns the first published node in the mailbox or nullptr. Even when
-         * the node is not nullptr it is not guaranteed that pop() would be
-         * able to remove it, because it may be temporarily blocked by a
-         * concurrent push.
-         */
-        Node* peek() noexcept {
-            node* head = head_;
-            if (head == &stub_) {
-                // Note: acquire synchronizes with push publishing via next
-                void* marker = head->next.load(std::memory_order_acquire);
-                if (marker == nullptr) {
-                    // Currently empty
-                    return nullptr;
-                }
-                assert(marker != reinterpret_cast<void*>(MarkerUnlocked));
-                // Remove the stub node and move to the next published node
-                stub_.next.store(nullptr, std::memory_order_relaxed);
-                head_ = head = reinterpret_cast<node*>(marker);
-            }
-            return static_cast<Node*>(head);
         }
 
     public:

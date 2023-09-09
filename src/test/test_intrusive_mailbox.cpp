@@ -108,8 +108,8 @@ TEST(TestIntrusiveMailbox, UnpublishedPush) {
     ASSERT_EQ(b_prev, &a);
     // Node cannot be removed right now
     ASSERT_EQ(m.try_pop(), nullptr);
-    // But we can see the current head
-    ASSERT_EQ(m.peek(), &a);
+    // Cannot peek at a blocked node
+    ASSERT_EQ(m.peek(), nullptr);
     // Same for a pop, it unlocks
     ASSERT_EQ(m.pop(), nullptr);
     // Note the push of c will not lock
@@ -118,4 +118,26 @@ TEST(TestIntrusiveMailbox, UnpublishedPush) {
     ASSERT_TRUE(m.push_publish(b_prev, &b));
     // Now we can finally remove the first item
     ASSERT_EQ(m.pop(), &a);
+}
+
+TEST(TestIntrusiveMailbox, PeekBeforeUnpublishedPush) {
+    mailbox_t m(mailbox_t::initially_locked);
+    node_t a(1);
+    node_t b(2);
+    ASSERT_FALSE(m.push(&a));
+    // Peek should be able to see current head
+    ASSERT_EQ(m.peek(), &a);
+    // Start pushing b, it should not block a
+    auto* b_prev = m.push_prepare(&b);
+    ASSERT_NE(b_prev, &a);
+    // Node is protected from blocking
+    ASSERT_EQ(m.peek(), &a);
+    // And can be removed as well
+    ASSERT_EQ(m.pop(), &a);
+    // The next pop must unlock
+    ASSERT_EQ(m.pop(), nullptr);
+    // When push of b publishes it locks
+    ASSERT_TRUE(m.push_publish(b_prev, &b));
+    // The next removed node is b
+    ASSERT_EQ(m.pop(), &b);
 }
