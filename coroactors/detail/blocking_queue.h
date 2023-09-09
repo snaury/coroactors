@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/detail/atomic_semaphore.h>
+#include <coroactors/detail/config.h>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -41,6 +42,7 @@ namespace coroactors::detail {
             {}
         };
 
+#if COROACTORS_COMPLEX_BLOCKING_QUEUE
         struct unlock_taken_guard {
             blocking_queue* self;
             node* next;
@@ -51,6 +53,16 @@ namespace coroactors::detail {
                 self->unlock_taken(next, pending, pendingLast);
             }
         };
+#else
+        struct unlock_guard {
+            blocking_queue* self;
+            node* next;
+
+            ~unlock_guard() noexcept {
+                self->unlock(next);
+            }
+        };
+#endif
 
     public:
         blocking_queue()
@@ -96,6 +108,7 @@ namespace coroactors::detail {
             }
         }
 
+#if COROACTORS_COMPLEX_BLOCKING_QUEUE
         /**
          * Pops the next item from the queue, blocking until it is available
          */
@@ -458,6 +471,197 @@ namespace coroactors::detail {
                 return nullptr;
             }
         }
+#else
+        T pop() {
+            node* head = lock();
+            node* next = lock_next(head);
+
+            while (!next) {
+                head = lock();
+                next = lock_next(head);
+            }
+
+            // We need to enqueue the next item waiter or wake it up
+            if (auto* waiter = item_waiters) {
+                item_waiters = waiter->next;
+                void* nextValue = next->next.load(std::memory_order_relaxed);
+                assert(!nextValue || !is_waiter(nextValue));
+                if (nextValue || !next->next.compare_exchange_strong(nextValue,
+                        encode_waiter(waiter), std::memory_order_release))
+                {
+                    waiter->notify();
+                }
+            }
+
+            // We will free current head before returning
+            std::unique_ptr<node> current(head);
+            // We will unlock to next node before returning
+            unlock_guard g{ this, next };
+            // Move result out of the node, even if it throws the
+            // two objects above will cleanup in destructors.
+            return std::move(next->item);
+        }
+
+        std::optional<T> try_pop() {
+            if (node* head = try_lock()) {
+                void* nextValue = head->next.load(std::memory_order_acquire);
+                if (!nextValue || is_waiter(nextValue)) {
+                    unlock(head);
+                    return std::nullopt;
+                }
+
+                node* next = decode_node(nextValue);
+                // We will free current head before returning
+                std::unique_ptr<node> current(head);
+                // We will unlock to next node before returning
+                unlock_guard g{ this, next };
+                // Move result out of the node, even if it throws the
+                // two objects above will cleanup in destructors.
+                return std::move(next->item);
+            }
+
+            return std::nullopt;
+        }
+
+    private:
+        node* try_lock() noexcept {
+            void* headValue = head_.load(std::memory_order_relaxed);
+            while (headValue && !is_waiter(headValue)) {
+                if (head_.compare_exchange_weak(headValue, nullptr,
+                    std::memory_order_acquire, std::memory_order_relaxed))
+                {
+                    return decode_node(headValue);
+                }
+            }
+            return nullptr;
+        }
+
+        bool try_spin_lock(void*& headValue, int spinCount = 1500) noexcept {
+            headValue = head_.load(std::memory_order_relaxed);
+            for (;;) {
+                while (headValue && !is_waiter(headValue)) {
+                    // Not locked with a valid head, keep trying to lock
+                    if (head_.compare_exchange_weak(headValue, nullptr,
+                            std::memory_order_acquire, std::memory_order_relaxed))
+                    {
+                        // Successfully locked
+                        assert(headValue && !is_waiter(headValue));
+                        return true;
+                    }
+                }
+                if (!headValue) {
+                    if (spinCount > 0) {
+                        spinCount--;
+                        headValue = head_.load(std::memory_order_relaxed);
+                        continue;
+                    }
+                    break;
+                }
+                assert(is_waiter(headValue));
+                break;
+            }
+            return false;
+        }
+
+        void lock_wait(void* headValue) noexcept {
+            // We want to install a new waiter in the chain of lock waiters
+            blocking_queue_waiter* local = blocking_queue_waiter::current();
+            for (;;) {
+                local->next = decode_waiter(headValue);
+
+                if (!head_.compare_exchange_strong(headValue, encode_waiter(local),
+                        std::memory_order_release))
+                {
+                    if (!headValue || is_waiter(headValue)) {
+                        // Waiter list changed, retry
+                        continue;
+                    }
+
+                    // Unlocked, nothing to wait for
+                    local->next = nullptr;
+                    break;
+                }
+
+                // Now we wait until someone wakes us up
+                local->wait();
+                local->next = nullptr;
+                break;
+            }
+        }
+
+        node* lock() noexcept {
+            void* headValue;
+            for (;;) {
+                if (try_spin_lock(headValue)) {
+                    // Successfully locked
+                    assert(headValue && !is_waiter(headValue));
+                    return decode_node(headValue);
+                }
+
+                lock_wait(headValue);
+            }
+        }
+
+        node* lock_next(node* head) noexcept {
+            void* nextValue = head->next.load(std::memory_order_acquire);
+            while (!nextValue || is_waiter(nextValue)) {
+                blocking_queue_waiter* local = blocking_queue_waiter::current();
+
+                if (head->next.compare_exchange_strong(nextValue, encode_waiter(local), std::memory_order_acq_rel)) {
+                    if (nextValue) {
+                        // add a previous item waiter to the global list
+                        assert(is_waiter(nextValue));
+                        auto* waiter = decode_waiter(nextValue);
+                        waiter->next = item_waiters;
+                        item_waiters = waiter;
+                    }
+
+                    // Now unlock and wait until woken up
+                    unlock(head);
+                    local->wait();
+
+                    return nullptr;
+                }
+
+                assert(nextValue && !is_waiter(nextValue));
+            }
+
+            return decode_node(nextValue);
+        }
+
+        void unlock(node* head) noexcept {
+            auto* waiter = lock_waiters;
+            if (waiter) {
+                lock_waiters = waiter->next;
+            }
+
+            void* headValue = nullptr;
+            for (;;) {
+                // Try unlocking expecting no new waiters
+                if (head_.compare_exchange_strong(headValue, head, std::memory_order_acq_rel)) {
+                    if (waiter) {
+                        waiter->notify();
+                    }
+                    return;
+                }
+
+                // Remove all fresh waiters
+                assert(headValue && is_waiter(headValue));
+                auto* fresh = decode_waiter(headValue);
+                while (!head_.compare_exchange_strong(headValue, nullptr, std::memory_order_acquire)) {
+                    // We can only fail when more fresh waiters are added
+                    assert(headValue && is_waiter(headValue));
+                    fresh = decode_waiter(headValue);
+                }
+
+                assert(fresh);
+                find_last(fresh)->next = waiter;
+                lock_waiters = fresh->next;
+                waiter = fresh;
+                headValue = nullptr;
+            }
+        }
+#endif
 
     private:
         static bool is_waiter(void* p) noexcept {
@@ -498,9 +702,11 @@ namespace coroactors::detail {
 
     private:
         std::atomic<void*> head_;
-        char head_padding[64 - sizeof(head_)];
+        char head_padding[128 - sizeof(head_)];
         std::atomic<node*> tail_;
-        char tail_padding[64 - sizeof(tail_)];
+        char tail_padding[128 - sizeof(tail_)];
+        blocking_queue_waiter* lock_waiters = nullptr;
+        blocking_queue_waiter* item_waiters = nullptr;
     };
 
 } // namespace coroactors::detail
