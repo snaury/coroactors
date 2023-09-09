@@ -12,8 +12,8 @@ using namespace coroactors;
 
 class TSimpleScheduler : public actor_scheduler {
 public:
-    void post(execute_callback_type c) override {
-        queue.push_back(std::move(c));
+    void post(actor_scheduler_runnable* r) override {
+        queue.push_back(r);
     }
 
     bool preempt() override {
@@ -23,9 +23,9 @@ public:
     void run() {
         while (!queue.empty()) {
             ++processed;
-            auto cont = std::move(queue.front());
+            auto* r = std::move(queue.front());
             queue.pop_front();
-            cont();
+            r->run();
         }
     }
 
@@ -33,7 +33,7 @@ public:
     size_t processed = 0;
 
 private:
-    std::deque<execute_callback_type> queue;
+    std::deque<actor_scheduler_runnable*> queue;
 };
 
 class TCounterServiceActor {

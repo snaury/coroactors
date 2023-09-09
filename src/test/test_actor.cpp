@@ -372,7 +372,7 @@ TEST(TestActor, StartNestedActorsBeforeContext) {
     std::optional<packaged_awaitable<int>> ropt;
 
     // We need to start everything inside a scheduler
-    scheduler.post([&]{
+    scheduler.run_in_scheduler([&]{
         ropt.emplace(
             [](const actor_context& context, std::vector<int>& events) -> actor<int> {
                 task_group<int> g;
@@ -406,7 +406,6 @@ TEST(TestActor, StartNestedActorsBeforeContext) {
                 co_return a + b;
             }(context, events));
     });
-    scheduler.run_next();
 
     ASSERT_TRUE(ropt);
     auto r = std::move(*ropt);

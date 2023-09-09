@@ -7,16 +7,16 @@ struct test_scheduler
     : public coroactors::actor_scheduler
 {
     struct continuation_t {
-        execute_callback_type callback;
+        coroactors::actor_scheduler_runnable* r;
         bool deferred;
 
-        explicit continuation_t(execute_callback_type&& callback, bool deferred)
-            : callback(std::move(callback))
+        explicit continuation_t(coroactors::actor_scheduler_runnable* r, bool deferred)
+            : r(r)
             , deferred(deferred)
         {}
 
-        void operator()() {
-            callback();
+        void run() noexcept {
+            r->run();
         }
     };
 
@@ -34,12 +34,12 @@ struct test_scheduler
         return in_run_next == 0;
     }
 
-    void post(execute_callback_type c) override {
-        queue.emplace_back(std::move(c), false);
+    void post(coroactors::actor_scheduler_runnable* r) override {
+        queue.emplace_back(r, false);
     }
 
-    void defer(execute_callback_type c) override {
-        queue.emplace_back(std::move(c), true);
+    void defer(coroactors::actor_scheduler_runnable* r) override {
+        queue.emplace_back(r, true);
     }
 
     void schedule(schedule_callback_type c, time_point d, coroactors::stop_token t) override {
@@ -73,12 +73,19 @@ struct test_scheduler
         }
     }
 
+    template<class TCallback>
+    void run_in_scheduler(TCallback&& callback) {
+        ++in_run_next;
+        callback();
+        --in_run_next;
+    }
+
     void run_next() {
         assert(!queue.empty());
         auto cont = queue.front();
         queue.pop_front();
         ++in_run_next;
-        cont();
+        cont.run();
         --in_run_next;
     }
 

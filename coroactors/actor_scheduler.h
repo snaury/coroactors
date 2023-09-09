@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/intrusive_mailbox.h>
 #include <coroactors/stop_token.h>
 #include <chrono>
 #include <coroutine>
@@ -6,6 +7,19 @@
 #include <stdexcept>
 
 namespace coroactors {
+
+    /**
+     * A runnable work item that runs in a scheduler
+     */
+    class actor_scheduler_runnable
+        : public detail::intrusive_mailbox_node
+    {
+    protected:
+        ~actor_scheduler_runnable() = default;
+
+    public:
+        virtual void run() noexcept = 0;
+    };
 
     /**
      * A generic actor scheduler interface
@@ -19,7 +33,6 @@ namespace coroactors {
         using time_point = clock_type::time_point;
         using duration = clock_type::duration;
 
-        using execute_callback_type = std::function<void()>;
         using schedule_callback_type = std::function<void(bool)>;
 
         /**
@@ -30,7 +43,7 @@ namespace coroactors {
         }
 
         /**
-         * Post a callback c to run in the scheduler
+         * Post a runnable r to run in the scheduler
          *
          * Should be used when tasks fork, e.g. when it is desirable for h to
          * run in parallel with the current activity.
@@ -39,10 +52,10 @@ namespace coroactors {
          *
          * May cause an additional thread to wake up, so usually slow.
          */
-        virtual void post(execute_callback_type c) = 0;
+        virtual void post(actor_scheduler_runnable* r) = 0;
 
         /**
-         * Defer a callback c to run in the scheduler
+         * Defer a runnable r to run in the scheduler
          *
          * Should be used when current task is replacing itself with another
          * task, i.e. it's a continuation via a scheduler.
@@ -53,8 +66,8 @@ namespace coroactors {
          * so it must be used with care. The upside is no waking up threads,
          * since there is no additional useful work.
          */
-        virtual void defer(execute_callback_type c) {
-            post(std::move(c)); // default to post
+        virtual void defer(actor_scheduler_runnable* r) {
+            post(r); // default to post
         }
 
         /**

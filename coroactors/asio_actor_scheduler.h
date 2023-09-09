@@ -18,7 +18,6 @@ namespace coroactors {
         using typename actor_scheduler::clock_type;
         using typename actor_scheduler::time_point;
         using typename actor_scheduler::duration;
-        using typename actor_scheduler::execute_callback_type;
         using typename actor_scheduler::schedule_callback_type;
 
         asio_actor_scheduler(
@@ -37,15 +36,15 @@ namespace coroactors {
             return true;
         }
 
-        void post(execute_callback_type c) override {
-            asio::post(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
-                resume_with_preemption(std::move(c), d);
+        void post(actor_scheduler_runnable* r) override {
+            asio::post(executor_, [r = r, d = preempt_duration_]() mutable noexcept {
+                run_with_preemption(r, d);
             });
         }
 
-        void defer(execute_callback_type c) override {
-            asio::defer(executor_, [c = std::move(c), d = preempt_duration_]() mutable noexcept {
-                resume_with_preemption(std::move(c), d);
+        void defer(actor_scheduler_runnable* r) override {
+            asio::defer(executor_, [r = r, d = preempt_duration_]() mutable noexcept {
+                run_with_preemption(r, d);
             });
         }
 
@@ -62,16 +61,16 @@ namespace coroactors {
         }
 
     private:
-        static void resume_with_preemption(execute_callback_type&& c,
-                duration preempt_duration)
+        static void run_with_preemption(actor_scheduler_runnable* r,
+                duration preempt_duration) noexcept
         {
             if (!preempt_deadline) {
                 time_point deadline = clock_type::now() + preempt_duration;
                 preempt_deadline = &deadline;
-                std::move(c)();
+                r->run();
                 preempt_deadline = nullptr;
             } else {
-                std::move(c)();
+                r->run();
             }
         }
 

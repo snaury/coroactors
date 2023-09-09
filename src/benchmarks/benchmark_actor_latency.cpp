@@ -1,6 +1,7 @@
 #include <coroactors/actor.h>
 #include <coroactors/detach_awaitable.h>
 #include <coroactors/detail/blocking_queue.h>
+#include <coroactors/detail/intrusive_mailbox.h>
 #include <deque>
 #include <iostream>
 #include <string>
@@ -8,6 +9,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <variant>
+
+#define HAVE_ABSEIL 1
+#define HAVE_ASIO 1
 
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
@@ -100,6 +104,16 @@ private:
 };
 
 template<class T>
+class TBlockingQueueWrapper : public detail::blocking_queue<T> {
+public:
+    void shutdown(size_t threads) {
+        for (size_t i = 0; i < threads; ++i) {
+            this->push(T());
+        }
+    }
+};
+
+template<class T>
 class TBlockingQueueWithStdMutex {
 public:
     template<class... TArgs>
@@ -111,26 +125,36 @@ public:
 
     T pop() {
         std::unique_lock l(Lock);
-        if (Items.empty()) {
+        if (Items.empty() && !Shutdown) {
             ++Waiters;
             do {
                 NotEmpty.wait(l);
-            } while (Items.empty());
+            } while (Items.empty() && !Shutdown);
             --Waiters;
         }
-        T item(std::move(Items.front()));
-        Items.pop_front();
-        return item;
-    }
-
-    std::optional<T> try_pop() {
-        std::unique_lock l(Lock);
         if (!Items.empty()) {
-            std::optional<T> item(std::move(Items.front()));
+            T item(std::move(Items.front()));
             Items.pop_front();
             return item;
         }
-        return std::nullopt;
+        assert(Shutdown);
+        return T();
+    }
+
+    T try_pop() {
+        std::unique_lock l(Lock);
+        if (!Items.empty()) {
+            T item(std::move(Items.front()));
+            Items.pop_front();
+            return item;
+        }
+        return T();
+    }
+
+    void shutdown(size_t) {
+        std::unique_lock l(Lock);
+        Shutdown = true;
+        NotEmpty.notify_all();
     }
 
 private:
@@ -138,6 +162,7 @@ private:
     std::condition_variable NotEmpty;
     std::deque<T> Items;
     size_t Waiters = 0;
+    bool Shutdown = false;
 };
 
 #if HAVE_ABSEIL
@@ -151,41 +176,56 @@ public:
     }
 
     T pop() {
-        absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::HasItems));
-        T item(std::move(Items.front()));
-        Items.pop_front();
-        return item;
-    }
-
-    std::optional<T> try_pop() {
-        absl::MutexLock l(&Lock);
+        absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMutex::NotEmpty));
         if (!Items.empty()) {
-            std::optional<T> item(std::move(Items.front()));
+            T item(std::move(Items.front()));
             Items.pop_front();
             return item;
         }
-        return std::nullopt;
+        assert(Shutdown);
+        return T();
+    }
+
+    T try_pop() {
+        absl::MutexLock l(&Lock);
+        if (!Items.empty()) {
+            T item(std::move(Items.front()));
+            Items.pop_front();
+            return item;
+        }
+        return T();
+    }
+
+    void shutdown(size_t) {
+        absl::MutexLock l(&Lock);
+        Shutdown = true;
     }
 
 private:
-    bool HasItems() const {
-        return !Items.empty();
+    bool NotEmpty() const {
+        return !Items.empty() || Shutdown;
     }
 
 private:
     absl::Mutex Lock;
     std::deque<T> Items;
+    bool Shutdown = false;
 };
 #endif
 
 static std::atomic<size_t> mailbox_wakeups{ 0 };
 
 template<class T>
-class TBlockingQueueWithStdMailbox {
+class TBlockingQueueWithStdMailbox;
+
+template<class T>
+class TBlockingQueueWithStdMailbox<T*> {
+    using TMailbox = detail::intrusive_mailbox<T>;
+
 public:
-    TBlockingQueueWithStdMailbox() {
-        MailboxLocked = !Mailbox.try_unlock();
-    }
+    TBlockingQueueWithStdMailbox()
+        : Mailbox(TMailbox::initially_unlocked)
+    {}
 
     template<class... TArgs>
     void push(TArgs&&... args) {
@@ -201,55 +241,74 @@ public:
         }
     }
 
-    T pop() {
+    T* pop() {
         std::unique_lock l(Lock);
         for (;;) {
-            while (!MailboxLocked) {
+            while (!MailboxLocked && !Shutdown) {
                 ++Waiters;
                 CanPop.wait(l);
                 --Waiters;
             }
-            if (auto result = Mailbox.pop_optional()) {
-                if (Waiters > 0) {
-                    // Mailbox still locked, wake one more waiter
-                    CanPop.notify_one();
+
+            if (MailboxLocked) {
+                if (auto* result = Mailbox.pop()) {
+                    if (Waiters > 0) {
+                        // Mailbox still locked, wake one more waiter
+                        CanPop.notify_one();
+                    }
+                    return result;
                 }
-                return std::move(*result);
+
+                // Mailbox was unlocked, now wait
+                MailboxLocked = false;
             }
-            // Mailbox was unlocked, now wait
-            MailboxLocked = false;
+
+            if (Shutdown) {
+                return nullptr;
+            }
         }
     }
 
-    std::optional<T> try_pop() {
+    T* try_pop() {
         std::unique_lock l(Lock);
         if (MailboxLocked) {
-            if (auto result = Mailbox.pop_optional()) {
+            if (auto* result = Mailbox.try_pop()) {
                 if (Waiters > 0) {
                     CanPop.notify_one();
                 }
-                return std::move(*result);
+                return result;
             }
-            MailboxLocked = false;
         }
-        return std::nullopt;
+        return nullptr;
+    }
+
+    void shutdown(size_t) {
+        std::unique_lock l(Lock);
+        Shutdown = true;
+        CanPop.notify_all();
     }
 
 public:
     std::mutex Lock;
     std::condition_variable CanPop;
-    detail::mailbox<T> Mailbox;
+    TMailbox Mailbox;
     size_t Waiters = 0;
-    bool MailboxLocked;
+    bool MailboxLocked = false;
+    bool Shutdown = false;
 };
 
 #if HAVE_ABSEIL
 template<class T>
-class TBlockingQueueWithAbslMailbox {
+class TBlockingQueueWithAbslMailbox;
+
+template<class T>
+class TBlockingQueueWithAbslMailbox<T*> {
+    using TMailbox = detail::intrusive_mailbox<T>;
+
 public:
-    TBlockingQueueWithAbslMailbox() {
-        MailboxLocked = !Mailbox.try_unlock();
-    }
+    TBlockingQueueWithAbslMailbox()
+        : Mailbox(TMailbox::initially_unlocked)
+    {}
 
     template<class... TArgs>
     void push(TArgs&&... args) {
@@ -261,38 +320,47 @@ public:
         }
     }
 
-    T pop() {
+    T* pop() {
         for (;;) {
             absl::MutexLock l(&Lock, absl::Condition(this, &TBlockingQueueWithAbslMailbox::CanPop));
-            if (auto result = Mailbox.pop_optional()) {
-                return std::move(*result);
+            if (MailboxLocked) {
+                if (auto* result = Mailbox.pop()) {
+                    return result;
+                }
+                // Mailbox was unlocked, now wait
+                MailboxLocked = false;
             }
-            // Mailbox was unlocked, now wait
-            MailboxLocked = false;
+            if (Shutdown) {
+                return nullptr;
+            }
         }
     }
 
-    std::optional<T> try_pop() {
+    T* try_pop() {
         absl::MutexLock l(&Lock);
         if (MailboxLocked) {
-            if (auto result = Mailbox.pop_optional()) {
-                return std::move(*result);
+            if (auto* result = Mailbox.try_pop()) {
+                return result;
             }
-            // Mailbox was unlocked, new ops will wait
-            MailboxLocked = false;
         }
-        return std::nullopt;
+        return nullptr;
+    }
+
+    void shutdown(size_t) {
+        absl::MutexLock l(&Lock);
+        Shutdown = true;
     }
 
 private:
     bool CanPop() const {
-        return MailboxLocked;
+        return MailboxLocked || Shutdown;
     }
 
 public:
     absl::Mutex Lock;
-    detail::mailbox<T> Mailbox;
-    bool MailboxLocked;
+    TMailbox Mailbox;
+    bool MailboxLocked = false;
+    bool Shutdown = false;
 };
 #endif
 
@@ -312,8 +380,6 @@ enum class ESchedulerType {
 template<template <class> typename BlockingQueue>
 class BlockingQueueScheduler : public actor_scheduler {
 public:
-    using execute_callback_type = actor_scheduler::execute_callback_type;
-
     BlockingQueueScheduler(size_t threads, std::chrono::microseconds preemptUs)
         : PreemptUs(preemptUs)
     {
@@ -325,21 +391,20 @@ public:
     }
 
     ~BlockingQueueScheduler() {
-        // Send a stop signal for every thread
-        for (size_t i = 0; i < Threads.size(); ++i) {
-            Queue.push(execute_callback_type());
-        }
+        Queue.shutdown(Threads.size());
+
         for (auto& thread : Threads) {
             thread.join();
         }
+
         if (auto c = Queue.try_pop()) {
             assert(false && "Unexpected scheduler shutdown with non-empty queue");
         }
     }
 
-    void post(execute_callback_type c) override {
-        assert(c && "Cannot schedule an empty callback");
-        Queue.push(std::move(c));
+    void post(actor_scheduler_runnable* r) override {
+        assert(r && "Cannot schedule an empty runnable");
+        Queue.push(r);
     }
 
     bool preempt() override {
@@ -355,16 +420,16 @@ private:
         actor_scheduler::set_current_ptr(this);
         TTime deadline{};
         thread_deadline = &deadline;
-        while (auto cont = Queue.pop()) {
+        while (auto* r = Queue.pop()) {
             deadline = TClock::now() + PreemptUs;
-            cont();
+            r->run();
         }
         thread_deadline = nullptr;
     }
 
 private:
     std::chrono::microseconds PreemptUs;
-    BlockingQueue<execute_callback_type> Queue;
+    BlockingQueue<actor_scheduler_runnable*> Queue;
     std::vector<std::thread> Threads;
 
     static inline thread_local const TTime* thread_deadline{ nullptr };
@@ -388,7 +453,7 @@ std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
 {
     switch (type) {
     case ESchedulerType::LockFree:
-        return std::make_shared<BlockingQueueScheduler<detail::blocking_queue>>(threads, preemptUs);
+        return std::make_shared<BlockingQueueScheduler<TBlockingQueueWrapper>>(threads, preemptUs);
     case ESchedulerType::StdMutex:
         return std::make_shared<BlockingQueueScheduler<TBlockingQueueWithStdMutex>>(threads, preemptUs);
     case ESchedulerType::StdMailbox:

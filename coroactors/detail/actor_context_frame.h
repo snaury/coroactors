@@ -18,7 +18,7 @@ namespace coroactors::detail {
      * Usually a base class of a coroutine promise that runs in an actor context
      */
     class actor_context_frame
-        : public intrusive_mailbox_node
+        : public actor_scheduler_runnable
     {
         friend actor_context_manager;
 
@@ -40,6 +40,9 @@ namespace coroactors::detail {
         }
 
     private:
+        void run() noexcept override;
+
+    private:
         // This is the handle to the coroutine that runs in this frame
         const std::coroutine_handle<> self;
 
@@ -59,6 +62,8 @@ namespace coroactors::detail {
      * Frame management APIs for the actor context
      */
     class actor_context_manager {
+        friend actor_context_frame;
+
     public:
         explicit actor_context_manager(const actor_context& context)
             : context(context.ptr.get())
@@ -79,15 +84,11 @@ namespace coroactors::detail {
         }
 
         static void post(actor_context_state* context, actor_context_frame* frame) noexcept {
-            context->scheduler.post([frame] {
-                run(frame);
-            });
+            context->scheduler.post(frame);
         }
 
         static void defer(actor_context_state* context, actor_context_frame* frame) noexcept {
-            context->scheduler.defer([frame] {
-                run(frame);
-            });
+            context->scheduler.defer(frame);
         }
 
     private:
@@ -611,6 +612,10 @@ namespace coroactors::detail {
     private:
         actor_context_state* context;
     };
+
+    inline void actor_context_frame::run() noexcept {
+        actor_context_manager::run(this);
+    }
 
     inline bool actor_context_state::push_frame(actor_context_frame* frame) noexcept {
         return mailbox_.push(frame);
