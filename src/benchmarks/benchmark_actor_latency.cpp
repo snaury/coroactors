@@ -10,9 +10,6 @@
 #include <condition_variable>
 #include <variant>
 
-#define HAVE_ABSEIL 1
-#define HAVE_ASIO 1
-
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
 #endif
