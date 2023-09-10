@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <variant>
 #include <random>
+#include <cinttypes>
 
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
@@ -827,6 +828,28 @@ std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
     }
 }
 
+class SchedulerThroughputTask final
+    : public actor_scheduler_runnable
+{
+public:
+    SchedulerThroughputTask(actor_scheduler& scheduler)
+        : scheduler(scheduler)
+    {}
+
+    void run() noexcept {
+        count_.fetch_add(1, std::memory_order_relaxed);
+        scheduler.defer(this);
+    }
+
+    uint64_t getCount() noexcept {
+        return count_.exchange(0, std::memory_order_relaxed);
+    }
+
+private:
+    actor_scheduler& scheduler;
+    std::atomic<uint64_t> count_{ 0 };
+};
+
 template<class T>
     requires (!std::is_void_v<T>)
 std::vector<T> run_sync(std::vector<actor<T>> actors) {
@@ -883,6 +906,7 @@ int main(int argc, char** argv) {
     ESchedulerType schedulerType = ESchedulerType::LockFree;
     bool withLatencies = true;
     bool debugWakeups = false;
+    bool schedulerThroughput = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -951,12 +975,44 @@ int main(int argc, char** argv) {
             debugWakeups = true;
             continue;
         }
+        if (arg == "--scheduler-throughput") {
+            schedulerThroughput = true;
+            continue;
+        }
         std::cerr << "ERROR: unexpected argument: " << argv[i] << std::endl;
         return 1;
     }
 
     auto scheduler = create_scheduler(schedulerType, numThreads, preemptUs);
     actor_scheduler::set_current_ptr(scheduler.get());
+
+    if (schedulerThroughput) {
+        std::deque<SchedulerThroughputTask> tasks;
+        for (int i = 0; i < numPingers; ++i) {
+            tasks.emplace_back(*scheduler);
+        }
+        for (auto& task : tasks) {
+            scheduler->post(&task);
+        }
+        printf("Started %d tasks...\n", numPingers);
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            uint64_t min, max, sum;
+            for (int i = 0; i < numPingers; ++i) {
+                auto count = tasks[i].getCount();
+                if (i == 0) {
+                    min = count;
+                    max = count;
+                    sum = count;
+                } else {
+                    min = std::min(min, count);
+                    max = std::max(max, count);
+                    sum += count;
+                }
+            }
+            printf("... %" PRIu64 "/s (min=%" PRIu64 "/s, max=%" PRIu64 "/s)\n", sum, min, max);
+        }
+    }
 
     std::deque<TPingable> pingables;
     std::deque<TPinger> pingers;

@@ -1,3 +1,4 @@
 /actor-latency-go
 /actor-latency-swift
+/scheduler-throughput-go
 *.class
