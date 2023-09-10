@@ -916,7 +916,7 @@ std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
     }
 }
 
-class SchedulerThroughputTask final
+class alignas(128) SchedulerThroughputTask final
     : public actor_scheduler_runnable
 {
 public:
@@ -1087,7 +1087,7 @@ int main(int argc, char** argv) {
         std::cout << "Started " << numPingers << " tasks..." << std::endl;
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            uint64_t sum, min, max;
+            uint64_t sum = 0, min = 0, max = 0;
             for (int i = 0; i < numPingers; ++i) {
                 auto count = tasks[i].getCount();
                 if (i == 0) {

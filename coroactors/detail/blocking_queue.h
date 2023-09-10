@@ -497,10 +497,8 @@ namespace coroactors::detail {
         static constexpr uintptr_t WaiterMask = ~WaiterMark;
 
     private:
-        std::atomic<void*> head_;
-        char head_padding[64 - sizeof(head_)];
-        std::atomic<node*> tail_;
-        char tail_padding[64 - sizeof(tail_)];
+        alignas(128) std::atomic<void*> head_;
+        alignas(128) std::atomic<node*> tail_;
     };
 
 } // namespace coroactors::detail

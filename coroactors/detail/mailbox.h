@@ -187,10 +187,8 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerUnlocked = 1;
 
     private:
-        std::unique_ptr<node> head_{ new node };
-        char head_padding[128 - sizeof(head_)];
-        std::atomic<node*> tail_{ head_.get() };
-        char tail_padding[128 - sizeof(tail_)];
+        alignas(128) std::unique_ptr<node> head_{ new node };
+        alignas(128) std::atomic<node*> tail_{ head_.get() };
     };
 
 } // namespace coroactors::detail

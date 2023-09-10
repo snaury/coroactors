@@ -262,12 +262,9 @@ namespace coroactors::detail {
         }
 
     private:
-        node stub_;
-        char stub_padding[128 - sizeof(stub_)];
-        node* head_{ &stub_ };
-        char head_padding[128 - sizeof(head_)];
-        std::atomic<node*> tail_{ &stub_ };
-        char tail_padding[128 - sizeof(tail_)];
+        alignas(128) node stub_;
+        alignas(128) node* head_{ &stub_ };
+        alignas(128) std::atomic<node*> tail_{ &stub_ };
     };
 
 } // namespace coroactors::detail
