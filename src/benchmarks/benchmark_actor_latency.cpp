@@ -10,7 +10,7 @@
 #include <condition_variable>
 #include <variant>
 #include <random>
-#include <cinttypes>
+#include <sstream>
 
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
@@ -110,6 +110,10 @@ public:
             this->push(T());
         }
     }
+
+    std::string stats() {
+        return {};
+    }
 };
 
 template<class T>
@@ -156,6 +160,10 @@ public:
         NotEmpty.notify_all();
     }
 
+    std::string stats() {
+        return {};
+    }
+
 private:
     std::mutex Lock;
     std::condition_variable NotEmpty;
@@ -200,6 +208,10 @@ public:
         Shutdown = true;
     }
 
+    std::string stats() {
+        return {};
+    }
+
 private:
     bool NotEmpty() const {
         return !Items.empty() || Shutdown;
@@ -211,8 +223,6 @@ private:
     bool Shutdown = false;
 };
 #endif
-
-static std::atomic<size_t> g_wakeups{ 0 };
 
 template<class T>
 class TBlockingQueueWithStdMailbox;
@@ -230,7 +240,7 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            g_wakeups.fetch_add(1, std::memory_order_relaxed);
+            wakeups.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock l(Lock);
             MailboxLocked = true;
             if (Waiters > 0) {
@@ -287,10 +297,18 @@ public:
         CanPop.notify_all();
     }
 
+    std::string stats() {
+        auto w = wakeups.exchange(0, std::memory_order_relaxed);
+        std::stringstream s;
+        s << "wakeups=" << w;
+        return std::move(s).str();
+    }
+
 public:
     std::mutex Lock;
     std::condition_variable CanPop;
     TMailbox Mailbox;
+    std::atomic<size_t> wakeups{ 0 };
     size_t Waiters = 0;
     bool MailboxLocked = false;
     bool Shutdown = false;
@@ -313,7 +331,7 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            g_wakeups.fetch_add(1, std::memory_order_relaxed);
+            wakeups.fetch_add(1, std::memory_order_relaxed);
             absl::MutexLock l(&Lock);
             MailboxLocked = true;
         }
@@ -350,6 +368,13 @@ public:
         Shutdown = true;
     }
 
+    std::string stats() {
+        auto w = wakeups.exchange(0, std::memory_order_relaxed);
+        std::stringstream s;
+        s << "wakeups=" << w;
+        return std::move(s).str();
+    }
+
 private:
     bool CanPop() const {
         return MailboxLocked || Shutdown;
@@ -358,6 +383,7 @@ private:
 public:
     absl::Mutex Lock;
     TMailbox Mailbox;
+    std::atomic<size_t> wakeups{ 0 };
     bool MailboxLocked = false;
     bool Shutdown = false;
 };
@@ -377,8 +403,16 @@ enum class ESchedulerType {
     WorkStealing,
 };
 
+class actor_scheduler_stats {
+public:
+    virtual std::string stats() = 0;
+};
+
 template<template <class> typename BlockingQueue>
-class BlockingQueueScheduler : public actor_scheduler {
+class BlockingQueueScheduler
+    : public actor_scheduler
+    , public actor_scheduler_stats
+{
 public:
     BlockingQueueScheduler(size_t threads, std::chrono::microseconds preemptUs)
         : PreemptUs(preemptUs)
@@ -415,6 +449,10 @@ public:
         return true;
     }
 
+    std::string stats() override {
+        return Queue.stats();
+    }
+
 private:
     void RunWorker() {
         actor_scheduler::set_current_ptr(this);
@@ -439,17 +477,23 @@ private:
 class AsioScheduler
     : private asio::thread_pool
     , public asio_actor_scheduler
+    , public actor_scheduler_stats
 {
 public:
     AsioScheduler(size_t threads, std::chrono::microseconds preemptUs)
         : asio::thread_pool(threads)
         , asio_actor_scheduler(this->get_executor(), preemptUs)
     {}
+
+    std::string stats() {
+        return {};
+    }
 };
 #endif
 
 class WorkStealingScheduler
     : public actor_scheduler
+    , public actor_scheduler_stats
 {
 private:
     using mailbox_t = detail::intrusive_mailbox<actor_scheduler_runnable>;
@@ -563,7 +607,7 @@ private:
 
     actor_scheduler_runnable* next_task(thread_state* state) {
         // Check global queue periodically
-        if (state->local_processed >= state->thread_count) {
+        if (state->local_processed >= 61 /*state->thread_count*/) {
             state->local_processed = 0;
             if (auto* r = fast_global_task()) {
                 return r;
@@ -583,6 +627,7 @@ private:
 
         // We couldn't find anything, block on the global queue
         std::unique_lock l(global_queue_lock_);
+        inc(stats_mutex_locks);
         bool did_block = false;
         for (;;) {
             if (global_queue_locked_.load(std::memory_order_relaxed)) {
@@ -619,6 +664,7 @@ private:
                 }
                 // Block until someone wakes us up
                 have_tasks_.wait(l);
+                inc(stats_mutex_locks);
             } while (!global_queue_locked_.load(std::memory_order_relaxed));
             blocked_threads_.fetch_sub(1, std::memory_order_relaxed);
             did_block = true;
@@ -632,6 +678,8 @@ private:
         }
 
         std::unique_lock l(global_queue_lock_);
+        inc(stats_mutex_locks);
+
         if (!global_queue_locked_.load(std::memory_order_relaxed)) {
             return nullptr;
         }
@@ -644,6 +692,7 @@ private:
     }
 
     actor_scheduler_runnable* try_stealing(thread_state* state) {
+        inc(stats_steal_attempts);
         uint32_t pos = state->random_();
         for (size_t i = 0; i < state->thread_count; ++i, pos += 1) {
             thread_state* from = &thread_states_[pos % state->thread_count];
@@ -682,6 +731,7 @@ private:
                 return r;
             }
             // Lost the race with a stealer, head_tail is reloaded
+            inc(stats_pop_local_cas_fail);
         }
     }
 
@@ -741,6 +791,7 @@ private:
                 return r;
             }
             // Lost the race: will retry with updated their_head_tail
+            inc(stats_steal_cas_fail);
         }
     }
 
@@ -748,6 +799,7 @@ private:
         if (global_queue_.push(r)) {
             // We have locked the queue
             std::unique_lock l(global_queue_lock_);
+            inc(stats_mutex_locks);
             global_queue_locked_.store(true);
             if (wake) {
                 wake_blocked_thread_lock_held();
@@ -760,6 +812,7 @@ private:
             !unblocking_.load(std::memory_order_relaxed))
         {
             std::unique_lock l(global_queue_lock_);
+            inc(stats_mutex_locks);
             wake_blocked_thread_lock_held();
         }
     }
@@ -769,7 +822,7 @@ private:
             // We only wake one, others are expected to daisy chain
             unblocking_.store(true, std::memory_order_relaxed);
             have_tasks_.notify_one();
-            g_wakeups.fetch_add(1, std::memory_order_relaxed);
+            inc(stats_wakeups);
         }
     }
 
@@ -777,11 +830,33 @@ private:
         if (unblocking_.load(std::memory_order_relaxed)) {
             if (blocked_threads_.load(std::memory_order_relaxed) > 0) {
                 have_tasks_.notify_one();
-                g_wakeups.fetch_add(1, std::memory_order_relaxed);
+                inc(stats_wakeups);
                 return;
             }
             unblocking_.store(false, std::memory_order_relaxed);
         }
+    }
+
+public:
+    std::string stats() override {
+        std::stringstream s;
+        s << "wakeups=" << take(stats_wakeups);
+        s << " mutex_locks=" << take(stats_mutex_locks);
+        s << " steal_attempts=" << take(stats_steal_attempts);
+        s << " pop_local_cas_fails=" << take(stats_pop_local_cas_fail);
+        s << " steal_cas_fail=" << take(stats_steal_cas_fail);
+        return std::move(s).str();
+    }
+
+private:
+    template<class T>
+    static void inc(std::atomic<T>& v) {
+        v.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    template<class T>
+    static T take(std::atomic<T>& v) {
+        return v.exchange(T{}, std::memory_order_relaxed);
     }
 
 private:
@@ -796,6 +871,12 @@ private:
     std::atomic<uint32_t> blocked_threads_{ 0 };
     std::atomic<bool> unblocking_{ false };
     bool shutdown_ = false;
+
+    std::atomic<uint32_t> stats_wakeups{ 0 };
+    std::atomic<uint32_t> stats_mutex_locks{ 0 };
+    std::atomic<uint32_t> stats_steal_attempts{ 0 };
+    std::atomic<uint32_t> stats_pop_local_cas_fail{ 0 };
+    std::atomic<uint32_t> stats_steal_cas_fail{ 0 };
 
 private:
     static inline thread_local thread_state* local_state{ nullptr };
@@ -905,7 +986,7 @@ int main(int argc, char** argv) {
     std::chrono::microseconds preemptUs(10);
     ESchedulerType schedulerType = ESchedulerType::LockFree;
     bool withLatencies = true;
-    bool debugWakeups = false;
+    bool schedulerStats = false;
     bool schedulerThroughput = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -971,8 +1052,8 @@ int main(int argc, char** argv) {
             withLatencies = false;
             continue;
         }
-        if (arg == "--debug-wakeups") {
-            debugWakeups = true;
+        if (arg == "--scheduler-stats") {
+            schedulerStats = true;
             continue;
         }
         if (arg == "--scheduler-throughput") {
@@ -994,23 +1075,29 @@ int main(int argc, char** argv) {
         for (auto& task : tasks) {
             scheduler->post(&task);
         }
-        printf("Started %d tasks...\n", numPingers);
+        std::cout << "Started " << numPingers << " tasks..." << std::endl;
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            uint64_t min, max, sum;
+            uint64_t sum, min, max;
             for (int i = 0; i < numPingers; ++i) {
                 auto count = tasks[i].getCount();
                 if (i == 0) {
+                    sum = count;
                     min = count;
                     max = count;
-                    sum = count;
                 } else {
+                    sum += count;
                     min = std::min(min, count);
                     max = std::max(max, count);
-                    sum += count;
                 }
             }
-            printf("... %" PRIu64 "/s (min=%" PRIu64 "/s, max=%" PRIu64 "/s)\n", sum, min, max);
+            std::cout << "... " << sum << "/s (min=" << min << "/s, max=" << max << "/s)";
+            if (schedulerStats) {
+                if (auto* s = dynamic_cast<actor_scheduler_stats*>(scheduler.get())) {
+                    std::cout << " " << s->stats();
+                }
+            }
+            std::cout << std::endl;
         }
     }
 
@@ -1046,9 +1133,9 @@ int main(int argc, char** argv) {
     std::cout << "Finished in " << (elapsed.count() / 1000) << "ms (" << rps << "/s)"
         ", max latency = " << (maxLatency.count()) << "us" << std::endl;
 
-    if (debugWakeups) {
-        if (auto wakeups = g_wakeups.load(std::memory_order_relaxed)) {
-            std::cout << "Number of wakeups: " << wakeups << std::endl;
+    if (schedulerStats) {
+        if (auto* s = dynamic_cast<actor_scheduler_stats*>(scheduler.get())) {
+            std::cout << "Scheduler stats: " << s->stats() << std::endl;
         }
     }
 
