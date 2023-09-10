@@ -22,18 +22,27 @@ func mustParseInt(s string) int {
 //go:linkname goyield runtime.goyield
 func goyield()
 
-func spinGoyield(counter *atomic.Uint64) {
+type state struct {
+	counter uint64
+	padding [128 - 8]byte
+}
+
+func (s *state) spinGoyield() {
 	for {
-		counter.Add(1)
+		atomic.AddUint64(&s.counter, 1)
 		goyield()
 	}
 }
 
-func spinGosched(counter *atomic.Uint64) {
+func (s *state) spinGosched() {
 	for {
-		counter.Add(1)
+		atomic.AddUint64(&s.counter, 1)
 		runtime.Gosched()
 	}
+}
+
+func (s *state) getCount() uint64 {
+	return atomic.SwapUint64(&s.counter, 0)
 }
 
 func main() {
@@ -60,22 +69,22 @@ func main() {
 
 	runtime.GOMAXPROCS(threads)
 
-	var counters []*atomic.Uint64
+	var states []*state
 	for i := 0; i < numTasks; i++ {
-		counter := new(atomic.Uint64)
+		s := new(state)
 		if useGosched {
-			go spinGosched(counter)
+			go s.spinGosched()
 		} else {
-			go spinGoyield(counter)
+			go s.spinGoyield()
 		}
-		counters = append(counters, counter)
+		states = append(states, s)
 	}
 
 	for {
 		time.Sleep(time.Second)
 		var sum, min, max uint64
 		for i := 0; i < numTasks; i++ {
-			count := counters[i].Swap(0)
+			count := states[i].getCount()
 			if i == 0 {
 				sum = count
 				min = count
