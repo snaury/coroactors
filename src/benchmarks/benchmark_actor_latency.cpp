@@ -711,7 +711,7 @@ private:
     }
 
     static std::tuple<uint32_t, uint32_t> unpack_head_tail(uint64_t value) {
-        return { (value >> 32), (value & uint32_t(-1)) };
+        return { uint32_t(value >> 32), uint32_t(value) };
     }
 
     actor_scheduler_runnable* pop_from_local(thread_state* state) {

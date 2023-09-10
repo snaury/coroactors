@@ -1,5 +1,3 @@
-find_package(absl QUIET COMPONENTS synchronization)
-
 add_executable(benchmark_actor benchmark_actor.cpp)
 
 target_link_libraries(benchmark_actor
@@ -7,10 +5,8 @@ target_link_libraries(benchmark_actor
     benchmark::benchmark
 )
 
-if(absl_FOUND)
-    target_compile_definitions(benchmark_actor PRIVATE HAVE_ABSEIL=1)
-    target_link_libraries(benchmark_actor absl::synchronization)
-endif()
+target_compile_definitions(benchmark_actor PRIVATE HAVE_ABSEIL=1)
+target_link_libraries(benchmark_actor absl::synchronization)
 
 add_executable(benchmark_blocking_queue benchmark_blocking_queue.cpp)
 
@@ -32,10 +28,8 @@ target_link_libraries(benchmark_actor_latency
     coroactors
 )
 
-if(absl_FOUND)
-    target_compile_definitions(benchmark_actor_latency PRIVATE HAVE_ABSEIL=1)
-    target_link_libraries(benchmark_actor_latency absl::synchronization)
-endif()
+target_compile_definitions(benchmark_actor_latency PRIVATE HAVE_ABSEIL=1)
+target_link_libraries(benchmark_actor_latency absl::synchronization)
 
 if(asio_FOUND)
     target_compile_definitions(benchmark_actor_latency PRIVATE HAVE_ASIO=1)

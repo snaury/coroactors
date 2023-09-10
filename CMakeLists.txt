@@ -20,7 +20,8 @@ if(COROACTORS_IS_ROOT)
     set(CMAKE_CXX_EXTENSIONS OFF)
 
     if(NOT MSVC)
-        set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wpedantic -Werror")
+        set(CMAKE_CXX_FLAGS "-Wall -Wextra -Werror")
+        #set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wpedantic -Werror")
         #set(CMAKE_CXX_FLAGS_RELEASE "-O3")
         #set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")
     endif()
@@ -74,6 +75,20 @@ if(COROACTORS_IS_ROOT)
         #set(BENCHMARK_ENABLE_ASSEMBLY_TESTS OFF CACHE BOOL "" FORCE)
         #set(BENCHMARK_USE_BUNDLED_GTEST OFF CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googlebenchmark)
+    endif()
+
+    # Use system absl or download from github when unavailable
+    # Always recompile from sources when sanitizers are enabled
+    if((SANITIZE STREQUAL "") OR (SANITIZE STREQUAL "off"))
+        find_package(absl QUIET)
+    endif()
+    if(NOT absl_FOUND)
+        FetchContent_Declare(
+            absl
+            URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20230802.0.zip
+        )
+        set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(absl)
     endif()
 
     # Some targets require asio to build
