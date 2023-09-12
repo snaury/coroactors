@@ -240,12 +240,14 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            wakeups.fetch_add(1, std::memory_order_relaxed);
+            push_locks.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock l(Lock);
             MailboxLocked = true;
-            if (Waiters > 0) {
+            if (Waiters > 0 && !Notified) {
                 // Wake a single waiter, others should daisy chain
+                push_wakeups.fetch_add(1, std::memory_order_relaxed);
                 CanPop.notify_one();
+                Notified = true;
             }
         }
     }
@@ -257,13 +259,20 @@ public:
                 ++Waiters;
                 CanPop.wait(l);
                 --Waiters;
+                // Since we just returned from wait, assume notify_one was meant
+                // for us and consume it. This would make sure another thread is
+                // notified when there's more work or after we go back to wait.
+                Notified = false;
             }
 
             if (MailboxLocked) {
+                // Pessimistic: unlock mailbox when still no work
                 if (auto* result = Mailbox.pop()) {
-                    if (Waiters > 0) {
+                    if (Waiters > 0 && !Notified) {
                         // Mailbox still locked, wake one more waiter
+                        pop_wakeups.fetch_add(1, std::memory_order_relaxed);
                         CanPop.notify_one();
+                        Notified = true;
                     }
                     return result;
                 }
@@ -282,11 +291,13 @@ public:
         std::unique_lock l(Lock);
         if (MailboxLocked) {
             if (auto* result = Mailbox.try_pop()) {
-                if (Waiters > 0) {
+                if (Waiters > 0 && !Notified) {
                     CanPop.notify_one();
+                    Notified = true;
                 }
                 return result;
             }
+            // Mailbox is still locked
         }
         return nullptr;
     }
@@ -298,9 +309,10 @@ public:
     }
 
     std::string stats() {
-        auto w = wakeups.exchange(0, std::memory_order_relaxed);
         std::stringstream s;
-        s << "wakeups=" << w;
+        s << "push_locks=" << push_locks.exchange(0, std::memory_order_relaxed);
+        s << " push_wakeups=" << push_wakeups.exchange(0, std::memory_order_relaxed);
+        s << " pop_wakeups=" << pop_wakeups.exchange(0, std::memory_order_relaxed);
         return std::move(s).str();
     }
 
@@ -308,8 +320,11 @@ public:
     std::mutex Lock;
     std::condition_variable CanPop;
     TMailbox Mailbox;
-    std::atomic<size_t> wakeups{ 0 };
+    std::atomic<uint32_t> push_locks{ 0 };
+    std::atomic<uint32_t> push_wakeups{ 0 };
+    std::atomic<uint32_t> pop_wakeups{ 0 };
     size_t Waiters = 0;
+    bool Notified = false;
     bool MailboxLocked = false;
     bool Shutdown = false;
 };
@@ -331,7 +346,7 @@ public:
     void push(TArgs&&... args) {
         // Most of the time this will be lockfree
         if (Mailbox.push(std::forward<TArgs>(args)...)) {
-            wakeups.fetch_add(1, std::memory_order_relaxed);
+            push_locks.fetch_add(1, std::memory_order_relaxed);
             absl::MutexLock l(&Lock);
             MailboxLocked = true;
         }
@@ -345,6 +360,7 @@ public:
                     return result;
                 }
                 // Mailbox was unlocked, now wait
+                pop_unlocks.fetch_add(1, std::memory_order_relaxed);
                 MailboxLocked = false;
             }
             if (Shutdown) {
@@ -369,9 +385,9 @@ public:
     }
 
     std::string stats() {
-        auto w = wakeups.exchange(0, std::memory_order_relaxed);
         std::stringstream s;
-        s << "wakeups=" << w;
+        s << "push_locks=" << push_locks.exchange(0, std::memory_order_relaxed);
+        s << " pop_unlocks=" << pop_unlocks.exchange(0, std::memory_order_relaxed);
         return std::move(s).str();
     }
 
@@ -383,7 +399,8 @@ private:
 public:
     absl::Mutex Lock;
     TMailbox Mailbox;
-    std::atomic<size_t> wakeups{ 0 };
+    std::atomic<uint32_t> push_locks{ 0 };
+    std::atomic<uint32_t> pop_unlocks{ 0 };
     bool MailboxLocked = false;
     bool Shutdown = false;
 };
