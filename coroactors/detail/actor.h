@@ -72,21 +72,21 @@ namespace coroactors::detail {
     };
 
     /**
-     * Runs the specified callback on exceptions
+     * Runs the specified callback at scope exit unless cancelled
      */
     template<class Callback>
-    class exceptions_guard {
+    class scope_guard {
     public:
         template<class... Args>
-        explicit exceptions_guard(Args&&... args)
+        explicit scope_guard(Args&&... args)
             : callback(std::forward<Args>(args)...)
         {}
 
-        exceptions_guard(const exceptions_guard&) = delete;
-        exceptions_guard& operator=(const exceptions_guard&) = delete;
+        scope_guard(const scope_guard&) = delete;
+        scope_guard& operator=(const scope_guard&) = delete;
 
-        ~exceptions_guard() {
-            if (!cancelled && count != std::uncaught_exceptions()) [[unlikely]] {
+        ~scope_guard() {
+            if (!cancelled) {
                 callback();
             }
         }
@@ -97,12 +97,11 @@ namespace coroactors::detail {
 
     private:
         Callback callback;
-        int count = std::uncaught_exceptions();
         bool cancelled = false;
     };
 
     template<class Callback>
-    exceptions_guard(Callback&&) -> exceptions_guard<std::decay_t<Callback>>;
+    scope_guard(Callback&&) -> scope_guard<std::decay_t<Callback>>;
 
     /**
      * A callback type that restores the frame context
@@ -476,20 +475,21 @@ namespace coroactors::detail {
                 auto context = self.context;
 
                 // Aborts async_start on exceptions
-                exceptions_guard guard([this]{
+                scope_guard guard([this]{
                     self.context.manager().async_abort(&self);
                 });
 
                 if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
+                    guard.cancel();
                 } else {
                     auto next = symmetric::intercept(
                         awaiter.await_suspend(std::move(k)));
+                    guard.cancel();
 
                     if (!next) {
                         // Awaiter did not suspend, abort and resume
-                        guard.cancel();
                         self.context.manager().async_abort(&self);
                         return symmetric::self(c);
                     }
@@ -612,7 +612,7 @@ namespace coroactors::detail {
                 self.context = new_context;
 
                 // Aborts async_start and context change on exceptions
-                exceptions_guard guard([this, &context]{
+                scope_guard guard([this, &context]{
                     self.context = std::move(context);
                     self.context.manager().async_abort(&self);
                 });
@@ -620,14 +620,15 @@ namespace coroactors::detail {
                 if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
+                    guard.cancel();
                 } else {
                     auto next = symmetric::intercept(
                         awaiter.await_suspend(std::move(k)));
+                    guard.cancel();
 
                     if (!next) {
                         // Awaiter did not suspend, abort and resume, but also
                         // perform a context switch to the new context
-                        guard.cancel();
                         self.context = std::move(context);
                         self.context.manager().async_abort(&self);
                         auto next = new_context.manager().switch_context(

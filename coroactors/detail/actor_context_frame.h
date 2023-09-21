@@ -474,7 +474,7 @@ namespace coroactors::detail {
         }
 
         std::coroutine_handle<> switch_context(actor_context_frame* frame,
-                bool returning)
+                bool returning) noexcept
         {
             assert(is_running(frame) && "Switching context for a frame that is not running");
 
@@ -486,7 +486,7 @@ namespace coroactors::detail {
         }
 
         std::coroutine_handle<> switch_frame(actor_context_frame* from_frame,
-                actor_context_frame* to_frame, bool returning)
+                actor_context_frame* to_frame, bool returning) noexcept
         {
             assert(is_running(from_frame) && "Switching from frame that is not running");
 
@@ -531,7 +531,7 @@ namespace coroactors::detail {
         /**
          * Forces preemption without yielding in the current context
          */
-        std::coroutine_handle<> preempt(actor_context_frame* frame) {
+        std::coroutine_handle<> preempt(actor_context_frame* frame) noexcept {
             assert(is_running(frame) && "calling preempt() with a frame that is not running");
 
             if (!context) {
