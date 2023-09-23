@@ -417,9 +417,7 @@ enum class ESchedulerType {
 #if HAVE_ASIO
     Asio,
 #endif
-#if HAVE_ABSEIL
     WorkStealing,
-#endif
 };
 
 class actor_scheduler_stats {
@@ -510,7 +508,6 @@ public:
 };
 #endif
 
-#if HAVE_ABSEIL
 class WorkStealingScheduler
     : public actor_scheduler
     , public actor_scheduler_stats
@@ -560,10 +557,8 @@ public:
     }
 
     ~WorkStealingScheduler() {
-        {
-            absl::MutexLock l(&lock_);
-            shutdown_ = true;
-        }
+        blocked_threads_.fetch_or(FlagShutdown, std::memory_order_release);
+        blocked_threads_.notify_all();
 
         for (auto& thread : threads_) {
             thread.join();
@@ -645,71 +640,128 @@ private:
         }
 
         // We couldn't find anything, block waiting for various wakeup conditions
-        actor_scheduler_runnable* r;
-        blocked_threads_.fetch_add(1, std::memory_order_acquire);
-        for (int attempt = 0; ; ++attempt) {
-            inc(stats_mutex_locks);
-            // Note: we lock unconditionally in the first iteration, to make
-            // sure we don't miss local tasks that have been added without
-            // signalling before blocked threads counter was incremented.
-            absl::MutexLock l(&lock_, attempt == 0 ? absl::Condition::kTrue : absl::Condition(this, &WorkStealingScheduler::must_wakeup));
-
-            if (global_queue_locked_.load(std::memory_order_relaxed)) {
-                if ((r = global_queue_.pop())) {
-                    if (global_queue_.try_unlock()) {
-                        global_queue_locked_.store(false, std::memory_order_relaxed);
+        for (;;) {
+            bool woken_up = false;
+            auto current = blocked_threads_.load(std::memory_order_acquire);
+            while ((current & FlagWakeupMask) == 0) {
+                current = blocked_threads_.fetch_add(WaitingThreadsIncrement, std::memory_order_acquire)
+                    + WaitingThreadsIncrement;
+                if ((current & FlagWakeupMask) == 0) {
+                    // Reduce chances of missing concurrently added local tasks
+                    if (auto* r = try_stealing(state)) {
+                        blocked_threads_.fetch_sub(WaitingThreadsIncrement, std::memory_order_release);
+                        state->local_processed++;
+                        return r;
                     }
-                    state->local_processed = 0;
-                    break;
                 }
-                global_queue_locked_.store(false, std::memory_order_relaxed);
+                while ((current & FlagWakeupMask) == 0) {
+                    woken_up = false;
+                    blocked_threads_.wait(current, std::memory_order_acquire);
+                    current = blocked_threads_.load(std::memory_order_acquire);
+                    woken_up = true;
+                }
+                current = blocked_threads_.fetch_sub(WaitingThreadsIncrement, std::memory_order_release)
+                    - WaitingThreadsIncrement;
             }
 
-            if (attempt == 0 || may_have_local_tasks_) {
-                if ((r = try_stealing(state))) {
-                    state->local_processed++;
-                    break;
-                }
-                may_have_local_tasks_ = false;
-            }
+            // Operations on the global queue must be performed under the lock
+            inc(stats_mutex_locks);
+            std::unique_lock l(lock_);
 
-            if (shutdown_) {
-                r = nullptr;
-                break;
+            // We need to recheck the flag after taking the lock
+            current = blocked_threads_.load(std::memory_order_acquire);
+            while ((current & FlagWakeupMask) != 0) {
+                if ((current & FlagGlobalQueueLockedMask) != 0) {
+                    // We should never observe a temporary state of an unlock/relock race
+                    assert((current & FlagGlobalQueueLockedMask) == FlagGlobalQueueLocked);
+
+                    if (auto* r = global_queue_.pop()) {
+                        if (global_queue_.try_unlock()) {
+                            // Note: it is possible for flag to temporarily become
+                            // two, when the queue is concurrently locked before
+                            // we finish the decrement. In that case the flag self
+                            // heals and becomes locked again.
+                            current = blocked_threads_.fetch_sub(FlagGlobalQueueLocked, std::memory_order_release)
+                                - FlagGlobalQueueLocked;
+                        }
+                        l.unlock();
+                        // Make sure to wake the next thread after we consume a wakeup
+                        if (woken_up && (current & FlagWakeupMask) != 0 && current >= WaitingThreadsIncrement) {
+                            blocked_threads_.notify_one();
+                        }
+                        state->local_processed = 0;
+                        return r;
+                    }
+
+                    current = blocked_threads_.fetch_sub(FlagGlobalQueueLocked, std::memory_order_release)
+                        - FlagGlobalQueueLocked;
+                    continue;
+                }
+
+                if ((current & FlagLocalTasksMask) != 0) {
+                    if (auto* r = try_stealing(state)) {
+                        l.unlock();
+                        // Make sure to wake the next thread after we consume a wakeup
+                        if (woken_up && (current & FlagWakeupMask) != 0 && current >= WaitingThreadsIncrement) {
+                            blocked_threads_.notify_one();
+                        }
+                        state->local_processed++;
+                        return r;
+                    }
+                    // Note: local tasks are set to 2 when local tasks become
+                    // available for stealing. We decrement it by 1 when all
+                    // queues are found to be empty, but there may be a race
+                    // where a new task is added between our last check and the
+                    // decrement, so on the first pass the flag will become 1.
+                    // Only when we recheck it again and still find no tasks do
+                    // we know all local queues are empty.
+                    current = blocked_threads_.fetch_sub(NoLocalTasksDecrement, std::memory_order_release)
+                        - NoLocalTasksDecrement;
+                    continue;
+                }
+
+                if ((current & FlagShutdown) != 0) {
+                    return nullptr;
+                }
+
+                assert((current & FlagWakeupMask) == 0);
             }
         }
-        blocked_threads_.fetch_sub(1, std::memory_order_release);
-        return r;
-    }
-
-    bool must_wakeup() const {
-        return global_queue_locked_.load(std::memory_order_relaxed) ||
-            may_have_local_tasks_ ||
-            shutdown_;
     }
 
     actor_scheduler_runnable* pop_global_task(thread_state* state) {
+        // Note: we may observe a stale value here, but it's ok, because the
+        // worst that could happen is we skip some iterations and don't look
+        // into the global queue. Eventually the value will catch up however.
+        auto current = blocked_threads_.load(std::memory_order_relaxed);
+
         // Don't steal global tasks from blocked threads
-        if (blocked_threads_.fetch_add(0, std::memory_order_relaxed) > 0) {
+        if (current >= WaitingThreadsIncrement) {
             return nullptr;
         }
 
         // Don't lock the mutex when the global queue is likely empty
-        if (!global_queue_locked_.load(std::memory_order_relaxed)) {
+        if ((current & FlagGlobalQueueLockedMask) == 0) {
             return nullptr;
         }
 
         inc(stats_mutex_locks);
-        absl::MutexLock l(&lock_);
+        std::unique_lock l(lock_);
 
-        if (!global_queue_locked_.load(std::memory_order_relaxed)) {
+        current = blocked_threads_.load(std::memory_order_acquire);
+        if ((current & FlagGlobalQueueLockedMask) == 0) {
             return nullptr;
         }
+        assert((current & FlagGlobalQueueLockedMask) == FlagGlobalQueueLocked);
 
         auto* r = global_queue_.pop();
         if (!r || global_queue_.try_unlock()) {
-            global_queue_locked_.store(false, std::memory_order_relaxed);
+            // Note: we don't need to wake anyone even when flag becomes locked
+            // concurrently, because we don't consume a notify.
+            blocked_threads_.fetch_sub(FlagGlobalQueueLocked, std::memory_order_release);
         }
+
+        l.unlock();
 
         if (r && local_queue_size(state) > 0) {
             // We have removed a task from global queue, but we have some local
@@ -720,7 +772,7 @@ private:
             // - thread 3 has nothing to execute and blocks without wake up conditions
             // Make sure other threads know there is potentially more work in
             // local queues, so they try to steal tasks when they block.
-            may_have_local_tasks_ = true;
+            wake_by_local_tasks();
         }
 
         return r;
@@ -838,24 +890,29 @@ private:
 
     void push_to_global(actor_scheduler_runnable* r, bool wake) {
         (void)wake;
-        if (global_queue_.push(r)) {
-            // We have locked the queue
-            inc(stats_mutex_locks);
-            absl::MutexLock l(&lock_);
-            global_queue_locked_.store(true, std::memory_order_relaxed);
-            if (blocked_threads_.fetch_add(0, std::memory_order_relaxed) > 0) {
-                // This will wake up at least one thread
+        if (global_queue_.push(r) && !global_queue_.try_unlock()) {
+            // We have locked the queue and there's at least one runnable now
+            auto prev = blocked_threads_.fetch_add(FlagGlobalQueueLocked, std::memory_order_release);
+            if ((prev & FlagGlobalQueueLockedMask) == 0 && prev >= WaitingThreadsIncrement) [[unlikely]] {
+                blocked_threads_.notify_one();
                 inc(stats_wakeups);
             }
         }
     }
 
     void wake_by_local_tasks() {
-        if (blocked_threads_.fetch_add(0, std::memory_order_relaxed) > 0) {
-            inc(stats_mutex_locks);
-            absl::MutexLock l(&lock_);
-            may_have_local_tasks_ = true;
-            inc(stats_wakeups);
+        // It is possible for another thread to increment waiters, but we may
+        // read a stale value here, causing a race. In that case we will not
+        // wake a thread, and it will keep waiting, when it could steal a task
+        // from current thread. The penalty for doing a read-modify-write is
+        // too big however and limits scalability, so we want to avoid that.
+        auto current = blocked_threads_.load(std::memory_order_relaxed);
+        if ((current & FlagLocalTasksMask) != FlagLocalTasksMask && current >= WaitingThreadsIncrement) [[unlikely]] {
+            auto prev = blocked_threads_.fetch_or(FlagLocalTasksMask, std::memory_order_release);
+            if ((prev & FlagLocalTasksMask) == 0 && prev >= WaitingThreadsIncrement) [[unlikely]] {
+                blocked_threads_.notify_one();
+                inc(stats_wakeups);
+            }
         }
     }
 
@@ -867,7 +924,9 @@ public:
         s << " steal_attempts=" << take(stats_steal_attempts);
         s << " pop_local_cas_fails=" << take(stats_pop_local_cas_fail);
         s << " steal_cas_fail=" << take(stats_steal_cas_fail);
-        s << " blocked=" << blocked_threads_.load(std::memory_order_relaxed);
+        auto current = blocked_threads_.load(std::memory_order_relaxed);
+        s << " blocked=" << (current >> WaitingThreadsShift);
+        s << " wakeup_mask=" << (current & FlagWakeupMask);
         return std::move(s).str();
     }
 
@@ -883,17 +942,25 @@ private:
     }
 
 private:
+    using blocked_threads_value_t = detail::semaphore_atomic_t::value_type;
+    static constexpr blocked_threads_value_t FlagShutdown = 1;
+    static constexpr blocked_threads_value_t NoLocalTasksDecrement = 2;
+    static constexpr blocked_threads_value_t FlagLocalTasksMask = 2 + 4;
+    static constexpr blocked_threads_value_t FlagGlobalQueueLocked = 8;
+    static constexpr blocked_threads_value_t FlagGlobalQueueLockedMask = 8 + 16;
+    static constexpr blocked_threads_value_t FlagWakeupMask = 31;
+    static constexpr blocked_threads_value_t WaitingThreadsIncrement = 32;
+    static constexpr int WaitingThreadsShift = 5;
+
+private:
     std::chrono::microseconds preempt_us_;
     std::deque<thread_state> thread_states_;
     std::deque<std::thread> threads_;
 
-    std::atomic<uint32_t> blocked_threads_{ 0 };
-    bool may_have_local_tasks_ = false;
-    bool shutdown_ = false;
+    alignas(128) detail::semaphore_atomic_t blocked_threads_{ 0 };
 
-    absl::Mutex lock_;
-    std::atomic<bool> global_queue_locked_{ false };
-    mailbox_t global_queue_;
+    alignas(128) std::mutex lock_;
+    alignas(128) mailbox_t global_queue_;
 
     std::atomic<uint32_t> stats_wakeups{ 0 };
     std::atomic<uint32_t> stats_mutex_locks{ 0 };
@@ -904,7 +971,6 @@ private:
 private:
     static inline thread_local thread_state* local_state{ nullptr };
 };
-#endif
 
 std::shared_ptr<actor_scheduler> create_scheduler(ESchedulerType type,
         size_t threads, std::chrono::microseconds preemptUs)
@@ -1068,12 +1134,10 @@ int main(int argc, char** argv) {
             continue;
         }
 #endif
-#if HAVE_ABSEIL
         if (arg == "--use-work-stealing") {
             schedulerType = ESchedulerType::WorkStealing;
             continue;
         }
-#endif
         if (arg == "--without-latencies") {
             withLatencies = false;
             continue;
