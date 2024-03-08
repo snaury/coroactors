@@ -5,7 +5,8 @@
 
 #pragma once
 #ifndef coroactors_use_std_stop_token
-#if __has_include(<stop_token>)
+#include <version>
+#if __has_include(<stop_token>) && defined(__cpp_lib_jthread)
 #define coroactors_use_std_stop_token 1
 #else
 #define coroactors_use_std_stop_token 0
