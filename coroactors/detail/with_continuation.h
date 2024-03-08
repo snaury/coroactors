@@ -32,9 +32,8 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerDestroyed = 2;
 
     public:
-        continuation_state(result<T>* result_ptr, stop_token&& token) noexcept
-            : result_ptr(result_ptr)
-            , token(std::move(token))
+        explicit continuation_state(stop_token&& token) noexcept
+            : token(std::move(token))
         {}
 
         continuation_state(const continuation_state&) = delete;
@@ -61,7 +60,7 @@ namespace coroactors::detail {
                         std::memory_order_acq_rel, std::memory_order_relaxed))
                 {
                     if (addr) {
-                        result_ptr->set_exception(with_continuation_error("continuation was not resumed"));
+                        result_.set_exception(with_continuation_error("continuation was not resumed"));
                         symmetric::resume(
                             std::coroutine_handle<>::from_address(addr));
                     }
@@ -105,23 +104,21 @@ namespace coroactors::detail {
 
         template<class... TArgs>
         void set_value(TArgs&&... args) {
-            if (!result_ptr) [[unlikely]] {
+            if (result_) [[unlikely]] {
                 throw with_continuation_error("continuation was resumed or destroyed already");
             }
-            result_ptr->set_value(std::forward<TArgs>(args)...);
+            result_.set_value(std::forward<TArgs>(args)...);
         }
 
         template<class E>
         void set_exception(E&& e) {
-            if (!result_ptr) [[unlikely]] {
+            if (result_) [[unlikely]] {
                 throw with_continuation_error("continuation was resumed or destroyed already");
             }
-            result_ptr->set_exception(std::forward<E>(e));
+            result_.set_exception(std::forward<E>(e));
         }
 
         std::coroutine_handle<> finish() noexcept {
-            // Try to catch attempts to resume again
-            result_ptr = nullptr;
             // This synchronizes with acquire/release in set_continuation
             void* addr = continuation.exchange(
                 reinterpret_cast<void*>(MarkerFinished),
@@ -135,9 +132,15 @@ namespace coroactors::detail {
             }
         }
 
+        T take_value() {
+            return result_.take_value();
+        }
+
         void cancel() noexcept {
             // Try to catch attempts to resume later
-            result_ptr = nullptr;
+            if (!result_) {
+                result_.set_exception(std::exception_ptr());
+            }
             // Called by awaiter when it is destroyed without resuming
             // Tries to make sure it will not be resumed later, but it's up to
             // the user to make sure there is no race with both ends trying to
@@ -152,14 +155,12 @@ namespace coroactors::detail {
 
     private:
         std::atomic<void*> continuation{ nullptr };
-        result<T>* result_ptr;
+        result<T> result_;
         stop_token token;
     };
 
     template<class T, class Callback>
-    class [[nodiscard]] with_continuation_awaiter
-        : private result<T>
-    {
+    class [[nodiscard]] with_continuation_awaiter {
         using status = typename continuation_state<T>::status;
 
     public:
@@ -170,11 +171,8 @@ namespace coroactors::detail {
         with_continuation_awaiter(const with_continuation_awaiter&) = delete;
         with_continuation_awaiter& operator=(const with_continuation_awaiter&) = delete;
 
-        // Awaiter may be moved by some wrappers, but only before the await
-        // starts, so all we have to "move" is a reference to the callback
-        with_continuation_awaiter(with_continuation_awaiter&& rhs) noexcept
-            : callback(std::move(rhs.callback))
-        {}
+        // Support moving awaiter by wrappers before awaiting
+        with_continuation_awaiter(with_continuation_awaiter&& rhs) noexcept = default;
 
         ~with_continuation_awaiter() noexcept {
             if (state_) {
@@ -183,8 +181,7 @@ namespace coroactors::detail {
         }
 
         bool await_ready(stop_token token = {}) {
-            state_.reset(new continuation_state<T>(
-                static_cast<result<T>*>(this), std::move(token)));
+            state_.reset(new continuation_state<T>(std::move(token)));
             std::move(callback)(continuation<T>(state_));
             // Avoid suspending when the result is ready
             return state_->ready();
@@ -212,8 +209,8 @@ namespace coroactors::detail {
         }
 
         T await_resume() {
-            state_.reset();
-            return this->take_value();
+            auto state = std::move(state_);
+            return state->take_value();
         }
 
     private:
