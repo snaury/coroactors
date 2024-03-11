@@ -25,22 +25,4 @@ namespace coroactors::detail {
     using with_task_group_result_t = std::decay_t<
         await_result_t<with_task_group_awaitable_t<T, Callback>>>;
 
-    /**
-     * This is used as a stop_callback callback for propagating cancellation
-     */
-    template<class T>
-    class with_task_group_request_stop {
-    public:
-        explicit with_task_group_request_stop(task_group<T>& group) noexcept
-            : group(group)
-        {}
-
-        void operator()() noexcept {
-            group.request_stop();
-        }
-
-    private:
-        task_group<T>& group;
-    };
-
 } // namespace coroactors::detail

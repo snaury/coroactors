@@ -21,19 +21,17 @@ namespace coroactors {
         // The task group we will be passing to callback
         task_group<T> group;
 
-        // Current stop token we inherited from the caller
-        const stop_token& token = co_await actor_context::current_stop_token;
-
-        // Propagate cancellation to group when current call is cancelled
-        std::optional<stop_callback<detail::with_task_group_request_stop<T>>> stop;
-        if (token.stop_possible()) {
-            stop.emplace(token, group);
-        }
-
         using Result = detail::with_task_group_result_t<T, Callback>;
         result<Result> r;
 
         try {
+            // Propagate cancellation to group when current call is cancelled
+            stop_callback propagate(
+                co_await actor_context::current_stop_token,
+                [&group]() noexcept {
+                    group.request_stop();
+                });
+
             if constexpr (std::is_void_v<Result>) {
                 co_await callback(group);
                 r.set_value();
@@ -43,9 +41,6 @@ namespace coroactors {
         } catch (...) {
             r.set_exception(std::current_exception());
         }
-
-        // Remove cancellation propagation as soon as possible
-        stop.reset();
 
         // When callback returns all unawaited tasks are cancelled
         group.request_stop();

@@ -389,7 +389,7 @@ namespace coroactors::detail {
             : state(nullptr)
         {}
 
-        stop_source(const stop_source& rhs)
+        stop_source(const stop_source& rhs) noexcept
             : state(rhs.state)
         {
             if (state) {
@@ -397,11 +397,11 @@ namespace coroactors::detail {
             }
         }
 
-        stop_source(stop_source&& rhs)
+        stop_source(stop_source&& rhs) noexcept
             : state(std::move(rhs.state))
         {}
 
-        ~stop_source() {
+        ~stop_source() noexcept {
             if (state) {
                 state->remove_source();
             }

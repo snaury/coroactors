@@ -39,7 +39,6 @@ namespace coroactors {
         ~task_group() {
             if (sink_) {
                 sink_->detach();
-                source_.request_stop();
             }
         }
 
@@ -216,7 +215,7 @@ namespace coroactors {
 
     private:
         sink_ptr sink_{ new sink_type };
-        stop_source source_;
+        scoped_stop_source source_;
     };
 
 } // namespace coroactors
