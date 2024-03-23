@@ -10,7 +10,7 @@ namespace coroactors {
      */
     template<class T = void>
     class continuation {
-        template<class U, class Callback>
+        template<class U>
         friend class detail::with_continuation_awaiter;
 
         explicit continuation(const intrusive_ptr<detail::continuation_state<T>>& state) noexcept
@@ -143,25 +143,31 @@ namespace coroactors {
     /**
      * Provides arbitrary suspension points for coroutines
      *
-     * When the result is co_awaited the provided callback will be called with
-     * with a continuation<T> object that can be used to resume the awaiting
-     * coroutine. The awaiting coroutine will not suspend and continue directly
+     * The provided callback is called with a continuation<T> object that can
+     * be used to resume the awaiting coroutine. The coroutine will not suspend
      * when the provided object is resumed before the callback returns.
      */
     template<class T, class Callback>
-    detail::with_continuation_awaiter<T, Callback>
-    with_continuation(Callback&& callback) noexcept
+    detail::with_continuation_awaiter<T>
+    with_continuation(Callback&& callback)
         requires (detail::is_with_continuation_callback<Callback, T>)
     {
-        return detail::with_continuation_awaiter<T, Callback>(std::forward<Callback>(callback));
+        return detail::with_continuation_awaiter<T>(std::forward<Callback>(callback));
     }
 
+    /**
+     * Provides arbitrary suspension points for coroutines
+     *
+     * The provided callback is called with a continuation<void> object that can
+     * be used to resume the awaiting coroutine. The coroutine will not suspend
+     * when the provided object is resumed before the callback returns.
+     */
     template<class Callback>
-    detail::with_continuation_awaiter<void, Callback>
-    with_continuation(Callback&& callback) noexcept
+    detail::with_continuation_awaiter<void>
+    with_continuation(Callback&& callback)
         requires (detail::is_with_continuation_callback<Callback, void>)
     {
-        return detail::with_continuation_awaiter<void, Callback>(std::forward<Callback>(callback));
+        return detail::with_continuation_awaiter<void>(std::forward<Callback>(callback));
     }
 
 } // namespace coroactors

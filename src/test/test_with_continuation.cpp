@@ -121,9 +121,9 @@ TEST(WithContinuationTest, CompleteSync) {
     int stage = 0;
 
     run_with_continuation(&stage, [&](continuation<> c) {
-        // We must be running in await_ready
+        // We must be running before await_ready
         EXPECT_EQ(stage, 1);
-        EXPECT_EQ(await_ready_count, 1);
+        EXPECT_EQ(await_ready_count, 0);
         EXPECT_EQ(await_suspend_count, 0);
         // Resume directly in the callback
         c.resume();
@@ -148,9 +148,9 @@ TEST(WithContinuationTest, CompleteAsync) {
     continuation<> suspended;
 
     run_with_continuation(&stage, [&](continuation<> c) {
-        // We must be running in await_ready
+        // We must be running before await_ready
         EXPECT_EQ(stage, 1);
-        EXPECT_EQ(await_ready_count, 1);
+        EXPECT_EQ(await_ready_count, 0);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
         suspended = std::move(c);
@@ -158,6 +158,7 @@ TEST(WithContinuationTest, CompleteAsync) {
 
     // Must be suspended with continuation
     EXPECT_EQ(stage, 1);
+    EXPECT_EQ(await_ready_count, 1);
     EXPECT_EQ(await_suspend_count, 1);
     EXPECT_EQ(await_resume_count, 0);
     ASSERT_TRUE(suspended);
@@ -192,9 +193,9 @@ TEST(WithContinuationTest, CompleteRaceWithState) {
     });
 
     run_with_continuation(&stage, [&](continuation<> c) {
-        // We must be running in await_ready
+        // We must be running before await_ready
         EXPECT_EQ(stage, 1);
-        EXPECT_EQ(await_ready_count, 1);
+        EXPECT_EQ(await_ready_count, 0);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
         suspended = std::move(c);
@@ -226,9 +227,9 @@ TEST(WithContinuationTest, CompleteRaceWithoutState) {
     });
 
     run_with_continuation(&stage, [&](continuation<> c) {
-        // We must be running in await_ready
+        // We must be running before await_ready
         EXPECT_EQ(stage, 1);
-        EXPECT_EQ(await_ready_count, 1);
+        EXPECT_EQ(await_ready_count, 0);
         EXPECT_EQ(await_suspend_count, 0);
         // Store continuation for later
         suspended = std::move(c);
@@ -453,9 +454,8 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
                     // Expected refs:
                     // - in actor_wrapper (local variable)
                     // - in actor_with_continuation (lambda argument)
-                    // - in with_continuation_awaiter (callback member)
                     // - the original lambda temporary is not destroyed yet!
-                    EXPECT_EQ(refs, 4);
+                    EXPECT_EQ(refs, 3);
                     suspended = std::move(c);
                 }),
             &refs));
@@ -464,7 +464,7 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
     ASSERT_TRUE(suspended);
     EXPECT_TRUE(result.running());
     // One less expected ref (lambda temporary destroyed)
-    ASSERT_EQ(refs, 3);
+    ASSERT_EQ(refs, 2);
 
     // Destroy continuation
     suspended.destroy();
@@ -485,7 +485,7 @@ TEST(WithContinuationTest, DestroyFromCallback) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 4);
+                    EXPECT_EQ(refs, 3);
                     c.destroy();
                 }),
             &refs));
@@ -509,13 +509,13 @@ TEST(WithContinuationTest, DestroyBottomUp) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 4);
+                    EXPECT_EQ(refs, 3);
                     suspended = std::move(c);
                 }),
             &refs));
 
     EXPECT_EQ(stage, 2);
-    EXPECT_EQ(refs, 3);
+    EXPECT_EQ(refs, 2);
     ASSERT_TRUE(suspended);
 
     result.destroy();
