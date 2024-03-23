@@ -136,13 +136,6 @@ namespace coroactors {
             }
         }
 
-        /**
-         * Returns the associated stop token
-         */
-        const stop_token& get_stop_token() const noexcept {
-            return state->get_stop_token();
-        }
-
     private:
         intrusive_ptr<detail::continuation_state<T>> state;
     };

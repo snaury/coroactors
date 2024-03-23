@@ -18,8 +18,8 @@ actor<void> do_with_task_group_cancel(int& stage, test_channel<int>& provider) {
         co_await with_task_group<int>([&](task_group<int>& group) -> actor<void> {
             co_await actor_context::caller_context();
 
-            group.add(provider.get());
-            group.add(provider.get());
+            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get(group.get_stop_token()));
 
             int value;
             try {
@@ -142,8 +142,8 @@ actor<void> do_with_task_group_result_type(int& stage, test_channel<int>& provid
         [&](task_group<int>& group) -> actor<move_only_int> {
             co_await actor_context::caller_context();
 
-            group.add(provider.get());
-            group.add(provider.get());
+            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get(group.get_stop_token()));
 
             stage = 1;
             int a = co_await group.next();
@@ -206,8 +206,8 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, te
             // We expect with_stop_token to not interfere with our context
             EXPECT_EQ(context, co_await actor_context::current_context);
 
-            group.add(provider.get());
-            group.add(provider.get());
+            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get(group.get_stop_token()));
 
             stage = 4;
             int a = co_await group.next();
@@ -287,8 +287,8 @@ actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, tes
             stage = 3;
             co_await actor_context::caller_context();
 
-            group.add(provider.get());
-            group.add(provider.get());
+            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get(group.get_stop_token()));
 
             stage = 4;
             bool r = co_await when_ready(group);

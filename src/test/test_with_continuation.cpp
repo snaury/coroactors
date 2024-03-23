@@ -530,37 +530,6 @@ TEST(WithContinuationTest, DestroyBottomUp) {
     EXPECT_THROW(suspended.destroy(), with_continuation_error);
 }
 
-TEST(WithContinuationTest, StopToken) {
-    int stage = 0;
-    int refs = 0;
-
-    stop_source source;
-    continuation<> suspended;
-
-    auto result = packaged_awaitable(
-        with_stop_token(
-            source.get_token(),
-            actor_wrapper(
-                actor_with_continuation(no_actor_context, stage,
-                    [&](continuation<> c) {
-                        suspended = std::move(c);
-                    }),
-                &refs)));
-
-    EXPECT_EQ(stage, 2);
-    // Expect only one ref in actor_wrapper
-    EXPECT_EQ(refs, 1);
-    ASSERT_TRUE(suspended);
-    EXPECT_TRUE(suspended.get_stop_token().stop_possible());
-    EXPECT_FALSE(suspended.get_stop_token().stop_requested());
-    source.request_stop();
-    EXPECT_TRUE(suspended.get_stop_token().stop_requested());
-    EXPECT_TRUE(result.running());
-    suspended.resume();
-    EXPECT_TRUE(result.success());
-    EXPECT_EQ(refs, 0);
-}
-
 TEST(WithContinuationTest, ThrowFromCallback) {
     struct custom_exception {};
 

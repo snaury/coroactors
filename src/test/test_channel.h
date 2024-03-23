@@ -6,11 +6,29 @@
 template<class T>
 class test_channel {
 public:
-    auto get() {
-        return coroactors::with_continuation<T>([this](coroactors::continuation<T> c) {
+    class continuation : public coroactors::continuation<T> {
+        using base_t = coroactors::continuation<T>;
+    public:
+        using base_t::base_t;
+
+        continuation(base_t&& rhs, coroactors::stop_token t)
+            : base_t(std::move(rhs))
+            , stop_token_(std::move(t))
+        {}
+
+        const coroactors::stop_token& get_stop_token() const {
+            return stop_token_;
+        }
+
+    private:
+        coroactors::stop_token stop_token_;
+    };
+
+    auto get(coroactors::stop_token t = {}) {
+        return coroactors::with_continuation<T>([this, t = std::move(t)](coroactors::continuation<T> c) mutable {
             std::unique_lock l(lock);
             if (results.empty()) {
-                queue.push_back(std::move(c));
+                queue.push_back(continuation(std::move(c), std::move(t)));
             } else {
                 // Note: we have not suspended yet, no risk of resuming
                 c.resume(std::move(results.front()));
@@ -36,7 +54,7 @@ public:
         return queue.size();
     }
 
-    coroactors::continuation<T> take() {
+    continuation take() {
         std::unique_lock l(lock);
         assert(!queue.empty());
         auto c = std::move(queue.front());
@@ -44,7 +62,7 @@ public:
         return c;
     }
 
-    coroactors::continuation<T> take_at(size_t index) {
+    continuation take_at(size_t index) {
         std::unique_lock l(lock);
         assert(index <= queue.size());
         auto it = queue.begin() + index;
@@ -69,5 +87,5 @@ public:
 private:
     mutable std::mutex lock;
     std::deque<T> results;
-    std::deque<coroactors::continuation<T>> queue;
+    std::deque<continuation> queue;
 };

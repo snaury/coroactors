@@ -2,7 +2,6 @@
 #include <coroactors/detail/config.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
-#include <coroactors/stop_token.h>
 #include <coroactors/with_continuation_error.h>
 #include <atomic>
 #include <cassert>
@@ -32,9 +31,7 @@ namespace coroactors::detail {
         static constexpr uintptr_t MarkerDestroyed = 2;
 
     public:
-        explicit continuation_state(stop_token&& token) noexcept
-            : token(std::move(token))
-        {}
+        continuation_state() noexcept = default;
 
         continuation_state(const continuation_state&) = delete;
         continuation_state& operator=(const continuation_state&) = delete;
@@ -149,14 +146,9 @@ namespace coroactors::detail {
             continuation.store(reinterpret_cast<void*>(MarkerDestroyed), std::memory_order_release);
         }
 
-        const stop_token& get_stop_token() const noexcept {
-            return token;
-        }
-
     private:
         std::atomic<void*> continuation{ nullptr };
         result<T> result_;
-        stop_token token;
     };
 
     template<class T, class Callback>
@@ -180,8 +172,8 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token = {}) {
-            state_.reset(new continuation_state<T>(std::move(token)));
+        bool await_ready() {
+            state_.reset(new continuation_state<T>());
             std::move(callback)(continuation<T>(state_));
             // Avoid suspending when the result is ready
             return state_->ready();
