@@ -31,12 +31,8 @@ namespace coroactors::detail {
             return self;
         }
 
-        void set_stop_token(stop_token token) noexcept {
-            this->token = std::move(token);
-        }
-
-        const stop_token& get_stop_token() const noexcept {
-            return token;
+        void set_stop_token_ptr(const stop_token* ptr) noexcept {
+            stop_token_ptr = ptr;
         }
 
     private:
@@ -50,7 +46,7 @@ namespace coroactors::detail {
         actor_context context;
 
     private:
-        stop_token token;
+        const stop_token* stop_token_ptr{ nullptr };
 
 #if COROACTORS_TRACK_FRAMES
         // The next running frame when multiple frames are running in the current thread
@@ -571,6 +567,7 @@ namespace coroactors::detail {
         }
 
         static void track_push_frame(actor_context_frame* frame) noexcept {
+            std::swap(current_stop_token_ptr, frame->stop_token_ptr);
 #if COROACTORS_TRACK_FRAMES
             frame->next_frame = running_frame;
             running_frame = frame;
@@ -587,6 +584,7 @@ namespace coroactors::detail {
 #else
             (void)frame;
 #endif
+            std::swap(current_stop_token_ptr, frame->stop_token_ptr);
         }
 
     public:

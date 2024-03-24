@@ -140,6 +140,7 @@ namespace coroactors::detail {
             static void await_suspend(std::coroutine_handle<>) noexcept { /* never called */ }
 
             void await_resume() noexcept {
+                self->set_stop_token_ptr(current_stop_token_ptr);
                 actor_context_manager::enter_frame(self);
             }
         };
@@ -257,6 +258,10 @@ namespace coroactors::detail {
                 if (type == ESwitchContext::Initial) {
                     // We must also leave the frame we entered in initial suspend
                     actor_context_manager::leave_frame(&self);
+                    // We have stop token pointer for the currently running stack
+                    // Don't keep a potentially dangling pointer around
+                    // We will grab a fresh pointer again on await
+                    self.set_stop_token_ptr(nullptr);
                     return symmetric::noop();
                 }
 
@@ -274,7 +279,7 @@ namespace coroactors::detail {
 
         switch_context_awaiter await_transform(actor_context::bind_context_t bound) {
             if (state == actor_promise_state::context_unknown) {
-                // We binding to an explicit initial context
+                // We are binding to an explicit initial context
                 context = bound.context;
                 state = actor_promise_state::context_set;
                 return switch_context_awaiter{ bound.context, ESwitchContext::Initial };
@@ -297,7 +302,7 @@ namespace coroactors::detail {
 
         auto await_transform(actor_context::caller_context_t::bind_context_t) {
             if (state == actor_promise_state::context_unknown) {
-                // We binding to a caller's initial context
+                // We are binding to a caller's initial context
                 state = actor_promise_state::context_inherit;
                 return switch_context_awaiter{ no_actor_context, ESwitchContext::Initial };
             }
@@ -383,7 +388,7 @@ namespace coroactors::detail {
         auto await_transform(actor_context::current_stop_token_t) {
             ensure_running();
 
-            return current_stop_token_awaiter_t{ get_stop_token() };
+            return current_stop_token_awaiter_t{ current_stop_token() };
         }
 
         template<awaitable Awaitable>
@@ -414,15 +419,9 @@ namespace coroactors::detail {
             }
 
             bool await_ready()
-                noexcept(has_await_ready_stop_token<Awaiter>
-                    ? has_noexcept_await_ready_stop_token<Awaiter>
-                    : has_noexcept_await_ready<Awaiter>)
+                noexcept(has_noexcept_await_ready<Awaiter>)
             {
-                if constexpr (has_await_ready_stop_token<Awaiter>) {
-                    return awaiter.await_ready(self.get_stop_token());
-                } else {
-                    return awaiter.await_ready();
-                }
+                return awaiter.await_ready();
             }
 
             COROACTORS_AWAIT_SUSPEND
@@ -536,15 +535,9 @@ namespace coroactors::detail {
             }
 
             bool await_ready()
-                noexcept(has_await_ready_stop_token<Awaiter>
-                    ? has_noexcept_await_ready_stop_token<Awaiter>
-                    : has_noexcept_await_ready<Awaiter>)
+                noexcept(has_noexcept_await_ready<Awaiter>)
             {
-                if constexpr (has_await_ready_stop_token<Awaiter>) {
-                    ready = awaiter.await_ready(self.get_stop_token());
-                } else {
-                    ready = awaiter.await_ready();
-                }
+                ready = awaiter.await_ready();
                 return ready && new_context == self.context;
             }
 
@@ -671,15 +664,9 @@ namespace coroactors::detail {
             {}
 
             bool await_ready()
-                noexcept(has_await_ready_stop_token<Awaiter>
-                    ? has_noexcept_await_ready_stop_token<Awaiter>
-                    : has_noexcept_await_ready<Awaiter>)
+                noexcept(has_noexcept_await_ready<Awaiter>)
             {
-                if constexpr (has_await_ready_stop_token<Awaiter>) {
-                    return awaiter.await_ready(self.get_stop_token());
-                } else {
-                    return awaiter.await_ready();
-                }
+                return awaiter.await_ready();
             }
 
             template<class Promise>
@@ -739,13 +726,10 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token) noexcept {
-            handle.promise().set_stop_token(std::move(token));
-            return handle.promise().ready();
-        }
-
         bool await_ready() noexcept {
-            return handle.promise().ready();
+            auto& p = handle.promise();
+            p.set_stop_token_ptr(current_stop_token_ptr);
+            return p.ready();
         }
 
         template<class Promise>
@@ -787,13 +771,10 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token) noexcept {
-            handle.promise().set_stop_token(std::move(token));
-            return handle.promise().ready();
-        }
-
         bool await_ready() noexcept {
-            return handle.promise().ready();
+            auto& p = handle.promise();
+            p.set_stop_token_ptr(current_stop_token_ptr);
+            return p.ready();
         }
 
         template<class Promise>

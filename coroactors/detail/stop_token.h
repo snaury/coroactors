@@ -33,30 +33,45 @@ namespace coroactors::detail {
 namespace coroactors::detail {
 
     /**
-     * Awaiter with `bool await_ready(const stop_token&)` extension present
+     * Thread local pointer to currently running coroutine stop token
      */
-    template<class Awaiter>
-    concept has_await_ready_stop_token = requires(Awaiter& awaiter, const stop_token& token) {
-        awaiter.await_ready(token) ? 1 : 0;
+    inline thread_local const stop_token* current_stop_token_ptr{ nullptr };
+
+    /**
+     * Returns stop token for the currently running coroutine
+     */
+    const stop_token& current_stop_token() noexcept {
+        if (const stop_token* p = current_stop_token_ptr) {
+            return *p;
+        } else {
+            static stop_token empty;
+            return empty;
+        }
+    }
+
+    /**
+     * Temporarily sets current_stop_token_ptr and restores it on scope exit
+     */
+    class current_stop_token_ptr_guard {
+    public:
+        current_stop_token_ptr_guard(const stop_token* ptr) noexcept
+            : saved(current_stop_token_ptr)
+        {
+            current_stop_token_ptr = ptr;
+        }
+
+        ~current_stop_token_ptr_guard() noexcept {
+            current_stop_token_ptr = saved;
+        }
+
+    private:
+        const stop_token* saved;
     };
 
     /**
-     * Awaiter with `bool await_ready(const stop_token&)` extension declared noexcept
+     * Awaiter that changes current stop token for an awaitable
      */
-    template<class Awaiter>
-    concept has_noexcept_await_ready_stop_token = requires(Awaiter& awaiter, const stop_token& token) {
-        { awaiter.await_ready(token) ? 1 : 0 } noexcept;
-    };
-
-    template<class Awaitable>
-    concept awaitable_with_stop_token_propagation =
-        awaitable<Awaitable> &&
-        has_await_ready_stop_token<std::decay_t<awaiter_type_t<Awaitable>>>;
-
-    /**
-     * Awaiter that overrides stop token of an awaitable
-     */
-    template<awaitable_with_stop_token_propagation Awaitable>
+    template<awaitable Awaitable>
     class with_stop_token_awaiter {
         using Awaiter = std::decay_t<awaiter_type_t<Awaitable>>;
 
@@ -77,9 +92,10 @@ namespace coroactors::detail {
         {}
 
         bool await_ready()
-            noexcept(has_noexcept_await_ready_stop_token<Awaiter>)
+            noexcept(has_noexcept_await_ready<Awaiter>)
         {
-            return awaiter.await_ready(std::move(token));
+            current_stop_token_ptr_guard guard(&token);
+            return awaiter.await_ready();
         }
 
         template<class Promise>

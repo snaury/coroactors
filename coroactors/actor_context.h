@@ -74,7 +74,7 @@ namespace coroactors {
         /**
          * Returns a wrapped awaitable that will be cancelled at the deadline
          */
-        template<detail::awaitable_with_stop_token_propagation Awaitable>
+        template<detail::awaitable Awaitable>
         auto with_deadline(actor_scheduler::time_point deadline, Awaitable&& awaitable) const {
             return detail::with_deadline_awaiter<Awaitable>(
                 std::forward<Awaitable>(awaitable),
@@ -84,7 +84,7 @@ namespace coroactors {
         /**
          * Returns a wrapped awaitable that will be cancelled after a timeout
          */
-        template<detail::awaitable_with_stop_token_propagation Awaitable>
+        template<detail::awaitable Awaitable>
         auto with_timeout(actor_scheduler::duration timeout, Awaitable&& awaitable) const {
             return with_deadline(actor_scheduler::clock_type::now() + timeout,
                 std::forward<Awaitable>(awaitable));
@@ -216,7 +216,6 @@ namespace coroactors {
          * Returns a stop token associated with the current actor
          */
         static constexpr current_stop_token_t current_stop_token{};
-
 
     private:
         intrusive_ptr<detail::actor_context_state> ptr;

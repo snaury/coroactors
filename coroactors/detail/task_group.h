@@ -370,7 +370,7 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token = {}) {
+        bool await_ready() {
             if (sink->count() == 0) {
                 throw task_group_error("task group has no tasks to await");
             }
@@ -380,6 +380,7 @@ namespace coroactors::detail {
             }
 
             // Setup cancellation forwarding when needed
+            stop_token token = current_stop_token();
             if (token.stop_possible()) {
                 if (token.stop_requested()) {
                     // Don't suspend when already cancelled
@@ -545,7 +546,7 @@ namespace coroactors::detail {
             return index;
         }
 
-        template<awaitable_with_stop_token_propagation Awaitable>
+        template<awaitable Awaitable>
         class pass_stop_token_awaiter {
             using Awaiter = awaiter_type_t<Awaitable>;
 
@@ -559,10 +560,10 @@ namespace coroactors::detail {
             pass_stop_token_awaiter& operator=(const pass_stop_token_awaiter&) = delete;
 
             bool await_ready()
-                noexcept(has_noexcept_await_ready_stop_token<Awaiter>)
+                noexcept(has_noexcept_await_ready<Awaiter>)
             {
-                // Note: our coroutine awaits exactly once, so token is moved
-                return awaiter.await_ready(std::move(self.token_));
+                current_stop_token_ptr_guard guard(&self.token_);
+                return awaiter.await_ready();
             }
 
             template<class Promise>
@@ -585,14 +586,9 @@ namespace coroactors::detail {
             task_group_promise& self;
         };
 
-        template<awaitable_with_stop_token_propagation Awaitable>
+        template<awaitable Awaitable>
         auto await_transform(Awaitable&& awaitable) noexcept {
             return pass_stop_token_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
-        }
-
-        template<awaitable Awaitable>
-        Awaitable&& await_transform(Awaitable&& awaitable) noexcept {
-            return std::forward<Awaitable>(awaitable);
         }
 
     private:

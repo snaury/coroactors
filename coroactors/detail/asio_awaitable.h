@@ -342,7 +342,8 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token = {}) {
+        bool await_ready() {
+            stop_token token = current_stop_token();
             result.reset(new continuation_type(token.stop_possible()));
 
             // Initiate the async operation

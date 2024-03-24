@@ -140,7 +140,7 @@ namespace coroactors::detail {
             }
         }
 
-        bool await_ready(stop_token token = {}) {
+        bool await_ready() {
             context.reset(new sleep_until_context);
             if (scheduler) {
                 scheduler->schedule(
@@ -148,7 +148,7 @@ namespace coroactors::detail {
                         context->finish(success);
                     },
                     deadline,
-                    std::move(token));
+                    current_stop_token());
                 return context->ready();
             } else {
                 context->finish(false);
@@ -198,7 +198,7 @@ namespace coroactors::detail {
         stop_source source;
     };
 
-    template<awaitable_with_stop_token_propagation Awaitable>
+    template<awaitable Awaitable>
     class with_deadline_awaiter {
         using Awaiter = std::decay_t<awaiter_type_t<Awaitable>>;
 
@@ -222,20 +222,23 @@ namespace coroactors::detail {
             , deadline(rhs.deadline)
         {}
 
-        bool await_ready(stop_token token = {}) {
+        bool await_ready() {
             if (scheduler) {
                 stop_source source;
+                stop_token token = current_stop_token();
                 if (token.stop_possible()) {
                     propagate.emplace(token, source);
                 }
                 if (!source.stop_requested()) {
                     scheduler->schedule(with_deadline_request_stop(source), deadline, std::move(token));
-                    token = source.get_token();
+                    deadline_token = source.get_token();
+                    current_stop_token_ptr_guard guard(&deadline_token);
+                    return awaiter.await_ready();
                 } else {
                     assert(token.stop_requested());
                 }
             }
-            return awaiter.await_ready(std::move(token));
+            return awaiter.await_ready();
         }
 
         template<class Promise>
@@ -258,6 +261,7 @@ namespace coroactors::detail {
         actor_scheduler* scheduler;
         actor_scheduler::time_point deadline;
         std::optional<stop_callback<with_deadline_request_stop>> propagate;
+        stop_token deadline_token;
     };
 
 } // namespace coroactors::detail
