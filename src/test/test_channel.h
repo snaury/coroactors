@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/stop_token.h>
 #include <coroactors/with_continuation.h>
 #include <deque>
 #include <mutex>

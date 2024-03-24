@@ -2,6 +2,7 @@
 #include <coroactors/actor_context.h>
 #include <coroactors/detail/actor_context.h>
 #include <coroactors/detail/intrusive_mailbox.h>
+#include <coroactors/detail/local.h>
 #include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/stop_token.h>
 #include <optional>
@@ -35,6 +36,10 @@ namespace coroactors::detail {
             stop_token_ptr = ptr;
         }
 
+        void set_locals_ptr(const coroutine_local_record* ptr) noexcept {
+            locals_ptr = ptr;
+        }
+
     private:
         void run() noexcept override;
 
@@ -47,6 +52,7 @@ namespace coroactors::detail {
 
     private:
         const stop_token* stop_token_ptr{ nullptr };
+        const coroutine_local_record* locals_ptr{ nullptr };
 
 #if COROACTORS_TRACK_FRAMES
         // The next running frame when multiple frames are running in the current thread
@@ -568,6 +574,7 @@ namespace coroactors::detail {
 
         static void track_push_frame(actor_context_frame* frame) noexcept {
             std::swap(current_stop_token_ptr, frame->stop_token_ptr);
+            std::swap(current_coroutine_local_ptr, frame->locals_ptr);
 #if COROACTORS_TRACK_FRAMES
             frame->next_frame = running_frame;
             running_frame = frame;
@@ -584,6 +591,7 @@ namespace coroactors::detail {
 #else
             (void)frame;
 #endif
+            std::swap(current_coroutine_local_ptr, frame->locals_ptr);
             std::swap(current_stop_token_ptr, frame->stop_token_ptr);
         }
 

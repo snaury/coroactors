@@ -7,6 +7,7 @@ set(SIMPLE_TESTS
     test_mailbox
     test_intrusive_mailbox
     test_task
+    test_local
 )
 
 # Common files and dependencies (compile once)

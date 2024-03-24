@@ -1,6 +1,7 @@
 #pragma once
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/config.h>
+#include <coroactors/detail/local.h>
 #include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
@@ -535,10 +536,13 @@ namespace coroactors::detail {
 
         auto final_suspend() noexcept { return final_suspend_t{}; }
 
-        size_t start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token) {
+        size_t start(const intrusive_ptr<task_group_sink<T>>& sink,
+                stop_token&& token, const coroutine_local_record* inherited_locals)
+        {
             size_t index = sink->next_index();
             sink_ = sink;
             token_ = std::move(token);
+            inherited_locals_ = inherited_locals;
             running = true;
             this->result_->set_index(index);
             symmetric::resume(
@@ -547,22 +551,23 @@ namespace coroactors::detail {
         }
 
         template<awaitable Awaitable>
-        class pass_stop_token_awaiter {
+        class pass_inherited_awaiter {
             using Awaiter = awaiter_type_t<Awaitable>;
 
         public:
-            pass_stop_token_awaiter(Awaitable&& awaitable, task_group_promise& self)
+            pass_inherited_awaiter(Awaitable&& awaitable, task_group_promise& self)
                 : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
                 , self(self)
             {}
 
-            pass_stop_token_awaiter(const pass_stop_token_awaiter&) = delete;
-            pass_stop_token_awaiter& operator=(const pass_stop_token_awaiter&) = delete;
+            pass_inherited_awaiter(const pass_inherited_awaiter&) = delete;
+            pass_inherited_awaiter& operator=(const pass_inherited_awaiter&) = delete;
 
             bool await_ready()
                 noexcept(has_noexcept_await_ready<Awaiter>)
             {
                 current_stop_token_ptr_guard guard(&self.token_);
+                current_coroutine_local_ptr_guard locals(self.inherited_locals_);
                 return awaiter.await_ready();
             }
 
@@ -588,12 +593,13 @@ namespace coroactors::detail {
 
         template<awaitable Awaitable>
         auto await_transform(Awaitable&& awaitable) noexcept {
-            return pass_stop_token_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
+            return pass_inherited_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
         }
 
     private:
         intrusive_ptr<task_group_sink<T>> sink_;
         stop_token token_;
+        const coroutine_local_record* inherited_locals_;
         bool running = false;
     };
 
@@ -608,8 +614,10 @@ namespace coroactors::detail {
     public:
         using promise_type = task_group_promise<T>;
 
-        size_t start(const intrusive_ptr<task_group_sink<T>>& sink, stop_token&& token) {
-            return handle.promise().start(sink, std::move(token));
+        size_t start(const intrusive_ptr<task_group_sink<T>>& sink,
+                stop_token&& token, const coroutine_local_record* inherited_locals)
+        {
+            return handle.promise().start(sink, std::move(token), inherited_locals);
         }
 
     private:

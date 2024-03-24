@@ -32,6 +32,11 @@ namespace coroactors {
                     group.request_stop();
                 });
 
+            // Propagate current coroutine locals to all tasks in the task
+            // group. Note we co_await all tasks before returning, so current
+            // record is guaranteed to outlive all tasks in the task group.
+            group.set_inherited_locals(detail::current_coroutine_local_ptr);
+
             if constexpr (std::is_void_v<Result>) {
                 co_await callback(group);
                 r.set_value();

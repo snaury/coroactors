@@ -49,7 +49,7 @@ namespace coroactors {
         size_t add(Awaitable&& awaitable) {
             assert(sink_);
             auto coro = detail::make_task_group_coroutine<T>(std::forward<Awaitable>(awaitable));
-            return coro.start(sink_, source_.get_token());
+            return coro.start(sink_, source_.get_token(), inherited_locals_);
         }
 
         /**
@@ -213,9 +213,20 @@ namespace coroactors {
             source_.request_stop();
         }
 
+        /**
+         * Used by with_task_group to pass locals to pass coroutine locals to
+         * this group's task. Caller must guarantee that this record will
+         * remain valid for the lifetime of this task group and all tasks
+         * running in this task group.
+         */
+        void set_inherited_locals(const detail::coroutine_local_record* record) noexcept {
+            inherited_locals_ = record;
+        }
+
     private:
         sink_ptr sink_{ new sink_type };
         scoped_stop_source source_;
+        const detail::coroutine_local_record* inherited_locals_{ nullptr };
     };
 
 } // namespace coroactors

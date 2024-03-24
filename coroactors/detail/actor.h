@@ -141,6 +141,7 @@ namespace coroactors::detail {
 
             void await_resume() noexcept {
                 self->set_stop_token_ptr(current_stop_token_ptr);
+                self->set_locals_ptr(current_coroutine_local_ptr);
                 actor_context_manager::enter_frame(self);
             }
         };
@@ -258,10 +259,12 @@ namespace coroactors::detail {
                 if (type == ESwitchContext::Initial) {
                     // We must also leave the frame we entered in initial suspend
                     actor_context_manager::leave_frame(&self);
-                    // We have stop token pointer for the currently running stack
-                    // Don't keep a potentially dangling pointer around
-                    // We will grab a fresh pointer again on await
+                    // We have previously grabbed values from the currently
+                    // running stack, however those may change before we are
+                    // resumed. Make sure we don't keep and later accidentally
+                    // restore any dangling pointers.
                     self.set_stop_token_ptr(nullptr);
+                    self.set_locals_ptr(nullptr);
                     return symmetric::noop();
                 }
 
@@ -729,6 +732,7 @@ namespace coroactors::detail {
         bool await_ready() noexcept {
             auto& p = handle.promise();
             p.set_stop_token_ptr(current_stop_token_ptr);
+            p.set_locals_ptr(current_coroutine_local_ptr);
             return p.ready();
         }
 
@@ -774,6 +778,7 @@ namespace coroactors::detail {
         bool await_ready() noexcept {
             auto& p = handle.promise();
             p.set_stop_token_ptr(current_stop_token_ptr);
+            p.set_locals_ptr(current_coroutine_local_ptr);
             return p.ready();
         }
 
