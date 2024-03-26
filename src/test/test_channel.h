@@ -1,4 +1,5 @@
 #pragma once
+#include <coroactors/detail/async_task.h>
 #include <coroactors/stop_token.h>
 #include <coroactors/with_continuation.h>
 #include <deque>
@@ -25,17 +26,27 @@ public:
         coroactors::stop_token stop_token_;
     };
 
-    auto get(coroactors::stop_token t = {}) {
-        return coroactors::with_continuation<T>([this, t = std::move(t)](coroactors::continuation<T> c) mutable {
-            std::unique_lock l(lock);
-            if (results.empty()) {
-                queue.push_back(continuation(std::move(c), std::move(t)));
-            } else {
-                // Note: we have not suspended yet, no risk of resuming
-                c.resume(std::move(results.front()));
-                results.pop_front();
-            }
-        });
+    struct get_operation {
+        test_channel* self;
+
+        auto operator co_await() && noexcept {
+            return coroactors::with_continuation<T>(
+                [self = self, t = coroactors::detail::current_stop_token()]
+                (coroactors::continuation<T> c) mutable {
+                    std::unique_lock l(self->lock);
+                    if (self->results.empty()) {
+                        self->queue.push_back(continuation(std::move(c), std::move(t)));
+                    } else {
+                        // Note: we have not suspended yet, no risk of resuming
+                        c.resume(std::move(self->results.front()));
+                        self->results.pop_front();
+                    }
+                });
+        }
+    };
+
+    auto get() {
+        return get_operation{ this };
     }
 
     void provide(T value) {

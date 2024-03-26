@@ -11,21 +11,6 @@ namespace coroactors {
     using detail::stop_callback;
 
     /**
-     * Returns stop token for the currently running coroutine
-     */
-    const stop_token& current_stop_token() noexcept {
-        return detail::current_stop_token();
-    }
-
-    /**
-     * Wraps awaitable with the specified stop token override
-     */
-    template<detail::awaitable Awaitable>
-    auto with_stop_token(stop_token token, Awaitable&& awaitable) {
-        return detail::with_stop_token_awaiter<Awaitable>(std::move(token), std::forward<Awaitable>(awaitable));
-    }
-
-    /**
      * scoped_stop_source calls request_stop automatically on destruction
      */
     class scoped_stop_source : public stop_source {

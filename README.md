@@ -17,24 +17,24 @@ This repository takes ideas from the Swift language and standard library, and tr
 
 ## Actors with C++ coroutines
 
-The primary class is `actor<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either `co_return` immediately or `co_await` on `actor_context::operator()` call first, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context.
+The primary class is `async<T>` and should be used as the return type for actor coroutines. This is an eagerly started coroutine that must either `co_return` immediately or `co_await` on `actor_context::operator()` call first, at which point it binds to the specified context and suspends until `co_await`ed. When bound to a context actor will never execute in parallel with other actor coroutines bound to the same context, effectively acting like a local mutex, guaranteeing exclusive access to shared state protected by this context.
 
 ```c++
 class Counter {
 public:
     // ...
 
-    actor<int> get() const {
+    async<int> get() const {
         co_await context();
         co_return value_;
     }
 
-    actor<void> set(int value) {
+    async<void> set(int value) {
         co_await context();
         value_ = value;
     }
 
-    actor<int> increment() {
+    async<int> increment() {
         co_await context();
         co_return ++value_;
     }
@@ -57,7 +57,7 @@ class CachingService {
 public:
     // ...
 
-    actor<std::string> get(const std::string& url) {
+    async<std::string> get(const std::string& url) {
         co_await context();
         if (!cache.contains(url)) {
             // Context automatically released on co_await
@@ -111,7 +111,7 @@ Example:
 ```c++
 struct Request;
 struct Response;
-actor<Response> make_shard_request(int shard, const Request& request);
+async<Response> make_shard_request(int shard, const Request& request);
 
 class FastService {
 public:
@@ -122,13 +122,13 @@ public:
         Response response;
     };
 
-    actor<FastResponse> make_request(const Request& request) {
+    async<FastResponse> make_request(const Request& request) {
         co_await context();
 
         // The template parameter specifies type of a single task result
         // The co_await will return whatever result the lambda returns
         co_return co_await with_task_group<Response>(
-            [&](task_group<Response>& group) -> actor<FastResponse> {
+            [&](task_group<Response>& group) -> async<FastResponse> {
                 // We are guaranteed to run in the same context as the caller
                 // All actor functions must co_await context, so we do just that
                 co_await actor_context::caller_context();

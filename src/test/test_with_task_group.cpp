@@ -4,22 +4,19 @@
 #include "test_common.h"
 #include "test_channel.h"
 #include "test_scheduler.h"
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/packaged_awaitable.h>
+#include <coroactors/with_stop_token.h>
 
 using namespace coroactors;
 
 namespace {
 
-actor<void> do_with_task_group_cancel(int& stage, test_channel<int>& provider) {
-    co_await no_actor_context();
-
+async<void> do_with_task_group_cancel(int& stage, test_channel<int>& provider) {
     try {
-        co_await with_task_group<int>([&](task_group<int>& group) -> actor<void> {
-            co_await actor_context::caller_context();
-
-            group.add(provider.get(group.get_stop_token()));
-            group.add(provider.get(group.get_stop_token()));
+        co_await with_task_group<int>([&](task_group<int>& group) -> async<void> {
+            group.add(provider.get());
+            group.add(provider.get());
 
             int value;
             try {
@@ -135,15 +132,11 @@ struct move_only_int {
     {}
 };
 
-actor<void> do_with_task_group_result_type(int& stage, test_channel<int>& provider) {
-    co_await no_actor_context();
-
+async<void> do_with_task_group_result_type(int& stage, test_channel<int>& provider) {
     auto result = co_await with_task_group<int>(
-        [&](task_group<int>& group) -> actor<move_only_int> {
-            co_await actor_context::caller_context();
-
-            group.add(provider.get(group.get_stop_token()));
-            group.add(provider.get(group.get_stop_token()));
+        [&](task_group<int>& group) -> async<move_only_int> {
+            group.add(provider.get());
+            group.add(provider.get());
 
             stage = 1;
             int a = co_await group.next();
@@ -187,27 +180,26 @@ TEST(WithTaskGroupTest, ResultType) {
 
 namespace {
 
-actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, test_channel<int>& provider) {
+async<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, test_channel<int>& provider) {
     actor_context context(scheduler);
 
     stage = 1;
     co_await context();
 
     // Double check we are running in our context
-    EXPECT_EQ(context, co_await actor_context::current_context);
+    EXPECT_EQ(context, current_actor_context());
 
     stage = 2;
     int result = co_await with_stop_token(
         stop_token(),
-        with_task_group<int>([&](task_group<int>& group) -> actor<int> {
+        with_task_group<int>([&](task_group<int>& group) -> async<int> {
             stage = 3;
-            co_await actor_context::caller_context();
 
             // We expect with_stop_token to not interfere with our context
-            EXPECT_EQ(context, co_await actor_context::current_context);
+            EXPECT_EQ(context, current_actor_context());
 
-            group.add(provider.get(group.get_stop_token()));
-            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get());
+            group.add(provider.get());
 
             stage = 4;
             int a = co_await group.next();
@@ -215,7 +207,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, te
             stage = 5;
             int b = co_await group.next();
 
-            EXPECT_FALSE((co_await actor_context::current_stop_token).stop_requested());
+            EXPECT_FALSE(current_stop_token().stop_requested());
 
             stage = 6;
             co_return a + b;
@@ -223,7 +215,7 @@ actor<void> do_with_stop_token_context(int& stage, test_scheduler& scheduler, te
 
     stage = 7;
     EXPECT_EQ(result, 100);
-    EXPECT_TRUE((co_await actor_context::current_stop_token).stop_requested());
+    EXPECT_TRUE(current_stop_token().stop_requested());
 }
 
 } // namespace
@@ -275,7 +267,7 @@ TEST(WithTaskGroupTest, WithStopTokenContext) {
 namespace {
 
 template<class WhenReadyCall>
-actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, test_channel<int>& provider,
+async<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, test_channel<int>& provider,
         WhenReadyCall when_ready, bool expected)
 {
     stage = 1;
@@ -283,12 +275,11 @@ actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, tes
 
     stage = 2;
     int result = co_await with_task_group<int>(
-        [&](task_group<int>& group) -> actor<int> {
+        [&](task_group<int>& group) -> async<int> {
             stage = 3;
-            co_await actor_context::caller_context();
 
-            group.add(provider.get(group.get_stop_token()));
-            group.add(provider.get(group.get_stop_token()));
+            group.add(provider.get());
+            group.add(provider.get());
 
             stage = 4;
             bool r = co_await when_ready(group);
@@ -303,7 +294,7 @@ actor<void> do_when_ready_with_token(int& stage, actor_scheduler& scheduler, tes
 
             // Note: gcc fails with 'insufficient contextual information' when
             // a co_await expression with a method call is in paranthesis.
-            auto token = co_await actor_context::current_stop_token;
+            auto token = current_stop_token();
             EXPECT_FALSE(token.stop_requested());
 
             stage = 7;
@@ -443,7 +434,10 @@ TEST(WithTaskGroupTest, WaitReadyCancelledBeforeAwait) {
 namespace {
 
 template<class Awaiter, class Hook>
-struct await_suspend_hook {
+struct await_suspend_hook;
+
+template<detail::awaiter Awaiter, class Hook>
+struct await_suspend_hook<Awaiter, Hook> {
     Awaiter awaiter;
     Hook hook;
 
@@ -458,6 +452,17 @@ struct await_suspend_hook {
 
     decltype(auto) await_resume() {
         return awaiter.await_resume();
+    }
+};
+
+template<detail::has_co_await Awaitable, class Hook>
+struct await_suspend_hook<Awaitable, Hook> {
+    Awaitable awaitable;
+    Hook hook;
+
+    auto operator co_await() noexcept {
+        using Awaiter = detail::awaiter_type_t<Awaitable>;
+        return await_suspend_hook<Awaiter, Hook>{ detail::get_awaiter(std::move(awaitable)), std::move(hook) };
     }
 };
 

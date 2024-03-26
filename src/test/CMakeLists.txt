@@ -1,13 +1,13 @@
 set(SIMPLE_TESTS
-    test_actor
+    test_async
+    test_coro
     test_stop_token
     test_task_group
+    test_task_local
     test_with_continuation
     test_with_task_group
     test_mailbox
     test_intrusive_mailbox
-    test_task
-    test_local
 )
 
 # Common files and dependencies (compile once)

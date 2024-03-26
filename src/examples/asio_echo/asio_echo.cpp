@@ -1,7 +1,9 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
+#include <coroactors/actor_context.h>
 #include <coroactors/asio_actor_scheduler.h>
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detach_awaitable.h>
+#include <coroactors/with_stop_token.h>
 #include <asio/thread_pool.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/write.hpp>
@@ -16,7 +18,7 @@ using default_token = asio_awaitable_t<>;
 using tcp_socket = default_token::as_default_on_t<tcp::socket>;
 using tcp_acceptor = default_token::as_default_on_t<tcp::acceptor>;
 
-actor<void> serve_client(actor_scheduler& scheduler, tcp_socket socket) {
+async<void> serve_client(actor_scheduler& scheduler, tcp_socket socket) {
     actor_context context(scheduler);
     co_await context();
 
@@ -33,7 +35,7 @@ actor<void> serve_client(actor_scheduler& scheduler, tcp_socket socket) {
     }
 }
 
-actor<void> listener(actor_scheduler& scheduler, any_io_executor executor) {
+async<void> listener(actor_scheduler& scheduler, any_io_executor executor) {
     actor_context context(scheduler);
     co_await context();
 

@@ -115,34 +115,4 @@ namespace coroactors::detail {
         requires awaitable<Awaitable, Promise>
     using await_result_t = awaiter_result_t<awaiter_type_t<Awaitable>>;
 
-    /**
-     * Concept for awaiters that have a wrapped_awaiter_type typedef defined
-     */
-    template<class Awaiter>
-    concept has_wrapped_awaiter_type = requires {
-        typename Awaiter::wrapped_awaiter_type;
-    };
-
-    template<class Awaiter>
-    struct awaiter_wrapped_awaiter_type_impl {
-        using type = Awaiter;
-    };
-
-    template<has_wrapped_awaiter_type Awaiter>
-    struct awaiter_wrapped_awaiter_type_impl<Awaiter> {
-        using type = typename Awaiter::wrapped_awaiter_type;
-    };
-
-    template<class Awaiter>
-    using awaiter_unwrap_awaiter_type =
-        typename awaiter_wrapped_awaiter_type_impl<Awaiter>::type;
-
-    template<class Awaitable, class Promise = void>
-        requires awaitable<Awaitable, Promise>
-    using awaitable_unwrap_awaiter_type = awaiter_unwrap_awaiter_type<
-        std::conditional_t<
-            has_co_await<Awaitable, Promise>,
-            std::decay_t<awaiter_type_t<Awaitable, Promise>>,
-            Awaitable>>;
-
 } // namespace coroactors::detail

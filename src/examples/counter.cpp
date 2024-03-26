@@ -1,4 +1,4 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 
 using namespace coroactors;
 
@@ -8,17 +8,17 @@ public:
         : context(scheduler)
     {}
 
-    actor<int> get() const {
+    async<int> get() const {
         co_await context();
         co_return value_;
     }
 
-    actor<void> set(int value) {
+    async<void> set(int value) {
         co_await context();
         value_ = value;
     }
 
-    actor<int> increment() {
+    async<int> increment() {
         co_await context();
         co_return ++value_;
     }

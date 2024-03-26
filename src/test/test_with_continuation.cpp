@@ -2,7 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "test_scheduler.h"
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/packaged_awaitable.h>
 
@@ -301,7 +301,7 @@ TEST(WithContinuationTest, CompleteWithException) {
 namespace {
 
 template<class Callback>
-actor<void> actor_with_continuation(const actor_context& context, int& stage, Callback callback) {
+async<void> actor_with_continuation(const actor_context& context, int& stage, Callback callback) {
     stage = 1;
     co_await context();
     stage = 2;
@@ -309,7 +309,7 @@ actor<void> actor_with_continuation(const actor_context& context, int& stage, Ca
     stage = 3;
 }
 
-actor<int> actor_with_result(const actor_context& context, int& stage, int result) {
+async<int> actor_with_result(const actor_context& context, int& stage, int result) {
     co_await context();
     stage = 1;
     co_return result;
@@ -347,8 +347,14 @@ TEST(WithContinuationTest, ActorCompleteSync) {
     // Activate the context
     scheduler.run_next();
 
-    // The first function should complete and transfer to the second one
+    // The first function should complete and unblock the second one
     EXPECT_EQ(stage, 3);
+    EXPECT_EQ(rstage, 0);
+
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+
+    // The second function should complete
     EXPECT_EQ(rstage, 1);
     EXPECT_EQ(*result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0u);
@@ -389,7 +395,12 @@ TEST(WithContinuationTest, ActorCompleteAsync) {
     EXPECT_EQ(stage, 2);
     ASSERT_TRUE(suspended);
 
-    // However the second function should have started running and completed
+    // The second function should be scheduled to run
+    EXPECT_EQ(rstage, 0);
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    scheduler.run_next();
+
+    // Now it should have started running and completed
     EXPECT_EQ(rstage, 1);
     EXPECT_EQ(*result, 42);
     EXPECT_EQ(scheduler.queue.size(), 0u);
@@ -432,8 +443,7 @@ private:
     int* refs;
 };
 
-actor<void> actor_wrapper(actor<void> nested, int* refs) {
-    co_await no_actor_context();
+async<void> actor_wrapper(async<void> nested, int* refs) {
     count_refs_guard guard{ refs };
     co_await std::move(nested);
 }
@@ -534,8 +544,7 @@ TEST(WithContinuationTest, ThrowFromCallback) {
     struct custom_exception {};
 
     auto r = packaged_awaitable(
-        []() -> actor<void> {
-            co_await no_actor_context();
+        []() -> async<void> {
             co_await with_continuation([](continuation<>) {
                 throw custom_exception{};
             });

@@ -1,4 +1,4 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/detach_awaitable.h>
 #include <benchmark/benchmark.h>
 #include <deque>
@@ -43,7 +43,7 @@ public:
     {}
 
     COROACTORS_NOINLINE
-    actor<int> increment() {
+    async<int> increment() {
         co_await context();
         co_return ++value_;
     }
@@ -102,23 +102,23 @@ public:
     {}
 
     COROACTORS_NOINLINE
-    actor<int> get_const_immediate() const {
+    async<int> get_const_immediate() const {
         co_return 42;
     }
 
     COROACTORS_NOINLINE
-    actor<int> get_const_context() const {
+    async<int> get_const_context() const {
         co_await context();
         co_return 42;
     }
 
     COROACTORS_NOINLINE
-    actor<int> get_indirect() const {
+    async<int> get_indirect() const {
         co_await context();
         co_return co_await counter.increment();
     }
 
-    actor<void> run_const_immediate(benchmark::State& state) {
+    async<void> run_const_immediate(benchmark::State& state) {
         co_await context();
         for (auto _ : state) {
             int value = co_await get_const_immediate();
@@ -127,7 +127,7 @@ public:
         state.SetItemsProcessed(state.iterations());
     }
 
-    actor<void> run_const_context(benchmark::State& state) {
+    async<void> run_const_context(benchmark::State& state) {
         co_await context();
         for (auto _ : state) {
             int value = co_await get_const_context();
@@ -136,7 +136,7 @@ public:
         state.SetItemsProcessed(state.iterations());
     }
 
-    actor<void> run_direct(benchmark::State& state) {
+    async<void> run_direct(benchmark::State& state) {
         co_await context();
         for (auto _ : state) {
             int value = co_await counter.increment();
@@ -145,7 +145,7 @@ public:
         state.SetItemsProcessed(state.iterations());
     }
 
-    actor<void> run_indirect(benchmark::State& state) {
+    async<void> run_indirect(benchmark::State& state) {
         co_await context();
         for (auto _ : state) {
             int value = co_await get_indirect();
@@ -187,7 +187,7 @@ private:
     ICounterServiceMutex& counter;
 };
 
-static void BM_Actor_Call_Const_Immediate(benchmark::State& state) {
+static void BM_Async_Call_Const_Immediate(benchmark::State& state) {
     TSimpleScheduler scheduler;
     TCounterServiceActor counter(scheduler);
     TTestServiceActor test(scheduler, counter);
@@ -196,9 +196,9 @@ static void BM_Actor_Call_Const_Immediate(benchmark::State& state) {
     state.counters["scheduled"] = scheduler.processed;
 }
 
-BENCHMARK(BM_Actor_Call_Const_Immediate);
+BENCHMARK(BM_Async_Call_Const_Immediate);
 
-static void BM_Actor_Call_Const_Context(benchmark::State& state) {
+static void BM_Async_Call_Const_Context(benchmark::State& state) {
     TSimpleScheduler scheduler;
     TCounterServiceActor counter(scheduler);
     TTestServiceActor test(scheduler, counter);
@@ -207,9 +207,9 @@ static void BM_Actor_Call_Const_Context(benchmark::State& state) {
     state.counters["scheduled"] = scheduler.processed;
 }
 
-BENCHMARK(BM_Actor_Call_Const_Context);
+BENCHMARK(BM_Async_Call_Const_Context);
 
-static void BM_Actor_Call_Direct(benchmark::State& state) {
+static void BM_Async_Call_Direct(benchmark::State& state) {
     TSimpleScheduler scheduler;
     TCounterServiceActor counter(scheduler);
     TTestServiceActor test(scheduler, counter);
@@ -218,9 +218,9 @@ static void BM_Actor_Call_Direct(benchmark::State& state) {
     state.counters["scheduled"] = scheduler.processed;
 }
 
-BENCHMARK(BM_Actor_Call_Direct);
+BENCHMARK(BM_Async_Call_Direct);
 
-static void BM_Actor_Call_Indirect(benchmark::State& state) {
+static void BM_Async_Call_Indirect(benchmark::State& state) {
     TSimpleScheduler scheduler;
     TCounterServiceActor counter(scheduler);
     TTestServiceActor test(scheduler, counter);
@@ -229,7 +229,7 @@ static void BM_Actor_Call_Indirect(benchmark::State& state) {
     state.counters["scheduled"] = scheduler.processed;
 }
 
-BENCHMARK(BM_Actor_Call_Indirect);
+BENCHMARK(BM_Async_Call_Indirect);
 
 static void BM_Normal_Call_Const(benchmark::State& state) {
     TCounterServiceStdMutex counter;

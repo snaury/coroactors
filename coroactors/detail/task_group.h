@@ -1,7 +1,8 @@
 #pragma once
+#include <coroactors/detail/async.h>
+#include <coroactors/detail/async_task.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/config.h>
-#include <coroactors/detail/local.h>
 #include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
@@ -500,18 +501,6 @@ namespace coroactors::detail {
     template<class T>
     class task_group_promise : public task_group_result_handler<T> {
     public:
-        ~task_group_promise() {
-            if (running) {
-                // Coroutine was destroyed before it could finish. This could
-                // happen when e.g. it was suspended and caller decided to
-                // destroy it instead of resuming, unwinding frames back to
-                // us. Make sure we wake up awaiter with an empty result.
-                if (auto next = sink_->push(std::move(this->result_))) {
-                    symmetric::resume(next);
-                }
-            }
-        }
-
         task_group_coroutine<T> get_return_object() noexcept {
             return task_group_coroutine<T>(task_group_handle<T>::from_promise(*this));
         }
@@ -524,7 +513,6 @@ namespace coroactors::detail {
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
-                self.running = false;
                 auto sink = std::move(self.sink_);
                 auto next = sink->push(std::move(self.result_));
                 h.destroy();
@@ -537,70 +525,40 @@ namespace coroactors::detail {
         auto final_suspend() noexcept { return final_suspend_t{}; }
 
         size_t start(const intrusive_ptr<task_group_sink<T>>& sink,
-                stop_token&& token, const coroutine_local_record* inherited_locals)
+                stop_token&& token, const async_task_local* inherited_locals)
         {
             size_t index = sink->next_index();
             sink_ = sink;
             token_ = std::move(token);
             inherited_locals_ = inherited_locals;
-            running = true;
             this->result_->set_index(index);
             symmetric::resume(
                 task_group_handle<T>::from_promise(*this));
             return index;
         }
 
-        template<awaitable Awaitable>
-        class pass_inherited_awaiter {
-            using Awaiter = awaiter_type_t<Awaitable>;
-
-        public:
-            pass_inherited_awaiter(Awaitable&& awaitable, task_group_promise& self)
-                : awaiter(get_awaiter(std::forward<Awaitable>(awaitable)))
-                , self(self)
-            {}
-
-            pass_inherited_awaiter(const pass_inherited_awaiter&) = delete;
-            pass_inherited_awaiter& operator=(const pass_inherited_awaiter&) = delete;
-
-            bool await_ready()
-                noexcept(has_noexcept_await_ready<Awaiter>)
-            {
-                current_stop_token_ptr_guard guard(&self.token_);
-                current_coroutine_local_ptr_guard locals(self.inherited_locals_);
-                return awaiter.await_ready();
-            }
-
-            template<class Promise>
-            COROACTORS_AWAIT_SUSPEND
-            decltype(auto) await_suspend(std::coroutine_handle<Promise> c)
-                noexcept(has_noexcept_await_suspend<Awaiter, Promise>)
-                requires has_await_suspend<Awaiter, Promise>
-            {
-                return awaiter.await_suspend(c);
-            }
-
-            decltype(auto) await_resume()
-                noexcept(has_noexcept_await_resume<Awaiter>)
-            {
-                return awaiter.await_resume();
-            }
-
-        private:
-            Awaiter awaiter;
-            task_group_promise& self;
-        };
+        template<class Awaitable>
+        async<T> with_task(Awaitable&& awaitable) {
+            auto* task = async_task::current;
+            assert(task);
+            // Note: our coroutine body only awaits once, token can be moved
+            task->token = std::move(token_);
+            task->locals = inherited_locals_;
+            // Note: we bind to awaitable by reference, because this is only
+            // ever used in await_transform below, and the original awaitable
+            // lifetime outlives this local async coroutine.
+            co_return co_await std::forward<Awaitable>(awaitable);
+        }
 
         template<awaitable Awaitable>
         auto await_transform(Awaitable&& awaitable) noexcept {
-            return pass_inherited_awaiter<Awaitable>(std::forward<Awaitable>(awaitable), *this);
+            return with_task(std::forward<Awaitable>(awaitable));
         }
 
     private:
         intrusive_ptr<task_group_sink<T>> sink_;
         stop_token token_;
-        const coroutine_local_record* inherited_locals_;
-        bool running = false;
+        const async_task_local* inherited_locals_;
     };
 
     template<class T>
@@ -615,7 +573,7 @@ namespace coroactors::detail {
         using promise_type = task_group_promise<T>;
 
         size_t start(const intrusive_ptr<task_group_sink<T>>& sink,
-                stop_token&& token, const coroutine_local_record* inherited_locals)
+                stop_token&& token, const async_task_local* inherited_locals)
         {
             return handle.promise().start(sink, std::move(token), inherited_locals);
         }

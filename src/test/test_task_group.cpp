@@ -4,7 +4,7 @@
 #include "test_common.h"
 #include "test_channel.h"
 #include "test_scheduler.h"
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/packaged_awaitable.h>
 
 #include <algorithm>
@@ -56,8 +56,7 @@ namespace Action {
     }
 };
 
-actor<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<Action::Any()> next) {
-    co_await no_actor_context();
+async<std::vector<int>> run_scenario(test_channel<int>& provider, std::function<Action::Any()> next) {
     std::vector<int> results;
     task_group<int> group;
     for (;;) {
@@ -361,55 +360,22 @@ TEST(TaskGroupTest, ResumeExceptionIgnored) {
     EXPECT_EQ(*result, expected);
 }
 
-TEST(TaskGroupTest, DestroyedTaskResumesTaskGroup) {
-    size_t last_step = 0;
-    test_channel<int> provider;
-    std::coroutine_handle<> suspended;
-
-    auto result = packaged_awaitable(
-        run_scenario(provider, [&]() -> Action::Any {
-            auto step = ++last_step;
-            if (step == 2) {
-                return Action::AddSuspend{ suspended };
-            }
-            if (step <= 3) {
-                return Action::AddTask;
-            }
-            if (step <= 6) {
-                return Action::AwaitTaskWrapped;
-            }
-            return Action::Return;
-        }));
-
-    ASSERT_EQ(provider.awaiters(), 2u);
-    ASSERT_TRUE(suspended);
-    provider.resume(1);
-    suspended.destroy();
-    provider.resume(3);
-    EXPECT_EQ(provider.awaiters(), 0u);
-    ASSERT_TRUE(result.success());
-    std::vector<int> expected{ 1, -2, 3 };
-    EXPECT_EQ(*result, expected);
-}
-
 namespace {
 
-actor<void> check_stop_possible() {
-    co_await no_actor_context();
-    stop_token token = co_await actor_context::current_stop_token;
+async<void> check_stop_possible() {
+    stop_token token = current_stop_token();
     EXPECT_TRUE(token.stop_possible());
     EXPECT_FALSE(token.stop_requested());
+    co_return;
 }
 
-actor<void> check_stop_requested() {
-    co_await no_actor_context();
-    stop_token token = co_await actor_context::current_stop_token;
+async<void> check_stop_requested() {
+    stop_token token = current_stop_token();
     EXPECT_TRUE(token.stop_requested());
+    co_return;
 }
 
-actor<void> check_request_stop() {
-    co_await no_actor_context();
-
+async<void> check_request_stop() {
     task_group<void> group;
 
     group.add(check_stop_possible());

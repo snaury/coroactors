@@ -1,4 +1,5 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
+#include <coroactors/actor_context.h>
 #include <memory>
 
 using namespace coroactors;
@@ -13,7 +14,7 @@ public:
         // ...
     };
 
-    virtual actor<Response> make_request(const Request& request) = 0;
+    virtual async<Response> make_request(const Request& request) = 0;
 };
 
 class RealTimeService {
@@ -23,7 +24,7 @@ public:
         , service(std::move(service))
     {}
 
-    actor<SlowService::Response> make_request(const SlowService::Request& request) {
+    async<SlowService::Response> make_request(const SlowService::Request& request) {
         co_await context();
         co_return co_await context.with_timeout(
             std::chrono::milliseconds(500),

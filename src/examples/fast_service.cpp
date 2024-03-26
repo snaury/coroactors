@@ -1,4 +1,4 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/with_task_group.h>
 #include <memory>
 
@@ -14,7 +14,7 @@ public:
         // ...
     };
 
-    virtual actor<Response> make_request(const Request& request) = 0;
+    virtual async<Response> make_request(const Request& request) = 0;
 };
 
 class FastService {
@@ -33,11 +33,11 @@ public:
         , services(std::move(services))
     {}
 
-    actor<Response> make_request(const Request& request) {
+    async<Response> make_request(const Request& request) {
         co_await context();
 
         co_return co_await with_task_group<SlowService::Response>(
-            [&](task_group<SlowService::Response>& group) -> actor<Response> {
+            [&](task_group<SlowService::Response>& group) -> async<Response> {
                 co_await actor_context::caller_context();
 
                 for (const auto& service : services) {

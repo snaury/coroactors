@@ -1,4 +1,4 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
 #include <coroactors/detach_awaitable.h>
 #include <coroactors/detail/blocking_queue.h>
 #include <coroactors/detail/intrusive_mailbox.h>
@@ -28,7 +28,7 @@ using TTime = std::chrono::time_point<TClock>;
 
 class TPingable {
 public:
-    actor<int> ping() {
+    async<int> ping() {
         co_await context();
         int result = ++counter;
         co_return result;
@@ -49,7 +49,7 @@ public:
         : pingable(pingable)
     {}
 
-    actor<TRunResult> runWithoutLatencies(int count) {
+    async<TRunResult> runWithoutLatencies(int count) {
         co_await context();
 
         int last = 0;
@@ -64,7 +64,7 @@ public:
         co_return TRunResult{};
     }
 
-    actor<TRunResult> runWithLatencies(int count, TTime start) {
+    async<TRunResult> runWithLatencies(int count, TTime start) {
         co_await context();
 
         TTime end = TClock::now();
@@ -89,7 +89,7 @@ public:
         };
     }
 
-    actor<TRunResult> run(int count, TTime start, bool withLatencies) {
+    async<TRunResult> run(int count, TTime start, bool withLatencies) {
         if (withLatencies) {
             return runWithLatencies(count, start);
         } else {
@@ -1023,7 +1023,7 @@ private:
 
 template<class T>
     requires (!std::is_void_v<T>)
-std::vector<T> run_sync(std::vector<actor<T>> actors) {
+std::vector<T> run_sync(std::vector<async<T>> actors) {
     detail::sync_wait_group wg(actors.size());
     std::vector<T> results(actors.size());
 
@@ -1040,7 +1040,7 @@ std::vector<T> run_sync(std::vector<actor<T>> actors) {
     return results;
 }
 
-void run_sync(std::vector<actor<void>> actors) {
+void run_sync(std::vector<async<void>> actors) {
     detail::sync_wait_group wg(actors.size());
 
     for (auto& a : actors) {
@@ -1055,15 +1055,15 @@ void run_sync(std::vector<actor<void>> actors) {
 
 template<class T>
     requires (!std::is_void_v<T>)
-T run_sync(actor<T> a) {
-    std::vector<actor<T>> actors;
+T run_sync(async<T> a) {
+    std::vector<async<T>> actors;
     actors.push_back(std::move(a));
     auto results = run_sync(std::move(actors));
     return results[0];
 }
 
-void run_sync(actor<void> a) {
-    std::vector<actor<void>> actors;
+void run_sync(async<void> a) {
+    std::vector<async<void>> actors;
     actors.push_back(std::move(a));
     run_sync(std::move(actors));
 }
@@ -1205,7 +1205,7 @@ int main(int argc, char** argv) {
     run_sync(pingers[0].run(count / numPingers / 100, TClock::now(), withLatencies));
 
     std::cout << "Starting..." << std::endl;
-    std::vector<actor<TPinger::TRunResult>> runs;
+    std::vector<async<TPinger::TRunResult>> runs;
     auto start = TClock::now();
     for (auto& pinger : pingers) {
         runs.push_back(pinger.run(count / numPingers, start, withLatencies));

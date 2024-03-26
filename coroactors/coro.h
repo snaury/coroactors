@@ -1,44 +1,44 @@
 #pragma once
-#include <coroactors/detail/task.h>
+#include <coroactors/detail/coro.h>
 #include <coroactors/result.h>
 #include <utility>
 
 namespace coroactors {
 
     /**
-     * A simple lazily started coroutine task
+     * An extremely bare-bones coroutine class
      *
-     * The advantage of this class over an actor without a context is a heap
-     * allocation elision for some simple cases. The disadvantage is lack of
-     * support for stop token propagation or actor related functions.
+     * This coroutine is intentially very simple and not integrated into the
+     * rest of the library, making it easier to test interaction with non-async
+     * coroutines.
      */
     template<class T>
-    class task {
-        friend detail::task_promise<T>;
+    class [[nodiscard]] coro {
+        friend detail::coro_promise<T>;
 
     private:
-        explicit task(detail::task_continuation<T> handle)
+        explicit coro(detail::coro_handle<T> handle)
             : handle(handle)
         {}
 
     public:
-        using promise_type = detail::task_promise<T>;
+        using promise_type = detail::coro_promise<T>;
         using value_type = T;
 
     public:
-        task() noexcept = default;
+        coro() noexcept = default;
 
-        task(task&& rhs) noexcept
+        coro(coro&& rhs) noexcept
             : handle(std::exchange(rhs.handle, {}))
         {}
 
-        ~task() noexcept {
+        ~coro() noexcept {
             if (handle) {
                 handle.destroy();
             }
         }
 
-        task& operator=(task&& rhs) noexcept {
+        coro& operator=(coro&& rhs) noexcept {
             if (this != &rhs) {
                 auto prev = handle;
                 handle = rhs.handle;
@@ -58,17 +58,21 @@ namespace coroactors {
             return handle.promise().ready();
         }
 
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) {
-            handle.promise().set_continuation(h);
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> c) {
+            handle.promise().set_continuation(c);
             return handle;
         }
 
-        T await_resume() {
+        T await_resume() & {
+            return handle.promise().get_result();
+        }
+
+        T await_resume() && {
             return handle.promise().take_result();
         }
 
     private:
-        detail::task_continuation<T> handle;
+        detail::coro_handle<T> handle;
     };
 
 } // namespace coroactors

@@ -219,14 +219,14 @@ namespace coroactors {
          * remain valid for the lifetime of this task group and all tasks
          * running in this task group.
          */
-        void set_inherited_locals(const detail::coroutine_local_record* record) noexcept {
+        void set_inherited_locals(const detail::async_task_local* record) noexcept {
             inherited_locals_ = record;
         }
 
     private:
         sink_ptr sink_{ new sink_type };
         scoped_stop_source source_;
-        const detail::coroutine_local_record* inherited_locals_{ nullptr };
+        const detail::async_task_local* inherited_locals_{ nullptr };
     };
 
 } // namespace coroactors

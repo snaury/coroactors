@@ -1,12 +1,12 @@
-add_executable(benchmark_actor benchmark_actor.cpp)
+add_executable(benchmark_async benchmark_async.cpp)
 
-target_link_libraries(benchmark_actor
+target_link_libraries(benchmark_async
     coroactors
     benchmark::benchmark
 )
 
-target_compile_definitions(benchmark_actor PRIVATE HAVE_ABSEIL=1)
-target_link_libraries(benchmark_actor absl::synchronization)
+target_compile_definitions(benchmark_async PRIVATE HAVE_ABSEIL=1)
+target_link_libraries(benchmark_async absl::synchronization)
 
 add_executable(benchmark_blocking_queue benchmark_blocking_queue.cpp)
 

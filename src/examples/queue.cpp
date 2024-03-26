@@ -1,4 +1,5 @@
-#include <coroactors/actor.h>
+#include <coroactors/async.h>
+#include <coroactors/actor_context.h>
 #include <coroactors/with_continuation.h>
 #include <deque>
 
@@ -10,7 +11,7 @@ public:
         : context(scheduler)
     {}
 
-    actor<void> push(int value) {
+    async<void> push(int value) {
         co_await context();
         if (awaiters.empty()) {
             values.push_back(value);
@@ -21,7 +22,7 @@ public:
         }
     }
 
-    actor<int> pop() {
+    async<int> pop() {
         co_await context();
         if (values.empty()) {
             // Note: we use caller_context here to make sure push does not have

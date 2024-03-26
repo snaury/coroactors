@@ -80,6 +80,14 @@ struct test_scheduler
         --in_run_next;
     }
 
+    continuation_t remove(size_t index) {
+        assert(index < queue.size());
+        auto it = queue.begin() + index;
+        auto cont = std::move(*it);
+        queue.erase(it);
+        return cont;
+    }
+
     void run_next() {
         assert(!queue.empty());
         auto cont = queue.front();
