@@ -73,7 +73,7 @@ namespace coroactors {
         void detach() && noexcept {
             auto h = std::exchange(handle, {});
             h.promise().prepare(nullptr);
-            h.resume();
+            detail::symmetric::resume(h);
         }
 
         template<class Tag, class... Args>

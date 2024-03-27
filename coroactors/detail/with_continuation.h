@@ -58,7 +58,8 @@ namespace coroactors::detail {
                 {
                     if (addr) {
                         result_.set_exception(with_continuation_error("continuation was not resumed"));
-                        std::coroutine_handle<>::from_address(addr).resume();
+                        symmetric::resume(
+                            std::coroutine_handle<>::from_address(addr));
                     }
                     return true;
                 }
