@@ -28,5 +28,5 @@
  * implement it incorrectly which cause double free bugs (e.g. msvc).
  */
 #ifndef COROACTORS_USE_SYMMETRIC_TRANSFER
-#define COROACTORS_USE_SYMMETRIC_TRANSFER 1
+#define COROACTORS_USE_SYMMETRIC_TRANSFER 0
 #endif

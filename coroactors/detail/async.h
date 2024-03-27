@@ -63,12 +63,11 @@ namespace coroactors::detail {
      * A simple runnable that resumes continuation after a context switch
      */
     struct async_context_switch_runnable : public actor_scheduler_runnable {
-        async_task* task;
+        async_task* task = nullptr;
         std::coroutine_handle<> continuation;
 
         void run() noexcept override {
             assert(task);
-            task->enter();
             task->scheduled = true;
             // Note: `this` will be destroyed inside this call
             symmetric::resume(continuation);
@@ -97,7 +96,6 @@ namespace coroactors::detail {
 
         std::coroutine_handle<> operator()() noexcept {
             if (async_context_manager::enter(task->context, *this)) {
-                task->enter();
                 return continuation;
             } else {
                 return std::noop_coroutine();
@@ -112,7 +110,6 @@ namespace coroactors::detail {
 
         void run() noexcept override {
             assert(task);
-            task->enter();
             task->scheduled = true;
             // Note: `this` will be destroyed inside this call
             symmetric::resume(continuation);
@@ -138,7 +135,18 @@ namespace coroactors::detail {
             this->result_.set_exception(std::current_exception());
         }
 
-        static auto initial_suspend() noexcept { return std::suspend_always{}; }
+        struct initial_suspend_t {
+            async_promise<T>& p;
+
+            static bool await_ready() noexcept { return false; }
+            static void await_suspend(async_handle<T>) {}
+
+            void await_resume() noexcept {
+                p.get_task()->enter();
+            }
+        };
+
+        auto initial_suspend() noexcept { return initial_suspend_t{ *this }; }
 
         struct final_suspend_t {
             static bool await_ready() noexcept { return false; }
@@ -149,36 +157,36 @@ namespace coroactors::detail {
                 auto& p = h.promise();
 
                 async_task* task = async_task::current;
-                assert(task);
+                assert(task && task == p.get_task());
+                task->leave();
 
                 switch (p.state.index()) {
-                    case 1: { // inherited task, same context, we just return
-                        break;
-                    }
-                    case 2: { // inherited task, maybe different context
-                        actor_context from_context = std::move(task->context);
-                        task->context = std::get<2>(std::move(p.state));
-                        // Prepare to possibly resume in another thread
-                        task->leave();
-                        r.task = task;
-                        r.continuation = p.continuation;
-                        // Try to change context, when true we resume in the current thread
-                        if (!async_context_manager::transfer(from_context, task->context, r, /* returning */ true)) {
-                            return symmetric::noop();
+                    case 1: {
+                        // Inherited task
+                        inherited_t& s = std::get<1>(p.state);
+                        if (s.caller_context) {
+                            // Maybe different context, try to restore
+                            actor_context from_context = std::move(task->context);
+                            task->context = std::move(*s.caller_context);
+                            // Prepare to possibly resume in another thread
+                            r.task = task;
+                            r.continuation = p.continuation;
+                            // Try to change context, when false we will resume somewhere else
+                            if (!async_context_manager::transfer(from_context, task->context, r, /* returning */ true)) {
+                                return symmetric::noop();
+                            }
                         }
-                        // We continue in the same thread, restore current task
-                        task->enter();
+                        // We continue in the same thread, context is correct
                         break;
                     }
-                    case 3: { // our private task, leave and resume
-                        assert(task == &std::get<3>(p.state));
-                        task->leave();
+                    case 2: {
+                        // Our private task
                         actor_context from_context = std::move(task->context);
                         async_context_manager::leave(from_context);
-                        p.state.template emplace<0>();
                         break;
                     }
                     default: {
+                        assert(false && "Unexpected async promise state");
                         std::terminate();
                     }
                 }
@@ -201,42 +209,83 @@ namespace coroactors::detail {
         static auto final_suspend() noexcept { return final_suspend_t{}; }
 
         /**
-         * Prepare to run in an inherited or possibly a private task
+         * Prepare to run in an inherited or a private task and eventually
+         * return to c (nullptr when detached).
          *
-         * Eventually returns to c (nullptr when detached)
+         * Returns a task that would need to be restored by the awaiter.
          */
-        void prepare(std::coroutine_handle<> c) noexcept {
-            if (state.index() == 0) {
-                state.template emplace<async_task>().enter();
-            }
+        async_task* prepare(std::coroutine_handle<> c) noexcept {
             continuation = c;
+            switch (state.index()) {
+                case 0: {
+                    state.template emplace<async_task>();
+                    return nullptr;
+                }
+                case 1: {
+                    inherited_t& s = std::get<1>(state);
+                    return s.task;
+                }
+                default: {
+                    assert(false && "Unexpected promise state");
+                    std::terminate();
+                }
+            }
+        }
+
+        async_task* get_task() noexcept {
+            switch (state.index()) {
+                case 1: {
+                    inherited_t& s = std::get<1>(state);
+                    return s.task;
+                }
+                case 2: {
+                    async_task& t = std::get<2>(state);
+                    return &t;
+                }
+                default: {
+                    assert(false && "Unexpected async promise state");
+                    std::terminate();
+                }
+            }
         }
 
         const actor_context& get_caller_context() const noexcept {
             switch (state.index()) {
                 case 1: {
-                    assert(async_task::current);
-                    return async_task::current->context;
+                    const inherited_t& s = std::get<1>(state);
+                    if (s.caller_context) {
+                        return *s.caller_context;
+                    } else {
+                        return s.task->context;
+                    }
                 }
                 case 2: {
-                    return std::get<2>(state);
-                }
-                case 3: {
                     return no_actor_context;
                 }
                 default: {
+                    assert(false && "Unexpected async promise state");
                     std::terminate();
                 }
             }
         }
 
         bool preserve_caller_context() noexcept {
-            if (state.index() == 1) {
-                assert(async_task::current);
-                state.template emplace<actor_context>(async_task::current->context);
-                return true;
-            } else {
-                return false;
+            switch (state.index()) {
+                case 1: {
+                    inherited_t& s = std::get<1>(state);
+                    if (!s.caller_context) {
+                        s.caller_context.emplace(s.task->context);
+                        return true;
+                    }
+                    return false;
+                }
+                case 2: {
+                    return false;
+                }
+                default: {
+                    assert(false && "Unexpected async promise state");
+                    std::terminate();
+                }
             }
         }
 
@@ -260,7 +309,7 @@ namespace coroactors::detail {
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
-                assert(task);
+                assert(task && task == c.promise().get_task());
 
                 assert(type != ESwitchContext::Ready);
 
@@ -286,12 +335,13 @@ namespace coroactors::detail {
                 }
 
                 // We continue in the same thread
-                task->enter();
                 return symmetric::self(c);
             }
 
             void await_resume() noexcept {
-                // nothing
+                if (r.task) {
+                    r.task->enter();
+                }
             }
 
         private:
@@ -366,7 +416,7 @@ namespace coroactors::detail {
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(async_handle<T> c) {
                 async_task* task = async_task::current;
-                assert(task);
+                assert(task && task == c.promise().get_task());
 
                 // The wrapped handle restores context when resumed
                 std::coroutine_handle<> k = wrapped =
@@ -374,6 +424,7 @@ namespace coroactors::detail {
 
                 // Prepare to resume in another thread
                 task->leave();
+                restore_task = task;
 
                 // Note: we still have context locked, but after the call to
                 // awaiter's await_suspend our frame and task may be destroyed
@@ -382,8 +433,9 @@ namespace coroactors::detail {
                 auto context = task->context;
 
                 // Restores task on exceptions
-                scope_guard guard([task]{
+                scope_guard guard([this, task]{
                     task->enter();
+                    restore_task = nullptr;
                 });
 
                 if constexpr (has_await_suspend_void<Awaiter>) {
@@ -397,7 +449,6 @@ namespace coroactors::detail {
 
                     if (!next) {
                         // Awaiter did not suspend, abort and resume
-                        task->enter();
                         return symmetric::self(c);
                     }
 
@@ -419,12 +470,18 @@ namespace coroactors::detail {
             Result await_resume()
                 noexcept(has_noexcept_await_resume<Awaiter>)
             {
+                scope_guard guard([this]{
+                    if (restore_task) {
+                        restore_task->enter();
+                    }
+                });
                 return awaiter.await_resume();
             }
 
         private:
             Awaiter awaiter;
             std::coroutine_handle<> wrapped;
+            async_task* restore_task = nullptr;
         };
 
         // Note: it's awaitable and not awaitable<async_promise<T>>, because
@@ -479,22 +536,12 @@ namespace coroactors::detail {
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(async_handle<T> c) {
                 async_task* task = async_task::current;
-                assert(task);
-
-                if (ready) {
-                    // Awaiter's await_ready returned true, so we perform a
-                    // context switch here, as if returning from the awaiter.
-                    assert(task->context != new_context);
-
-                    return transfer(task, c);
-                }
-
-                // The wrapped handle restores context when resumed
-                std::coroutine_handle<> k = wrapped =
-                    async_restore_task_callback::wrap(task, c);
+                assert(task && task == c.promise().get_task());
 
                 // Prepare to resume in another thread
                 task->leave();
+                r.task = task;
+                r.continuation = c;
 
                 // Note: we still have context locked, but after the call to
                 // awaiter's await_suspend our frame and task may be destroyed
@@ -504,10 +551,21 @@ namespace coroactors::detail {
                 task->context = new_context;
 
                 // Restores task and context on exceptions
-                scope_guard guard([task, &old_context]{
+                scope_guard guard([this, task, &old_context]{
                     task->context = std::move(old_context);
                     task->enter();
+                    r.task = nullptr;
                 });
+
+                if (ready) {
+                    // Awaiter's await_ready returned true, so we perform a
+                    // context switch here, as if returning from the awaiter.
+                    return transfer(task, old_context);
+                }
+
+                // The wrapped handle restores context when resumed
+                std::coroutine_handle<> k = wrapped =
+                    async_restore_task_callback::wrap(task, c);
 
                 if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
@@ -521,7 +579,7 @@ namespace coroactors::detail {
                     if (!next) {
                         // Awaiter did not suspend, abort and resume, but also
                         // perform a context switch to the new context
-                        return finish_transfer(task, old_context, c);
+                        return transfer(task, old_context);
                     }
 
                     if (next != std::noop_coroutine()) {
@@ -542,32 +600,22 @@ namespace coroactors::detail {
             Result await_resume()
                 noexcept(has_noexcept_await_resume<Awaiter>)
             {
+                scope_guard guard([this]{
+                    if (r.task) {
+                        r.task->enter();
+                    }
+                });
                 return awaiter.await_resume();
             }
 
         private:
-            symmetric::result_t transfer(async_task* task, std::coroutine_handle<> c) noexcept {
-                auto old_context = std::move(task->context);
-                task->context = new_context;
-
-                task->leave();
-
-                return finish_transfer(task, old_context, c);
-            }
-
-            symmetric::result_t finish_transfer(async_task* task,
-                    const actor_context& old_context, std::coroutine_handle<> c) noexcept
-            {
-                r.task = task;
-                r.continuation = c;
-
+            symmetric::result_t transfer(async_task* task, const actor_context& old_context) noexcept {
                 if (!async_context_manager::transfer(old_context, task->context, r, /* returning */ true)) {
                     return symmetric::noop();
                 }
 
                 // We continue in the same thread
-                task->enter();
-                return symmetric::self(c);
+                return symmetric::self(r.continuation);
             }
 
         private:
@@ -602,24 +650,27 @@ namespace coroactors::detail {
 
         struct yield_context_awaiter_t {
             bool await_ready() noexcept { return false; }
-            void await_resume() noexcept {}
 
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
-                assert(task);
+                assert(task && task == c.promise().get_task());
 
                 // Prepare to resume in another thread
                 task->leave();
                 r.task = task;
                 r.continuation = c;
+
                 if (!async_context_manager::yield(task->context, r)) {
                     return symmetric::noop();
                 }
 
                 // We resume in the same thread
-                task->enter();
                 return symmetric::self(c);
+            }
+
+            void await_resume() noexcept {
+                r.task->enter();
             }
 
         private:
@@ -632,17 +683,17 @@ namespace coroactors::detail {
 
         struct preempt_context_awaiter_t {
             bool await_ready() noexcept { return false; }
-            void await_resume() noexcept {}
 
             COROACTORS_AWAIT_SUSPEND
             symmetric::result_t await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
-                assert(task);
+                assert(task && task == c.promise().get_task());
 
                 // Prepare to resume in another thread
                 task->leave();
                 r.task = task;
                 r.continuation = c;
+
                 if (!async_context_manager::preempt(task->context, r)) {
                     return symmetric::noop();
                 }
@@ -650,6 +701,10 @@ namespace coroactors::detail {
                 // We resume in the same thread
                 task->enter();
                 return symmetric::self(c);
+            }
+
+            void await_resume() noexcept {
+                r.task->enter();
             }
 
         private:
@@ -662,7 +717,7 @@ namespace coroactors::detail {
 
         friend void tag_invoke(inherit_async_task_fn, async_promise<T>& self) noexcept {
             assert(self.state.index() == 0);
-            self.state.template emplace<async_task_inherited>();
+            self.state.template emplace<inherited_t>();
         }
 
         template<awaitable<async_promise<T>> Awaitable>
@@ -674,7 +729,7 @@ namespace coroactors::detail {
 
         friend void tag_invoke(inherit_async_task_fn, async_promise<T>& self, const actor_context& context) noexcept {
             assert(self.state.index() == 0);
-            self.state.template emplace<actor_context>(context);
+            self.state.template emplace<inherited_t>(context);
         }
 
         template<awaitable<async_promise<T>> Awaitable>
@@ -693,11 +748,27 @@ namespace coroactors::detail {
         }
 
     private:
-        struct async_task_inherited {};
+        struct inherited_t {
+            async_task* task;
+            std::optional<actor_context> caller_context;
+
+            explicit inherited_t() noexcept
+                : task(async_task::current)
+            {
+                assert(task);
+            }
+
+            explicit inherited_t(const actor_context& context) noexcept
+                : task(async_task::current)
+                , caller_context(context)
+            {
+                assert(task);
+            }
+        };
 
     private:
         std::coroutine_handle<> continuation;
-        std::variant<std::monostate, async_task_inherited, actor_context, async_task> state;
+        std::variant<std::monostate, inherited_t, async_task> state;
     };
 
     template<class T>
@@ -725,7 +796,10 @@ namespace coroactors::detail {
         template<class Promise>
         COROACTORS_AWAIT_SUSPEND
         symmetric::result_t await_suspend(std::coroutine_handle<Promise> c) noexcept {
-            handle.promise().prepare(c);
+            restore_task = handle.promise().prepare(c);
+            if (restore_task) {
+                restore_task->leave();
+            }
             return symmetric::transfer(handle);
         }
 
@@ -739,12 +813,19 @@ namespace coroactors::detail {
         }
 
     protected:
+        void resumed() noexcept {
+            if (restore_task) {
+                restore_task->enter();
+            }
+        }
+
         result<T>&& take_result() noexcept {
             return handle.promise().take_result();
         }
 
     private:
         async_handle<T> handle;
+        async_task* restore_task;
     };
 
     template<class T>
@@ -755,6 +836,7 @@ namespace coroactors::detail {
         using base::base;
 
         T await_resume() {
+            base::resumed();
             return base::take_result().take_value();
         }
     };
@@ -767,6 +849,7 @@ namespace coroactors::detail {
         using base::base;
 
         result<T> await_resume() noexcept(std::is_nothrow_move_constructible_v<result<T>>) {
+            base::resumed();
             return base::take_result();
         }
     };
