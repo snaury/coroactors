@@ -1,6 +1,5 @@
 #pragma once
 #include <coroactors/detail/config.h>
-#include <coroactors/detail/symmetric_transfer.h>
 #include <coroutine>
 #include <concepts>
 
@@ -64,12 +63,11 @@ namespace coroactors::detail {
             }
 
             COROACTORS_AWAIT_SUSPEND
-            static symmetric::result_t await_suspend(with_resume_callback_handle<Callback> h) noexcept
+            static std::coroutine_handle<> await_suspend(with_resume_callback_handle<Callback> h) noexcept
                 requires (is_resume_callback_handle<Callback>)
             {
                 auto& self = h.promise();
-                std::coroutine_handle<> c = std::move(self.callback)();
-                return symmetric::transfer(c);
+                return std::move(self.callback)();
             }
 
             static void await_resume() noexcept {}

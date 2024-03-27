@@ -3,7 +3,6 @@
 #include <coroactors/detail/async_task.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/config.h>
-#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <coroactors/result.h>
 #include <coroactors/stop_token.h>
@@ -448,7 +447,7 @@ namespace coroactors::detail {
 
             void operator()() noexcept {
                 if (auto h = sink->await_cancel(true)) {
-                    symmetric::resume(h);
+                    h.resume();
                 }
             }
         };
@@ -511,12 +510,12 @@ namespace coroactors::detail {
             bool await_ready() noexcept { return false; }
 
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(task_group_handle<T> h) noexcept {
+            std::coroutine_handle<> await_suspend(task_group_handle<T> h) noexcept {
                 auto& self = h.promise();
                 auto sink = std::move(self.sink_);
                 auto next = sink->push(std::move(self.result_));
                 h.destroy();
-                return symmetric::transfer(next);
+                return next;
             }
 
             void await_resume() noexcept {}
@@ -532,8 +531,7 @@ namespace coroactors::detail {
             token_ = std::move(token);
             inherited_locals_ = inherited_locals;
             this->result_->set_index(index);
-            symmetric::resume(
-                task_group_handle<T>::from_promise(*this));
+            task_group_handle<T>::from_promise(*this).resume();
             return index;
         }
 

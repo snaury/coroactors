@@ -2,7 +2,6 @@
 #include <coroactors/asio_awaitable.h>
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/config.h>
-#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/intrusive_ptr.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/async_result.hpp>
@@ -259,7 +258,7 @@ namespace coroactors::detail {
         void operator()(Args&&... args) {
             this->result->emplace_value(std::forward<Args>(args)...);
             if (auto c = this->result->finish()) {
-                symmetric::resume(c);
+                c.resume();
             }
         }
     };
@@ -282,7 +281,7 @@ namespace coroactors::detail {
                 this->result->emplace_value(std::forward<Args>(args)...);
             }
             if (auto c = this->result->finish()) {
-                symmetric::resume(c);
+                c.resume();
             }
         }
     };
@@ -305,7 +304,7 @@ namespace coroactors::detail {
                 this->result->emplace_value(std::forward<Args>(args)...);
             }
             if (auto c = this->result->finish()) {
-                symmetric::resume(c);
+                c.resume();
             }
         }
     };
@@ -407,7 +406,7 @@ namespace coroactors::detail {
                 if (r->begin_cancellation()) {
                     r->emit_cancellation(Options::cancel_type);
                     if (auto c = r->end_cancellation()) {
-                        symmetric::resume(c);
+                        c.resume();
                     }
                 }
             }

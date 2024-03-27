@@ -102,6 +102,14 @@ namespace coroactors::detail {
     using awaiter_type_t = decltype(get_awaiter(std::declval<Awaitable&&>()));
 
     /**
+     * The return type of an awaiter's await_suspend
+     */
+    template<class Awaiter, class Promise = void>
+        requires awaiter<Awaiter, Promise>
+    using awaiter_suspend_result_t = decltype(std::declval<Awaiter&>()
+        .await_suspend(std::declval<std::coroutine_handle<Promise>>()));
+
+    /**
      * The result type returned from an awaiter (not an awaitable)
      */
     template<class Awaiter, class Promise = void>

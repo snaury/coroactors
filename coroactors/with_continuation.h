@@ -1,5 +1,4 @@
 #pragma once
-#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/detail/with_continuation.h>
 #include <coroactors/with_continuation_error.h>
 
@@ -112,7 +111,7 @@ namespace coroactors {
         bool resume(TArgs&&... args) {
             state->set_value(std::forward<TArgs>(args)...);
             if (auto c = state->finish()) {
-                detail::symmetric::resume(c);
+                c.resume();
                 return true;
             } else {
                 return false;
@@ -129,7 +128,7 @@ namespace coroactors {
         bool resume_with_exception(E&& e) {
             state->set_exception(std::forward<E>(e));
             if (auto c = state->finish()) {
-                detail::symmetric::resume(c);
+                c.resume();
                 return true;
             } else {
                 return false;
