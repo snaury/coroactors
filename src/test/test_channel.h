@@ -26,27 +26,18 @@ public:
         coroactors::stop_token stop_token_;
     };
 
-    struct get_operation {
-        test_channel* self;
-
-        auto operator co_await() && noexcept {
-            return coroactors::with_continuation<T>(
-                [self = self, t = coroactors::detail::current_stop_token()]
-                (coroactors::continuation<T> c) mutable {
-                    std::unique_lock l(self->lock);
-                    if (self->results.empty()) {
-                        self->queue.push_back(continuation(std::move(c), std::move(t)));
-                    } else {
-                        // Note: we have not suspended yet, no risk of resuming
-                        c.resume(std::move(self->results.front()));
-                        self->results.pop_front();
-                    }
-                });
-        }
-    };
-
     auto get() {
-        return get_operation{ this };
+        return coroactors::with_continuation<T>(
+            [this](coroactors::continuation<T> c) {
+                std::unique_lock l(lock);
+                if (results.empty()) {
+                    queue.push_back(continuation(std::move(c), coroactors::detail::current_stop_token()));
+                } else {
+                    // Note: we have not suspended yet, no risk of resuming
+                    c.resume(std::move(results.front()));
+                    results.pop_front();
+                }
+            });
     }
 
     void provide(T value) {

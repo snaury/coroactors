@@ -9,8 +9,8 @@ namespace coroactors {
      */
     template<class T = void>
     class continuation {
-        template<class U>
-        friend class detail::with_continuation_awaiter;
+        template<class U, class Callback>
+        friend class detail::with_continuation_awaitable;
 
         explicit continuation(const intrusive_ptr<detail::continuation_state<T>>& state) noexcept
             : state(state)
@@ -147,11 +147,11 @@ namespace coroactors {
      * when the provided object is resumed before the callback returns.
      */
     template<class T, class Callback>
-    detail::with_continuation_awaiter<T>
+    detail::with_continuation_awaitable<T, Callback>
     with_continuation(Callback&& callback)
         requires (detail::is_with_continuation_callback<Callback, T>)
     {
-        return detail::with_continuation_awaiter<T>(std::forward<Callback>(callback));
+        return detail::with_continuation_awaitable<T, Callback>(std::forward<Callback>(callback));
     }
 
     /**
@@ -162,11 +162,11 @@ namespace coroactors {
      * when the provided object is resumed before the callback returns.
      */
     template<class Callback>
-    detail::with_continuation_awaiter<void>
+    detail::with_continuation_awaitable<void, Callback>
     with_continuation(Callback&& callback)
         requires (detail::is_with_continuation_callback<Callback, void>)
     {
-        return detail::with_continuation_awaiter<void>(std::forward<Callback>(callback));
+        return detail::with_continuation_awaitable<void, Callback>(std::forward<Callback>(callback));
     }
 
 } // namespace coroactors

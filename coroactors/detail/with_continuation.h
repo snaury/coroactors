@@ -155,12 +155,9 @@ namespace coroactors::detail {
         using status = typename continuation_state<T>::status;
 
     public:
-        template<class Callback>
-        explicit with_continuation_awaiter(Callback&& callback)
-            : state_(new continuation_state<T>())
-        {
-            std::forward<Callback>(callback)(continuation<T>(state_));
-        }
+        explicit with_continuation_awaiter(intrusive_ptr<continuation_state<T>>&& state)
+            : state_(std::move(state))
+        {}
 
         with_continuation_awaiter(const with_continuation_awaiter&) = delete;
         with_continuation_awaiter& operator=(const with_continuation_awaiter&) = delete;
@@ -207,6 +204,23 @@ namespace coroactors::detail {
 
     private:
         intrusive_ptr<continuation_state<T>> state_;
+    };
+
+    template<class T, class Callback>
+    class [[nodiscard]] with_continuation_awaitable {
+    public:
+        explicit with_continuation_awaitable(Callback&& callback)
+            : callback(std::forward<Callback>(callback))
+        {}
+
+        with_continuation_awaiter<T> operator co_await() && {
+            intrusive_ptr<continuation_state<T>> state(new continuation_state<T>());
+            std::move(callback)(continuation<T>(state));
+            return with_continuation_awaiter<T>(std::move(state));
+        };
+
+    private:
+        std::decay_t<Callback> callback;
     };
 
 } // namespace coroactors::detail

@@ -464,8 +464,9 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
                     // Expected refs:
                     // - in actor_wrapper (local variable)
                     // - in actor_with_continuation (lambda argument)
+                    // - inside with_continuation_awaitable
                     // - the original lambda temporary is not destroyed yet!
-                    EXPECT_EQ(refs, 3);
+                    EXPECT_EQ(refs, 4);
                     suspended = std::move(c);
                 }),
             &refs));
@@ -474,7 +475,7 @@ TEST(WithContinuationTest, DestroyAfterSuspend) {
     ASSERT_TRUE(suspended);
     EXPECT_TRUE(result.running());
     // One less expected ref (lambda temporary destroyed)
-    ASSERT_EQ(refs, 2);
+    ASSERT_EQ(refs, 3);
 
     // Destroy continuation
     suspended.destroy();
@@ -495,7 +496,7 @@ TEST(WithContinuationTest, DestroyFromCallback) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 3);
+                    EXPECT_EQ(refs, 4);
                     c.destroy();
                 }),
             &refs));
@@ -519,13 +520,13 @@ TEST(WithContinuationTest, DestroyBottomUp) {
             actor_with_continuation(no_actor_context, stage,
                 [&, guard = count_refs_guard{ &refs }](continuation<> c) {
                     EXPECT_EQ(stage, 2);
-                    EXPECT_EQ(refs, 3);
+                    EXPECT_EQ(refs, 4);
                     suspended = std::move(c);
                 }),
             &refs));
 
     EXPECT_EQ(stage, 2);
-    EXPECT_EQ(refs, 2);
+    EXPECT_EQ(refs, 3);
     ASSERT_TRUE(suspended);
 
     result.destroy();
