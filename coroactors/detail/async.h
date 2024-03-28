@@ -307,7 +307,7 @@ namespace coroactors::detail {
             }
 
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> c) noexcept {
+            bool await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
                 assert(task && task == c.promise().get_task());
 
@@ -323,19 +323,19 @@ namespace coroactors::detail {
 
                 if (!context) {
                     if (!async_context_manager::enter(task->context, r, !task->scheduled)) {
-                        return symmetric::noop();
+                        return true;
                     }
                 } else {
                     // We are returning from co_await most of the time
                     // But the first co_await context() is special
                     bool returning = type == ESwitchContext::Return;
                     if (!async_context_manager::transfer(context, task->context, r, returning)) {
-                        return symmetric::noop();
+                        return true;
                     }
                 }
 
                 // We continue in the same thread
-                return symmetric::self(c);
+                return false;
             }
 
             void await_resume() noexcept {
@@ -652,7 +652,7 @@ namespace coroactors::detail {
             bool await_ready() noexcept { return false; }
 
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> c) noexcept {
+            bool await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
                 assert(task && task == c.promise().get_task());
 
@@ -662,11 +662,11 @@ namespace coroactors::detail {
                 r.continuation = c;
 
                 if (!async_context_manager::yield(task->context, r)) {
-                    return symmetric::noop();
+                    return true;
                 }
 
                 // We resume in the same thread
-                return symmetric::self(c);
+                return false;
             }
 
             void await_resume() noexcept {
@@ -685,7 +685,7 @@ namespace coroactors::detail {
             bool await_ready() noexcept { return false; }
 
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> c) noexcept {
+            bool await_suspend(async_handle<T> c) noexcept {
                 async_task* task = async_task::current;
                 assert(task && task == c.promise().get_task());
 
@@ -695,12 +695,11 @@ namespace coroactors::detail {
                 r.continuation = c;
 
                 if (!async_context_manager::preempt(task->context, r)) {
-                    return symmetric::noop();
+                    return true;
                 }
 
                 // We resume in the same thread
-                task->enter();
-                return symmetric::self(c);
+                return false;
             }
 
             void await_resume() noexcept {
