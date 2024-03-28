@@ -74,7 +74,7 @@ namespace coroactors {
             auto h = std::exchange(handle, {});
             auto* restore_task = h.promise().prepare(nullptr);
             assert(!restore_task);
-            detail::symmetric::resume(h);
+            h.resume();
         }
 
         template<class Tag, class... Args>

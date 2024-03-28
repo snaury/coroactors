@@ -663,3 +663,56 @@ TEST(AsyncTest, SwitchBetweenSchedulers) {
     EXPECT_EQ(stage, 5);
     EXPECT_TRUE(r.success());
 }
+
+TEST(AsyncTest, MultipleDetachAwaitables) {
+    test_scheduler scheduler;
+
+    auto inner = [&]() -> async<void> {
+        auto* task = current_task();
+        EXPECT_NE(task, nullptr);
+        co_await no_actor_context();
+        EXPECT_EQ(current_task(), task);
+    };
+
+    actor_context context(scheduler);
+    auto body = [&]() -> async<void> {
+        auto* task = current_task();
+        EXPECT_NE(task, nullptr);
+        co_await context();
+        EXPECT_EQ(current_task(), task);
+        // This demonstrates how symmetric transfer emulation is unsafe. We are
+        // currently inside run_next, resumed by a scheduler, and running a
+        // symmetric resume loop. When we call detach_awaitable, internally it
+        // is a normal eager start coroutine, awaiting on the provided inner
+        // awaitable. When this awaitable uses symmetric transfer emulation,
+        // either to start or return, it really uses our slot from the
+        // scheduler, bypassing our frame.
+        detach_awaitable(inner());
+        EXPECT_EQ(current_task(), task);
+        // When a second detach_awaitable is called, it would try to use the
+        // slot, which is taken already. We would need to support multiple
+        // slots, which is doable with heap allocation, but quickly turns into
+        // a mini scheduler, and not anything like symmetric transfer.
+        detach_awaitable(inner());
+        EXPECT_EQ(current_task(), task);
+        // Even without the second detach_awaitable, and only using symmetric
+        // transfer emulation on the return path, our slot would be taken by
+        // the detach_awaitable above. When we wait other async tasks, we use
+        // this symmetric transfer one way or another, but it's taken already.
+        co_await [&]() -> async<void> {
+            EXPECT_EQ(current_task(), task);
+            co_return;
+        }();
+        EXPECT_EQ(current_task(), task);
+    };
+
+    auto r = packaged_awaitable(body());
+    EXPECT_TRUE(r.running());
+    ASSERT_EQ(scheduler.queue.size(), 1u);
+    EXPECT_EQ(scheduler.queue[0].deferred, false);
+    EXPECT_EQ(current_task(), nullptr);
+    scheduler.run_next();
+    EXPECT_EQ(current_task(), nullptr);
+    EXPECT_TRUE(r.success());
+    ASSERT_EQ(scheduler.queue.size(), 0u);
+}

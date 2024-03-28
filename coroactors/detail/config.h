@@ -20,13 +20,3 @@
 #ifndef COROACTORS_AWAIT_SUSPEND
 #define COROACTORS_AWAIT_SUSPEND COROACTORS_NOINLINE
 #endif
-
-/**
- * When enabled coroactors will use compiler support for symmetric transfer, or
- * symmetric transfer will be emulated otherwise. Note that many compilers
- * either don't implement symmetric transfer in all modes (e.g. gcc), or
- * implement it incorrectly which cause double free bugs (e.g. msvc).
- */
-#ifndef COROACTORS_USE_SYMMETRIC_TRANSFER
-#define COROACTORS_USE_SYMMETRIC_TRANSFER 0
-#endif

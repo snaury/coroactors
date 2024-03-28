@@ -4,7 +4,6 @@
 #include <coroactors/detail/awaiters.h>
 #include <coroactors/detail/config.h>
 #include <coroactors/detail/scope_guard.h>
-#include <coroactors/detail/symmetric_transfer.h>
 #include <coroactors/detail/tag_invoke.h>
 #include <coroactors/result.h>
 #include <coroactors/with_resume_callback.h>
@@ -66,18 +65,27 @@ namespace coroactors::detail {
         async_task* task = nullptr;
         std::coroutine_handle<> continuation;
 
+        async_context_switch_runnable() noexcept = default;
+
+        async_context_switch_runnable(async_task* task, std::coroutine_handle<> continuation)
+            : task(task)
+            , continuation(continuation)
+        {}
+
         void run() noexcept override {
             assert(task);
             task->scheduled = true;
             // Note: `this` will be destroyed inside this call
-            symmetric::resume(continuation);
+            continuation.resume();
         }
     };
 
     /**
      * A callback that restores task context before resuming a continuation
      */
-    class async_restore_task_callback : private actor_scheduler_runnable {
+    class async_restore_task_callback : private async_context_switch_runnable {
+        using async_context_switch_runnable::async_context_switch_runnable;
+
     public:
         /**
          * Wraps a given task and continuation, which is resumed in its current context
@@ -90,34 +98,20 @@ namespace coroactors::detail {
         async_restore_task_callback& operator=(const async_restore_task_callback&) = delete;
 
         async_restore_task_callback(async_restore_task_callback&& rhs) noexcept
-            : task(rhs.task)
-            , continuation(rhs.continuation)
+            : async_context_switch_runnable(rhs.task, rhs.continuation)
         {}
 
         std::coroutine_handle<> operator()() noexcept {
             if (async_context_manager::enter(task->context, *this)) {
+                // We don't know which code resumed us and where
+                // Assume the worst: we are running recursively on top of
+                // something else.
+                task->scheduled = false;
                 return continuation;
             } else {
                 return std::noop_coroutine();
             }
         }
-
-    private:
-        async_restore_task_callback(async_task* task, std::coroutine_handle<> c) noexcept
-            : task(task)
-            , continuation(c)
-        {}
-
-        void run() noexcept override {
-            assert(task);
-            task->scheduled = true;
-            // Note: `this` will be destroyed inside this call
-            symmetric::resume(continuation);
-        }
-
-    private:
-        async_task* task;
-        std::coroutine_handle<> continuation;
     };
 
     template<class T>
@@ -153,7 +147,7 @@ namespace coroactors::detail {
             static void await_resume() noexcept { /* promise destroyed */ }
 
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> h) noexcept {
+            std::coroutine_handle<> await_suspend(async_handle<T> h) noexcept {
                 auto& p = h.promise();
 
                 async_task* task = async_task::current;
@@ -173,7 +167,7 @@ namespace coroactors::detail {
                             r.continuation = p.continuation;
                             // Try to change context, when false we will resume somewhere else
                             if (!async_context_manager::transfer(from_context, task->context, r, /* returning */ true)) {
-                                return symmetric::noop();
+                                return std::noop_coroutine();
                             }
                         }
                         // We continue in the same thread, context is correct
@@ -183,6 +177,7 @@ namespace coroactors::detail {
                         // Our private task
                         actor_context from_context = std::move(task->context);
                         async_context_manager::leave(from_context);
+                        // We continue in the same thread, no context
                         break;
                     }
                     default: {
@@ -195,11 +190,11 @@ namespace coroactors::detail {
                     // Async function finished after a detach
                     // We have to destroy ourselves, since nobody is waiting
                     h.destroy();
-                    return symmetric::noop();
+                    return std::noop_coroutine();
                 }
 
                 // We return to the continuation
-                return symmetric::transfer(p.continuation);
+                return p.continuation;
             }
 
         private:
@@ -414,7 +409,7 @@ namespace coroactors::detail {
 
             // Note: we allocate a wrapper in this method, so not noexcept
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> c) {
+            awaiter_suspend_t<Awaiter> await_suspend(async_handle<T> c) {
                 async_task* task = async_task::current;
                 assert(task && task == c.promise().get_task());
 
@@ -438,33 +433,32 @@ namespace coroactors::detail {
                     restore_task = nullptr;
                 });
 
-                if constexpr (has_await_suspend_void<Awaiter>) {
+                if constexpr (has_await_suspend_handle<Awaiter>) {
+                    // Awaiter always returns some valid coroutine handle.
+                    // Note: this may be a different coroutine, even when its
+                    // address is the same (it may finish in another thread,
+                    // with the same address reused and added to some queue).
+                    // For us it's identical to awaiter always suspending.
+                    auto next = awaiter.await_suspend(std::move(k));
+                    guard.cancel();
+                    async_context_manager::leave(context);
+                    return next;
+                } else if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
                     guard.cancel();
-                } else {
-                    auto next = symmetric::intercept(
-                        awaiter.await_suspend(std::move(k)));
+                    async_context_manager::leave(context);
+                } else if constexpr (has_await_suspend_bool<Awaiter>) {
+                    // Awaiter may choose not to suspend
+                    bool suspended = awaiter.await_suspend(std::move(k));
                     guard.cancel();
-
-                    if (!next) {
-                        // Awaiter did not suspend, abort and resume
-                        return symmetric::self(c);
+                    if (!suspended) {
+                        // Awaiter did not suspend, keep current context
+                        return false;
                     }
-
-                    if (next != std::noop_coroutine()) {
-                        // Awaiter is transferring to some valid coroutine
-                        // handle. Note: this may be a different coroutine,
-                        // even when its address is the same. Treat the
-                        // original as destroyed.
-                        async_context_manager::leave(context);
-                        return symmetric::transfer(next);
-                    }
+                    async_context_manager::leave(context);
+                    return true;
                 }
-
-                // Awaiter suspended without a continuation
-                async_context_manager::leave(context);
-                return symmetric::noop();
             }
 
             Result await_resume()
@@ -534,9 +528,17 @@ namespace coroactors::detail {
 
             // Note: we allocate a wrapper in this method, so not noexcept
             COROACTORS_AWAIT_SUSPEND
-            symmetric::result_t await_suspend(async_handle<T> c) {
+            std::coroutine_handle<> await_suspend(async_handle<T> c) {
                 async_task* task = async_task::current;
                 assert(task && task == c.promise().get_task());
+
+                // The wrapped handle restores context when resumed
+                std::coroutine_handle<> k;
+                if (!ready) {
+                    // Give this a chance to throw before we setup guards,
+                    // in case everything else below is actually noexcept.
+                    k = wrapped = async_restore_task_callback::wrap(task, c);
+                }
 
                 // Prepare to resume in another thread
                 task->leave();
@@ -560,41 +562,37 @@ namespace coroactors::detail {
                 if (ready) {
                     // Awaiter's await_ready returned true, so we perform a
                     // context switch here, as if returning from the awaiter.
-                    return transfer(task, old_context);
+                    return transfer_to(old_context);
                 }
 
-                // The wrapped handle restores context when resumed
-                std::coroutine_handle<> k = wrapped =
-                    async_restore_task_callback::wrap(task, c);
-
-                if constexpr (has_await_suspend_void<Awaiter>) {
+                if constexpr (has_await_suspend_handle<Awaiter>) {
+                    // Awaiter always returns some valid coroutine handle.
+                    // Note: this may be a different coroutine, even when its
+                    // address is the same (it may finish in another thread,
+                    // with the same address reused and added to some queue).
+                    // For us it's identical to awaiter always suspending.
+                    auto next = awaiter.await_suspend(std::move(k));
+                    guard.cancel();
+                    async_context_manager::leave(old_context);
+                    return next;
+                } else if constexpr (has_await_suspend_void<Awaiter>) {
                     // Awaiter always suspends
                     awaiter.await_suspend(std::move(k));
                     guard.cancel();
-                } else {
-                    auto next = symmetric::intercept(
-                        awaiter.await_suspend(std::move(k)));
+                    async_context_manager::leave(old_context);
+                    return std::noop_coroutine();
+                } else if constexpr (has_await_suspend_bool<Awaiter>) {
+                    // Awaiter may choose not to suspend
+                    auto suspended = awaiter.await_suspend(std::move(k));
                     guard.cancel();
-
-                    if (!next) {
+                    if (!suspended) {
                         // Awaiter did not suspend, abort and resume, but also
                         // perform a context switch to the new context
-                        return transfer(task, old_context);
+                        return transfer_to(old_context);
                     }
-
-                    if (next != std::noop_coroutine()) {
-                        // Awaiter is transferring to some valid coroutine
-                        // handle. Note: this may be a different coroutine,
-                        // even when its address is the same. Treat the
-                        // original as destroyed.
-                        async_context_manager::leave(old_context);
-                        return symmetric::transfer(next);
-                    }
+                    async_context_manager::leave(old_context);
+                    return std::noop_coroutine();
                 }
-
-                // Awaiter suspended without a continuation
-                async_context_manager::leave(old_context);
-                return symmetric::noop();
             }
 
             Result await_resume()
@@ -609,13 +607,13 @@ namespace coroactors::detail {
             }
 
         private:
-            symmetric::result_t transfer(async_task* task, const actor_context& old_context) noexcept {
-                if (!async_context_manager::transfer(old_context, task->context, r, /* returning */ true)) {
-                    return symmetric::noop();
+            std::coroutine_handle<> transfer_to(const actor_context& old_context) noexcept {
+                if (!async_context_manager::transfer(old_context, r.task->context, r, /* returning */ true)) {
+                    return std::noop_coroutine();
                 }
 
                 // We continue in the same thread
-                return symmetric::self(r.continuation);
+                return r.continuation;
             }
 
         private:
@@ -794,12 +792,12 @@ namespace coroactors::detail {
 
         template<class Promise>
         COROACTORS_AWAIT_SUSPEND
-        symmetric::result_t await_suspend(std::coroutine_handle<Promise> c) noexcept {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> c) noexcept {
             restore_task = handle.promise().prepare(c);
             if (restore_task) {
                 restore_task->leave();
             }
-            return symmetric::transfer(handle);
+            return handle;
         }
 
         template<class Tag, class... Args>

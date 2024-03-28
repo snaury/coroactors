@@ -2,7 +2,6 @@
 #include <coroactors/actor_context_base.h>
 #include <coroactors/detail/async_task.h>
 #include <coroactors/detail/stop_token.h>
-#include <coroactors/detail/symmetric_transfer.h>
 
 namespace coroactors::detail {
 
@@ -34,8 +33,7 @@ namespace coroactors::detail {
             if (addr) {
                 assert(addr != reinterpret_cast<void*>(MarkerSuccess));
                 assert(addr != reinterpret_cast<void*>(MarkerFailure));
-                symmetric::resume(
-                    std::coroutine_handle<>::from_address(addr));
+                std::coroutine_handle<>::from_address(addr).resume();
             }
         }
 
