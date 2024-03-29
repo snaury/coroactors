@@ -34,8 +34,8 @@ namespace coroactors {
                 // This is safe, because we co_await all tasks before returning,
                 // and current locals are guaranteed to outlive all tasks added
                 // by the callback to task group.
-                assert(detail::async_task::current);
-                group.set_inherited_locals(detail::async_task::current->locals);
+                assert(detail::async_task::current());
+                group.set_inherited_locals(detail::async_task::current()->locals);
 
                 if constexpr (std::is_void_v<Result>) {
                     co_await callback(group);

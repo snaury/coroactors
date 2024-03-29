@@ -248,7 +248,7 @@ namespace coroactors::detail {
             }
 
             // When another task is running we use post (new parallel activity)
-            if (async_task::current != nullptr) [[unlikely]] {
+            if (async_task::current() != nullptr) [[unlikely]] {
                 context->scheduler.post(r);
                 return true;
             }
@@ -263,7 +263,7 @@ namespace coroactors::detail {
         }
 
         static void post_or_defer(actor_context_state* context, actor_scheduler_runnable* r) noexcept {
-            if (async_task::current != nullptr) [[unlikely]] {
+            if (async_task::current() != nullptr) [[unlikely]] {
                 context->scheduler.post(r);
             } else {
                 context->scheduler.defer(r);

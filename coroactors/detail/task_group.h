@@ -537,7 +537,7 @@ namespace coroactors::detail {
 
         template<class Awaitable>
         async<T> with_task(Awaitable&& awaitable) {
-            auto* task = async_task::current;
+            auto* task = async_task::current();
             assert(task);
             // Note: our coroutine body only awaits once, token can be moved
             task->token = std::move(token_);

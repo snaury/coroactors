@@ -11,7 +11,7 @@ namespace coroactors {
      */
     template<detail::awaitable Awaitable>
     async<detail::await_result_t<Awaitable>> with_stop_token(stop_token token, Awaitable awaitable) {
-        detail::async_task* task = detail::async_task::current;
+        detail::async_task* task = detail::async_task::current();
         assert(task);
 
         swap(task->token, token);

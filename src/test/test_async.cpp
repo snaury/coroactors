@@ -13,7 +13,7 @@ using namespace coroactors;
 
 namespace {
     detail::async_task* current_task() {
-        return detail::async_task::current;
+        return detail::async_task::current();
     }
 }
 

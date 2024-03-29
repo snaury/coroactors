@@ -72,8 +72,7 @@ namespace coroactors {
 
         void detach() && noexcept {
             auto h = std::exchange(handle, {});
-            auto* restore_task = h.promise().prepare(nullptr);
-            assert(!restore_task);
+            h.promise().prepare(nullptr);
             h.resume();
         }
 

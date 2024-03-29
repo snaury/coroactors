@@ -10,7 +10,7 @@ namespace coroactors::detail {
             actor_scheduler::time_point deadline,
             Awaitable awaitable)
     {
-        async_task* task = async_task::current;
+        async_task* task = async_task::current();
         assert(task);
 
         if (scheduler && !task->token.stop_requested()) [[likely]] {

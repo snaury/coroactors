@@ -25,7 +25,7 @@ namespace coroactors::detail {
     template<awaitable Awaitable>
     async<await_result_t<Awaitable>> with_task_local_impl(async_task_local binding, Awaitable awaitable) {
         // Making it an async coroutine is not very efficient, but state machine is too complex otherwise
-        async_task* task = async_task::current;
+        async_task* task = async_task::current();
         assert(task);
         with_task_local_guard guard(task, &binding);
         co_return co_await std::move(awaitable);

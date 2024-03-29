@@ -1,5 +1,6 @@
 #pragma once
 #include <coroactors/actor_context_base.h>
+#include <coroactors/detail/config.h>
 #include <coroactors/detail/stop_token.h>
 #include <coroactors/detail/tag_invoke.h>
 
@@ -19,9 +20,6 @@ namespace coroactors::detail {
     };
 
     struct async_task {
-        // Points to the top-most running task
-        static inline thread_local async_task* current{ nullptr };
-
         // Points to the next running task on the stack
         // Most of the time this is nullptr, unless tasks start recursively
         async_task* next{ nullptr };
@@ -42,16 +40,23 @@ namespace coroactors::detail {
         // should be considered parallel to current task.
         bool scheduled = false;
 
-        void enter() noexcept {
-            assert(current != this);
-            assert(next == nullptr);
-            next = current;
-            current = this;
+        COROACTORS_NOINLINE
+        static async_task* current() noexcept {
+            return current_;
         }
 
+        COROACTORS_NOINLINE
+        void enter() noexcept {
+            assert(current_ != this);
+            assert(next == nullptr);
+            next = current_;
+            current_ = this;
+        }
+
+        COROACTORS_NOINLINE
         void leave() noexcept {
-            assert(current == this);
-            current = next;
+            assert(current_ == this);
+            current_ = next;
             next = nullptr;
         }
 
@@ -76,10 +81,14 @@ namespace coroactors::detail {
             }
             return nullptr;
         }
+
+    private:
+        // Points to the top-most running task
+        static inline thread_local async_task* current_{ nullptr };
     };
 
     inline const void* find_task_local(const void* key) noexcept {
-        if (async_task* task = async_task::current) {
+        if (async_task* task = async_task::current()) {
             return task->find_local(key);
         } else {
             return nullptr;
@@ -90,7 +99,7 @@ namespace coroactors::detail {
      * Returns a stop_token of the currently running task
      */
     inline const stop_token& current_stop_token() noexcept {
-        if (async_task* task = async_task::current) {
+        if (async_task* task = async_task::current()) {
             return task->token;
         } else {
             static stop_token empty;
@@ -102,7 +111,7 @@ namespace coroactors::detail {
      * Returns an actor_context of the currently running task
      */
     inline const actor_context& current_actor_context() noexcept {
-        if (async_task* task = async_task::current) {
+        if (async_task* task = async_task::current()) {
             return task->context;
         } else {
             return no_actor_context;

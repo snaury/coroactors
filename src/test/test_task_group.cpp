@@ -157,23 +157,24 @@ TEST(TaskGroupTest, SimpleSync) {
 TEST(TaskGroupTest, SimpleMultiThreaded) {
     size_t last_step = 0;
     test_channel<int> provider;
+    const int thread_count = 10;
 
     auto result = packaged_awaitable(
         run_scenario(provider, [&]() -> Action::Any {
             auto step = ++last_step;
-            if (step <= 10) {
+            if (step <= 1 * thread_count) {
                 return Action::AddTask;
             }
-            if (step <= 20) {
+            if (step <= 2 * thread_count) {
                 return Action::AwaitTask;
             }
             return Action::Return;
         }));
 
-    ASSERT_EQ(provider.awaiters(), 10u);
-    std::latch barrier(10);
+    ASSERT_EQ(provider.awaiters(), thread_count);
+    std::latch barrier(thread_count);
     std::vector<std::thread> threads;
-    for (int i = 1; i <= 10; ++i) {
+    for (int i = 1; i <= thread_count; ++i) {
         threads.emplace_back([i, c = provider.take(), &barrier]() mutable {
             barrier.arrive_and_wait();
             c.resume(i);
@@ -185,7 +186,7 @@ TEST(TaskGroupTest, SimpleMultiThreaded) {
     ASSERT_TRUE(result.success());
     std::sort(result->begin(), result->end());
     std::vector<int> expected;
-    for (int i = 1; i <= 10; ++i) {
+    for (int i = 1; i <= thread_count; ++i) {
         expected.push_back(i);
     }
     EXPECT_EQ(*result, expected);
