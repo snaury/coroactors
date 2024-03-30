@@ -2,5 +2,6 @@
 /actor-latency-swift
 /async-overhead-cpp
 /async-overhead-swift
+/boost-context-overhead
 /scheduler-throughput-go
 *.class
