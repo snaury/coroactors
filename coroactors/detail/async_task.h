@@ -20,10 +20,6 @@ namespace coroactors::detail {
     };
 
     struct async_task {
-        // Points to the next running task on the stack
-        // Most of the time this is nullptr, unless tasks start recursively
-        async_task* next{ nullptr };
-
         // Currently active stop token for cancellation
         stop_token token;
 
@@ -47,17 +43,20 @@ namespace coroactors::detail {
 
         COROACTORS_NOINLINE
         void enter() noexcept {
-            assert(current_ != this);
-            assert(next == nullptr);
+            if (next != reinterpret_cast<void*>(InactiveMarker)) [[unlikely]] {
+                fail("cannot enter async_task more than once");
+            }
             next = current_;
             current_ = this;
         }
 
         COROACTORS_NOINLINE
         void leave() noexcept {
-            assert(current_ == this);
-            current_ = next;
-            next = nullptr;
+            if (current_ != this) [[unlikely]] {
+                fail("cannot leave async_task that is not on top of the stack");
+            }
+            current_ = reinterpret_cast<async_task*>(next);
+            next = reinterpret_cast<void*>(InactiveMarker);
         }
 
         void push_local(async_task_local* local) noexcept {
@@ -81,6 +80,21 @@ namespace coroactors::detail {
             }
             return nullptr;
         }
+
+    private:
+        /**
+         * When used in a noexcept method causes std::terminate with a message
+         */
+        [[noreturn]] static void fail(const char* message) {
+            throw std::logic_error(message);
+        }
+
+    private:
+        static constexpr uintptr_t InactiveMarker = 1;
+
+        // Points to the next running task on the stack
+        // This uses a special marker when task is not on the stack
+        void* next{ reinterpret_cast<void*>(InactiveMarker) };
 
     private:
         // Points to the top-most running task

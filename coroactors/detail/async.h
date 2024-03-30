@@ -183,8 +183,7 @@ namespace coroactors::detail {
                         break;
                     }
                     default: {
-                        assert(false && "Unexpected async promise state");
-                        std::terminate();
+                        fail("Unexpected async promise state");
                     }
                 }
 
@@ -223,8 +222,7 @@ namespace coroactors::detail {
                     return s.task;
                 }
                 default: {
-                    assert(false && "Unexpected promise state");
-                    std::terminate();
+                    fail("Unexpected async promise state");
                 }
             }
         }
@@ -240,8 +238,7 @@ namespace coroactors::detail {
                     return &t;
                 }
                 default: {
-                    assert(false && "Unexpected async promise state");
-                    std::terminate();
+                    fail("Unexpected async promise state");
                 }
             }
         }
@@ -260,8 +257,7 @@ namespace coroactors::detail {
                     return no_actor_context;
                 }
                 default: {
-                    assert(false && "Unexpected async promise state");
-                    std::terminate();
+                    fail("Unexpected async promise state");
                 }
             }
         }
@@ -280,8 +276,7 @@ namespace coroactors::detail {
                     return false;
                 }
                 default: {
-                    assert(false && "Unexpected async promise state");
-                    std::terminate();
+                    fail("Unexpected async promise state");
                 }
             }
         }
@@ -800,6 +795,14 @@ namespace coroactors::detail {
         Awaitable&& await_transform(actor_context::caller_context_t::bind_awaitable_t<Awaitable> bound) noexcept {
             inherit_async_task(bound.awaitable, get_caller_context());
             return std::move(bound.awaitable);
+        }
+
+    private:
+        /**
+         * When used in a noexcept method causes std::terminate with a message
+         */
+        [[noreturn]] static void fail(const char* message) {
+            throw std::logic_error(message);
         }
 
     private:
