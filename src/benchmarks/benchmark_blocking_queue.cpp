@@ -2,6 +2,7 @@
 #include <benchmark/benchmark.h>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <deque>
 #if HAVE_ABSEIL
 #include <absl/synchronization/mutex.h>
