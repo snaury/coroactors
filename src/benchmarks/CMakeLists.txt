@@ -15,6 +15,9 @@ target_link_libraries(benchmark_blocking_queue
     benchmark::benchmark
 )
 
+target_compile_definitions(benchmark_blocking_queue PRIVATE HAVE_ABSEIL=1)
+target_link_libraries(benchmark_blocking_queue absl::synchronization)
+
 add_executable(benchmark_mailbox benchmark_mailbox.cpp)
 
 target_link_libraries(benchmark_mailbox
