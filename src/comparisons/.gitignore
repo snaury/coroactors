@@ -3,5 +3,6 @@
 /async-overhead-cpp
 /async-overhead-swift
 /boost-context-overhead
+/coro-overhead-cpp
 /scheduler-throughput-go
 *.class

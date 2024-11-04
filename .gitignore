@@ -6,3 +6,4 @@ a.out.*
 *.o
 *.profraw
 *.profdata
+.DS_Store
