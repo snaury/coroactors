@@ -1,13 +1,16 @@
-protocol Fooer {
+protocol Fooer : Sendable {
     func foo() async
 }
 
-let g_fooer = TaskLocal<Fooer?>(wrappedValue: Optional.none)
+enum PerTaskFooer {
+    @TaskLocal
+    static var fooer: Fooer? = Optional.none
+}
 
 @inline(never)
 func foo() async {
-    if let fooer = g_fooer.get() {
-        await fooer.foo()
+    if let f = PerTaskFooer.fooer {
+        await f.foo()
     }
 }
 

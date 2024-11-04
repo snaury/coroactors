@@ -22,7 +22,8 @@ namespace coroactors {
      */
     template<class T>
     class [[nodiscard]] async {
-        friend class detail::async_promise<T>;
+        template<class U>
+        friend class detail::async_promise;
 
     private:
         explicit async(detail::async_handle<T> handle) noexcept
