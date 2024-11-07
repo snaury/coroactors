@@ -9,15 +9,35 @@ struct Fooer {
 
 Fooer* g_fooer = nullptr;
 
-coro<void> foo() {
+coro<void> foo0() {
     if (auto* fooer = g_fooer) {
         co_await fooer->foo();
     }
 }
 
+coro<void> foo1() {
+    co_await foo0();
+}
+
+coro<void> foo2() {
+    co_await foo1();
+}
+
+coro<void> foo3() {
+    co_await foo2();
+}
+
+coro<void> foo4() {
+    co_await foo3();
+}
+
+coro<void> foo5() {
+    co_await foo4();
+}
+
 coro<void> bar(int count) {
     for (int i = 0; i < count; ++i) {
-        co_await foo();
+        co_await foo5();
     }
 }
 

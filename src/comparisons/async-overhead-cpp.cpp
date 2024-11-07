@@ -11,17 +11,35 @@ struct Fooer {
 
 inline task_local<Fooer*> g_fooer;
 
-COROACTORS_NOINLINE
-async<void> foo() {
+async<void> foo0() {
     if (auto* fooer = g_fooer.get()) {
         co_await fooer->foo();
     }
 }
 
-COROACTORS_NOINLINE
+async<void> foo1() {
+    co_await foo0();
+}
+
+async<void> foo2() {
+    co_await foo1();
+}
+
+async<void> foo3() {
+    co_await foo2();
+}
+
+async<void> foo4() {
+    co_await foo3();
+}
+
+async<void> foo5() {
+    co_await foo4();
+}
+
 async<void> bar(int count) {
     for (int i = 0; i < count; ++i) {
-        co_await foo();
+        co_await foo5();
     }
 }
 

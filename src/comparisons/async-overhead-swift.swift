@@ -7,17 +7,35 @@ enum PerTaskFooer {
     static var fooer: Fooer? = Optional.none
 }
 
-@inline(never)
-func foo() async {
+func foo0() async {
     if let f = PerTaskFooer.fooer {
         await f.foo()
     }
 }
 
-@inline(never)
+func foo1() async {
+    await foo0()
+}
+
+func foo2() async {
+    await foo1()
+}
+
+func foo3() async {
+    await foo2()
+}
+
+func foo4() async {
+    await foo3()
+}
+
+func foo5() async {
+    await foo4()
+}
+
 func bar(_ count: Int) async {
     for _ in 0..<count {
-        await foo()
+        await foo5()
     }
 }
 
