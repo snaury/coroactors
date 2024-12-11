@@ -36,29 +36,63 @@ public class Program {
     }
 
     public static async Task FooN(int n) {
-        if (n > 0) {
+        if (n > 1) {
             await FooN(n - 1);
         } else {
             await Foo0();
         }
     }
 
-    public static async Task Bar(int count) {
-        for (int i = 0; i < count; ++i) {
-            await Foo5();
+    public static async Task Bar(int count, int n, bool dyn) {
+        if (dyn) {
+            for (int i = 0; i < count; ++i) {
+                await FooN(n);
+            }
+        } else {
+            switch (n) {
+            case 5:
+                for (int i = 0; i < count; ++i) {
+                    await Foo5();
+                }
+                break;
+            case 4:
+                for (int i = 0; i < count; ++i) {
+                    await Foo4();
+                }
+                break;
+            case 3:
+                for (int i = 0; i < count; ++i) {
+                    await Foo3();
+                }
+                break;
+            case 2:
+                for (int i = 0; i < count; ++i) {
+                    await Foo2();
+                }
+                break;
+            case 1:
+                for (int i = 0; i < count; ++i) {
+                    await Foo1();
+                }
+                break;
+            }
         }
     }
 
     public static async Task Main(string[] args) {
         var count = 100_000_000;
-        var sw = Stopwatch.StartNew();
 
-        await Bar(count);
+        for (int n = 1; n <= 5; ++n) {
+            for (int dyn = 0; dyn <= 1; ++dyn) {
+                var sw = Stopwatch.StartNew();
 
-        var elapsed = sw.Elapsed;
+                await Bar(count, n, dyn != 0);
 
-        var nsPerCall = (int)(elapsed.TotalNanoseconds / count);
-
-        Console.WriteLine($"Single call is {nsPerCall}ns");
+                var elapsed = sw.Elapsed;
+                var nsPerCall = (int)(elapsed.TotalNanoseconds / count);
+                var suffix = dyn != 0 ? " dynamic" : "";
+                Console.WriteLine($"Single call is {nsPerCall}ns for n={n}{suffix}");
+            }
+        }
     }
 }
